@@ -57,6 +57,10 @@ export async function POST(request: NextRequest) {
     const checkout = await stripe.checkout.sessions.create({
       mode: "subscription",
       customer: customerId,
+      // Request card explicitly so Checkout doesn't depend on the dashboard's
+      // "automatic payment methods" config (which errors if none are activated
+      // for the currency). Card works for subscriptions in every Stripe account.
+      payment_method_types: ["card"],
       line_items: [{ price: priceId, quantity: 1 }],
       allow_promotion_codes: true,
       success_url: `${origin}/app?checkout=success`,
