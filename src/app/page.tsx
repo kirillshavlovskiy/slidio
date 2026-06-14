@@ -48,7 +48,7 @@ const STEPS = [
   {
     step: "01",
     title: "Upload a deck",
-    desc: "Drop in any .pptx. DeckPilot parses every slide into selectable elements in seconds.",
+    desc: "Drop in any .pptx. Slidio parses every slide into selectable elements in seconds.",
   },
   {
     step: "02",
@@ -83,7 +83,7 @@ export default function LandingPage() {
             </span>
           </h1>
           <p className="mx-auto mt-6 max-w-2xl text-lg text-slate-400">
-            DeckPilot turns your PowerPoint into a workspace you can talk to. Select any object,
+            Slidio turns your PowerPoint into a workspace you can talk to. Select any object,
             give a few words of direction, and get a clean, on-brand edit — without opening
             PowerPoint.
           </p>
@@ -104,7 +104,7 @@ export default function LandingPage() {
               Built for the way decks actually get edited
             </h2>
             <p className="mt-3 text-slate-400">
-              Stop nudging text boxes by hand. DeckPilot gives you element-level control with the
+              Stop nudging text boxes by hand. Slidio gives you element-level control with the
               speed of natural language.
             </p>
           </div>
@@ -175,10 +175,10 @@ export default function LandingPage() {
             <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-violet-500 to-blue-500 text-white">
               <Sparkles className="h-3.5 w-3.5" />
             </span>
-            <span className="text-sm font-semibold text-white">DeckPilot</span>
+            <span className="text-sm font-semibold text-white">Slidio</span>
           </div>
           <p className="text-xs text-slate-500">
-            © {new Date().getFullYear()} DeckPilot. AI PowerPoint editing.
+            © {new Date().getFullYear()} Slidio. AI PowerPoint editing.
           </p>
           <div className="flex items-center gap-6 text-xs text-slate-400">
             <a href="#features" className="hover:text-white">

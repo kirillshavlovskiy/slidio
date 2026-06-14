@@ -17,7 +17,7 @@ export function getStripe(): Stripe {
     throw new Error("Stripe is not configured. Set STRIPE_SECRET_KEY.");
   }
   if (!cached) {
-    cached = new Stripe(key, { appInfo: { name: "DeckPilot" } });
+    cached = new Stripe(key, { appInfo: { name: "Slidio" } });
   }
   return cached;
 }

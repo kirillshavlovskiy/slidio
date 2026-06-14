@@ -4,7 +4,7 @@ import SessionProvider from '@/components/SessionProvider'
 import ErrorBoundary from '@/components/ErrorBoundary'
 
 export const metadata: Metadata = {
-  title: 'DeckPilot',
+  title: 'Slidio',
   description: 'AI-powered presentation editor',
 }
 

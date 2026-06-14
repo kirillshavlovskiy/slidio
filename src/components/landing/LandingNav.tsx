@@ -15,7 +15,7 @@ export function LandingNav() {
           <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-violet-500 to-blue-500 text-white">
             <Sparkles className="h-4 w-4" />
           </span>
-          <span className="text-lg font-semibold tracking-tight text-white">DeckPilot</span>
+          <span className="text-lg font-semibold tracking-tight text-white">Slidio</span>
         </Link>
 
         <nav className="hidden items-center gap-8 text-sm font-medium text-slate-400 md:flex">

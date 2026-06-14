@@ -78,7 +78,7 @@ export default function StartScreen({
             </svg>
           </div>
           <div>
-            <h1 className="text-base font-bold leading-tight">DeckPilot</h1>
+            <h1 className="text-base font-bold leading-tight">Slidio</h1>
             <p className="text-[11px] text-[#64748B] leading-tight">
               {userName ? `Signed in as ${userName}` : 'Your presentation portfolio'}
             </p>

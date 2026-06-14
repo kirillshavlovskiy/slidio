@@ -13,7 +13,7 @@ export default function LoginScreen() {
           </div>
         </div>
         <div>
-          <h1 className="text-2xl font-bold text-white">DeckPilot</h1>
+          <h1 className="text-2xl font-bold text-white">Slidio</h1>
           <p className="text-sm text-[#64748B] mt-1">AI-powered presentation editor</p>
         </div>
         <div className="space-y-3 text-xs text-[#475569] text-left bg-[#0d1b2a] border border-[#1e3a5f] rounded-xl p-4">

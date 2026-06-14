@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Creates the DeckPilot products + recurring prices in your Stripe account and
+ * Creates the Slidio products + recurring prices in your Stripe account and
  * prints the env lines to paste into .env.local.
  *
  * Usage:
@@ -21,8 +21,8 @@ const stripe = new Stripe(key);
 
 // Prices are in cents. Keep these in sync with src/lib/billing/plans.ts.
 const PLANS = [
-  { id: "pro", name: "DeckPilot Pro", monthly: 2000, yearly: 20000 },
-  { id: "max", name: "DeckPilot Max", monthly: 5000, yearly: 50000 },
+  { id: "pro", name: "Slidio Pro", monthly: 2000, yearly: 20000 },
+  { id: "max", name: "Slidio Max", monthly: 5000, yearly: 50000 },
 ];
 
 const mode = key.startsWith("sk_live_") ? "LIVE" : "TEST";
