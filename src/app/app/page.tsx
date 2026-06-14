@@ -1539,6 +1539,18 @@ export default function Home() {
     applySlideOp(mergeSlides(slides, selectedSlideIds))
   }, [slides, selectedSlideIds, applySlideOp])
 
+  // Change the background color of the active slide (records one undo step).
+  const updateSlideBg = useCallback(
+    (hex: string) => {
+      const clean = hex.replace('#', '').toUpperCase()
+      pushHistory()
+      setSlides(prev =>
+        prev.map(slide => (slide.id === activeSlideId ? { ...slide, bg: clean } : slide))
+      )
+    },
+    [activeSlideId, pushHistory]
+  )
+
   // Run a one-click "quick action" (split/merge/tidy…) straight through the agent.
   // Bypasses the router (we already know it's a tool-using edit) and carries a
   // Cursor-style checkpoint so the action can be reverted/edited like any message.
@@ -3334,6 +3346,8 @@ Return ONE complete "patch" (changes relative to the ORIGINAL slide data provide
                   onDuplicateSlides={duplicateSelectedSlides}
                   onSplitSlide={splitActiveSlide}
                   onMergeSlides={mergeSelectedSlides}
+                  slideBg={slides.find(s => s.id === activeSlideId)?.bg ?? 'FFFFFF'}
+                  onUpdateSlideBg={updateSlideBg}
                   quickActions={QUICK_ACTIONS}
                   quickActionCtx={{
                     slides,

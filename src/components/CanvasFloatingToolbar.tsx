@@ -63,6 +63,19 @@ export type AlignMode =
 
 const PEN_COLORS = ['#FB3B5C', '#FBBF24', '#4ADE80', '#60A5FA'] as const
 const FILL_PRESETS = ['F87171', 'F59E0B', '60A5FA', '4ADE80', 'FFFFFF', '64748B', '112236'] as const
+// Richer text palette (light → accent → dark) shown in the floating toolbar.
+const TEXT_PRESETS = [
+  'FFFFFF', 'CBD5E1', '94A3B8', '64748B', '1E293B', '0F172A',
+  'F87171', 'FB7185', 'FBBF24', 'FACC15', '4ADE80', '34D399',
+  '60A5FA', '38BDF8', 'A78BFA', 'F472B6',
+] as const
+// Common slide background colors (dark decks + light decks + brand-ish tones).
+const SLIDE_BG_PRESETS = [
+  '0D1B2A', '0F172A', '1B3A6B', '111827', '000000', '1E293B',
+  'FFFFFF', 'F8FAFC', 'F1F5F9', 'FEF3C7', 'ECFDF5', 'EFF6FF',
+] as const
+
+const normHex = (hex: string) => `#${hex.replace('#', '').toUpperCase()}`
 
 interface Props {
   containerRef: RefObject<HTMLElement | null>
@@ -89,6 +102,8 @@ interface Props {
   onDuplicateSlides: () => void
   onSplitSlide: () => void
   onMergeSlides: () => void
+  slideBg: string
+  onUpdateSlideBg: (hex: string) => void
   quickActions: QuickAction[]
   quickActionCtx: QuickActionContext
   onRunQuickAction: (action: QuickAction) => void
@@ -166,6 +181,40 @@ function Divider() {
   return <span className="w-px h-5 bg-[#1e3a5f] flex-shrink-0" />
 }
 
+// A swatch that opens the OS-native color picker for any custom color.
+function CustomColorButton({
+  value,
+  onChange,
+  title,
+  round,
+}: {
+  value: string
+  onChange: (hex: string) => void
+  title: string
+  round?: boolean
+}) {
+  return (
+    <label
+      title={title}
+      onMouseDown={e => e.preventDefault()}
+      className={`relative w-4 h-4 flex-shrink-0 cursor-pointer border border-[#334155] transition-transform hover:scale-110 ${
+        round ? 'rounded-full' : 'rounded-sm'
+      }`}
+      style={{
+        background:
+          'conic-gradient(from 0deg, #f87171, #fbbf24, #4ade80, #60a5fa, #a78bfa, #f472b6, #f87171)',
+      }}
+    >
+      <input
+        type="color"
+        value={normHex(value)}
+        onChange={e => onChange(e.target.value.replace('#', '').toUpperCase())}
+        className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+      />
+    </label>
+  )
+}
+
 function selectionLabel(elements: SlideElement[]): string {
   if (elements.length === 0) return 'Slide'
   if (elements.length > 1) return `${elements.length} elements`
@@ -200,6 +249,8 @@ export default function CanvasFloatingToolbar({
   onDuplicateSlides,
   onSplitSlide,
   onMergeSlides,
+  slideBg,
+  onUpdateSlideBg,
   quickActions,
   quickActionCtx,
   onRunQuickAction,
@@ -450,6 +501,30 @@ export default function CanvasFloatingToolbar({
             >
               <Trash2 className="w-3.5 h-3.5" />
             </ToolBtn>
+          </div>
+          <Divider />
+          {/* Slide background color */}
+          <div className="flex items-center gap-1 flex-wrap max-w-[176px]">
+            <span className="text-[10px] text-[#64748b] pr-0.5 flex-shrink-0">BG</span>
+            {SLIDE_BG_PRESETS.map(hex => (
+              <button
+                key={hex}
+                type="button"
+                title={`Slide background #${hex}`}
+                onClick={() => onUpdateSlideBg(hex)}
+                className={`w-4 h-4 rounded-sm border transition-transform hover:scale-110 ${
+                  slideBg.replace('#', '').toUpperCase() === hex
+                    ? 'border-[#60a5fa] ring-1 ring-[#60a5fa]'
+                    : 'border-[#334155]'
+                }`}
+                style={{ backgroundColor: `#${hex}` }}
+              />
+            ))}
+            <CustomColorButton
+              title="Custom slide background"
+              value={slideBg}
+              onChange={onUpdateSlideBg}
+            />
           </div>
         </>
       )}
@@ -719,6 +794,11 @@ export default function CanvasFloatingToolbar({
                 style={{ backgroundColor: `#${hex}` }}
               />
             ))}
+            <CustomColorButton
+              title="Custom fill color"
+              value={elementFillHex(single)}
+              onChange={applyFill}
+            />
           </div>
         </>
       )}
@@ -740,6 +820,11 @@ export default function CanvasFloatingToolbar({
                 style={{ backgroundColor: `#${hex}` }}
               />
             ))}
+            <CustomColorButton
+              title="Custom chip fill"
+              value={single.style.bg ?? 'FFFFFF'}
+              onChange={hex => onUpdateElement(single.id, { style: { bg: hex } })}
+            />
           </div>
         </>
       )}
@@ -748,8 +833,8 @@ export default function CanvasFloatingToolbar({
       {!annotationMode && single?.type === 'text' && (
         <>
           <Divider />
-          <div className="flex items-center gap-1">
-            {['FFFFFF', 'CBD5E1', '64748B', 'F87171', 'FBBF24', '60A5FA'].map(hex => (
+          <div className="flex items-center gap-1 flex-wrap max-w-[176px]">
+            {TEXT_PRESETS.map(hex => (
               <button
                 key={hex}
                 type="button"
@@ -761,6 +846,12 @@ export default function CanvasFloatingToolbar({
                 style={{ backgroundColor: `#${hex}` }}
               />
             ))}
+            <CustomColorButton
+              title="Custom text color"
+              round
+              value={elementTextHex(single)}
+              onChange={hex => onUpdateElement(single.id, { style: { color: hex } })}
+            />
           </div>
         </>
       )}
