@@ -30,7 +30,7 @@ if (!authToken) {
 
 console.error("Generating schema SQL from prisma/schema.prisma...");
 const raw = execSync(
-  "npx prisma migrate diff --from-empty --to-schema-datamodel prisma/schema.prisma --script",
+  "npx prisma migrate diff --from-empty --to-schema prisma/schema.prisma --script",
   { encoding: "utf8" }
 );
 
