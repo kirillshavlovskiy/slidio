@@ -1,0 +1,404 @@
+================================================================================
+  PPTX AI EDITOR — FULL PIPELINE DESCRIPTION
+  Last updated: conversational interaction layer added
+================================================================================
+
+PURPOSE
+-------
+A Next.js web app that lets users edit PowerPoint presentations through natural
+language conversation and visual element selection. Claude (claude-opus-4-5) acts
+as both the conversation partner and the edit engine. It can ask clarifying
+questions, offer options, and when ready, return a precise JSON patch.
+No scripts are generated per change. No patch library is needed.
+Claude IS the patch engine AND the conversation agent.
+
+
+================================================================================
+  FILE STRUCTURE
+================================================================================
+
+pptx-editor/
+├── PIPELINE.txt                        ← this file
+├── package.json
+├── tsconfig.json
+├── tailwind.config.ts
+├── postcss.config.js
+├── next.config.js
+├── .env.local                          ← ANTHROPIC_API_KEY goes here
+└── src/
+    ├── app/
+    │   ├── globals.css
+    │   ├── layout.tsx
+    │   ├── page.tsx                    ← main orchestrator, all state lives here
+    │   └── api/
+    │       ├── edit/route.ts           ← Claude API: conversation → patch or question
+    │       └── render/route.ts         ← pptxgenjs: slides.json → .pptx download
+    ├── components/
+    │   ├── SlidePanel.tsx              ← slide thumbnail list, click to activate
+    │   ├── SlideCanvas.tsx             ← visual CSS preview, click to select elements
+    │   ├── ChatPanel.tsx               ← conversation UI: bubbles + option buttons
+    │   └── DiffViewer.tsx              ← patch preview bar: Apply / Discard
+    └── lib/
+        ├── types.ts                    ← all TypeScript types
+        └── slides.json                 ← source of truth for slide content
+
+
+================================================================================
+  DATA MODEL — slides.json (source of truth)
+================================================================================
+
+The presentation lives in src/lib/slides.json — NOT in a .pptx file.
+The .pptx is generated on demand from this JSON.
+
+Structure:
+  {
+    "slides": [
+      {
+        "id": "slide-1",           // unique slide ID
+        "bg": "0D1B2A",            // background hex (no # prefix)
+        "elements": [
+          {
+            "id": "s1-headline-1", // unique element ID — NEVER changes
+            "type": "text",        // text | rect | chip | bar
+            "content": "Two Systems.",
+            "x": 0.5,              // position in PPTX inches (slide = 10 x 7.5 in)
+            "y": 1.15,
+            "w": 9.0,
+            "h": 0.85,
+            "style": {
+              "fontSize": 48,
+              "bold": true,
+              "color": "FFFFFF",   // hex no # prefix
+              "align": "left"      // left | center | right
+            }
+          }
+        ]
+      }
+    ]
+  }
+
+Element types:
+  text  — text box rendered with pptxgenjs addText()
+  rect  — colored rectangle with optional text overlay
+  chip  — small badge/tag (rect with centered text, slightly rounded)
+  bar   — thin accent line, no text (h ≈ 0.04in, used for color accents)
+
+Key rule: element IDs are permanent. Claude never changes them, never adds or
+removes elements unless explicitly instructed.
+
+
+================================================================================
+  TYPE SYSTEM — src/lib/types.ts
+================================================================================
+
+ElementStyle         — fontSize, bold, italic, color, bg, align, valign, charSpacing
+SlideElement         — id, type, content, x, y, w, h, style
+SlideData            — id, bg, elements[]
+Change               — slideId, elementId?, patch?, slidePatch?
+
+── Claude response discriminated union ──────────────────────────────────────────
+
+PatchResponse        — { type: "patch", changes: Change[], summary: string }
+ClarificationResponse— { type: "clarification", question: string, options?: ClarificationOption[] }
+ClaudeResponse       — PatchResponse | ClarificationResponse
+
+ClarificationOption  — { id: string, label: string, description?: string }
+
+── Conversation ─────────────────────────────────────────────────────────────────
+
+ConversationMessage  — { role: "user" | "assistant", content: string }
+  For assistant messages, content = JSON.stringify(ClaudeResponse)
+  This is what gets sent to the Claude API in messages[]
+
+DisplayMessage       — { role, text?, response? }
+  text     = plain string for user bubbles
+  response = parsed ClaudeResponse for assistant bubbles
+  This is what ChatPanel renders — separate from the raw API history
+
+
+================================================================================
+  FULL EDIT PIPELINE — step by step
+================================================================================
+
+STEP 1 — USER INPUT
+  File: src/app/page.tsx
+  Three-panel layout:
+    LEFT   — slide thumbnail list (SlidePanel)
+    CENTER — slide canvas: visual CSS preview of active slide (SlideCanvas)
+    RIGHT  — chat panel: conversation UI (ChatPanel)
+
+  User actions:
+    a) Click element on canvas → adds its ID to selectedElementIds[]
+       (multiple elements can be selected; each click toggles)
+    b) Click slide thumbnail → sets activeSlideId, clears selection
+    c) Type message in chat input + press Enter or → button
+    d) Click an option button in a clarification response (see Step 3b)
+
+STEP 2 — SCOPE DETERMINATION
+  File: src/app/page.tsx → callApi()
+  Always scopes to the active slide's JSON (scopeSlides).
+  selectedElementIds are passed separately so Claude knows which elements
+  the user pointed at on the canvas.
+
+  Payload sent to POST /api/edit:
+    {
+      "messages": [ ...ConversationMessage[] ],  // full conversation history
+      "selectedElementIds": ["s1-headline-1"],   // canvas selection (may be empty)
+      "scopeSlides": [ ...active slide JSON ],   // slide context for Claude
+      "allSlides": [ ...full deck ]              // available if Claude needs it
+    }
+
+STEP 3a — CLAUDE RETURNS A PATCH (knows what to do)
+  File: src/app/api/edit/route.ts
+  Claude returns:
+    {
+      "type": "patch",
+      "changes": [
+        {
+          "slideId": "slide-1",
+          "elementId": "s1-headline-1",
+          "patch": { "style": { "fontSize": 56, "color": "F59E0B" } }
+        }
+      ],
+      "summary": "Headline font increased 48→56pt, color changed to gold"
+    }
+
+  For slide-level changes (e.g. background color):
+    { "slideId": "slide-1", "slidePatch": { "bg": "1B3A6B" } }
+
+  page.tsx receives the patch → sets pendingChanges + pendingSummary
+  → DiffViewer appears below the canvas
+
+STEP 3b — CLAUDE ASKS A CLARIFICATION QUESTION (instruction is ambiguous)
+  File: src/app/api/edit/route.ts
+  Claude returns:
+    {
+      "type": "clarification",
+      "question": "Which change do you want to make to the headline?",
+      "options": [
+        { "id": "A", "label": "Make font larger (48→64pt)" },
+        { "id": "B", "label": "Change color to gold (#F59E0B)" },
+        { "id": "C", "label": "Both size and color" }
+      ]
+    }
+
+  Options are optional. If absent, user types a free-form reply.
+  ChatPanel renders the question + clickable option buttons.
+
+  When user clicks an option:
+    → formatted as "Option B: Change color to gold (#F59E0B)"
+    → appended to conversationHistory as a user message
+    → callApi() fires again with the updated history
+    → Claude now has full context and returns a patch
+
+STEP 4 — CONVERSATION HISTORY MANAGEMENT
+  File: src/app/page.tsx
+  Two parallel arrays maintained:
+
+  conversationHistory: ConversationMessage[]
+    — raw messages sent to Claude API
+    — assistant messages stored as JSON.stringify(ClaudeResponse)
+    — grows with every user send and every Claude reply
+    — passed as messages[] in every API call so Claude sees full context
+
+  display: DisplayMessage[]
+    — what ChatPanel renders
+    — user messages: { role: "user", text: "..." }
+    — assistant messages: { role: "assistant", response: ClaudeResponse }
+    — rendered as UserBubble or AssistantBubble components
+
+  After applyChanges():
+    — "Changes applied." appended to conversationHistory
+    — Claude's next turn starts fresh: "Done ✓ What would you like to change next?"
+    — conversation continues naturally without losing prior context
+
+STEP 5 — DIFF BAR (DiffViewer.tsx)
+  Shown when pendingChanges is non-null (i.e. Claude returned a patch).
+  Displays: summary sentence + number of elements affected.
+  Two buttons:
+    [Apply ✓]  — calls applyChanges(), merges patch, clears diff bar
+    [Discard]  — clears pendingChanges, no changes made
+
+  Nothing is applied to slides until user explicitly clicks Apply.
+
+STEP 6 — PATCH MERGE
+  File: src/app/page.tsx → applyChanges()
+  Saves current slides to slideHistory[] (for revert), then:
+
+    for each change in pendingChanges:
+      slide = slides.find(s.id === change.slideId)
+      if change.elementId:
+        el = slide.elements.find(e.id === change.elementId)
+        Object.assign(el, change.patch)
+        Object.assign(el.style, change.patch.style)   // deep merge style only
+      else if change.slidePatch:
+        Object.assign(slide, change.slidePatch)
+
+  Plain Object.assign — no library, no eval, no file writes.
+
+STEP 7 — CANVAS RE-RENDER (SlideCanvas.tsx)
+  React state update triggers re-render automatically.
+  Canvas maps PPTX inches → pixels at 96px/inch scale (slide = 960×720px).
+  Selected elements show a blue border overlay.
+  What you see ≈ what the PPTX will look like.
+
+STEP 8 — REVERT
+  File: src/app/page.tsx → revert()
+  slideHistory[] is a stack of deep-copied slide snapshots.
+  Each Apply pushes a snapshot. Revert pops and restores. Unlimited depth.
+
+STEP 9 — PPTX DOWNLOAD
+  File: src/app/api/render/route.ts
+  POST /api/render receives full slides JSON.
+  Server-side pptxgenjs iterates slides and elements:
+    text  → s.addText(content, { x, y, w, h, ...style })
+    rect  → s.addShape(RECTANGLE) + s.addText() for content
+    chip  → s.addShape(RECTANGLE) + s.addText() centered
+    bar   → s.addShape(RECTANGLE, h=0.04, no text)
+  Returns binary Buffer as application/vnd.openxmlformats... attachment.
+
+
+================================================================================
+  API ROUTES
+================================================================================
+
+POST /api/edit
+  Input:  { messages, selectedElementIds, scopeSlides, allSlides }
+  Output: ClaudeResponse — either PatchResponse or ClarificationResponse
+  Logic:  Injects slide context into last user message → calls Claude with
+          full messages[] array → parses JSON response → returns to client
+
+POST /api/render
+  Input:  { slides: SlideData[] }
+  Output: Binary .pptx file download
+  Logic:  pptxgenjs (Node.js only) renders slides → returns Buffer
+
+
+================================================================================
+  COMPONENT RESPONSIBILITIES
+================================================================================
+
+page.tsx
+  — Holds ALL state: slides, activeSlideId, selectedElementIds,
+    conversationHistory, display, pendingChanges, slideHistory
+  — Calls /api/edit, handles response, routes to DiffViewer or ChatPanel
+  — applyChanges(), revert(), downloadPptx()
+  — Single source of truth for the entire session
+
+SlidePanel.tsx
+  — Renders slide list as numbered buttons
+  — Highlights active slide
+  — onClick → setActiveSlideId in page.tsx
+
+SlideCanvas.tsx
+  — Renders active slide as 960×720px CSS div
+  — Each element = absolutely positioned <div> with inline styles
+  — Click element → toggles selection (blue border overlay)
+  — Click canvas background → clears all selections
+
+ChatPanel.tsx
+  — Receives display[] from page.tsx (no internal message state)
+  — Renders UserBubble (right-aligned, blue) or AssistantBubble (left-aligned)
+  — AssistantBubble switches on response.type:
+      "patch"         → green card "READY TO APPLY" with summary
+      "clarification" → teal card with question + clickable option buttons
+  — onSend(text) → page.tsx handleSend()
+  — onPickOption(option) → page.tsx handlePickOption() → handleSend()
+
+DiffViewer.tsx
+  — Shown only when pendingChanges is non-null
+  — Green bar below canvas: summary + affected count + Apply/Discard buttons
+  — onApply → page.tsx applyChanges()
+  — onDiscard → page.tsx clears pendingChanges
+
+
+================================================================================
+  KEY DESIGN DECISIONS
+================================================================================
+
+1. CLAUDE IS BOTH AGENT AND PATCH ENGINE
+   Claude handles ambiguity by asking questions (clarification) and handles
+   clear instructions by returning patches. Same API call, same endpoint,
+   same response parsing — just different type field.
+
+2. TWO ARRAYS: conversationHistory vs display
+   conversationHistory[] = raw API messages (what Claude sees)
+   display[] = parsed UI messages (what the user sees)
+   Keeping them separate means the UI can render rich components (option buttons,
+   patch cards) while Claude receives clean JSON strings as message content.
+
+3. CONTEXT INJECTED INTO LAST USER MESSAGE ONLY
+   Slide JSON is NOT sent in the system prompt (it changes per slide).
+   It's appended to the last user message as a context block.
+   This keeps the system prompt stable (cacheable) and the context fresh.
+
+4. NO SCRIPTS PER CHANGE
+   Claude returns structured JSON, not executable code.
+   Merge is plain Object.assign — auditable, reversible, zero security risk.
+
+5. NO PATCH LIBRARY
+   Custom patch shape is simpler than RFC 6902. Claude knows the schema.
+   Merge logic is 10 lines — easy to debug and extend.
+
+6. PREVIEW BEFORE APPLY (human in the loop)
+   Every patch surfaces in DiffViewer before touching slides state.
+   Clarifications never touch slides at all.
+   User always has full control: Apply, Discard, or Revert.
+
+7. SCOPE LIMITING = COST + SAFETY
+   Only active slide JSON sent to Claude (not full deck unless needed).
+   Reduces token cost. Prevents Claude from touching unintended slides.
+
+8. SLIDES.JSON IS THE SOURCE OF TRUTH
+   .pptx is a rendered artifact. JSON can be version-controlled, diffed,
+   extended with metadata, saved to a database, or imported/exported.
+
+9. CONVERSATION PERSISTS ACROSS CHANGES
+   After each Apply, "Changes applied." is added to history.
+   Claude retains full context of what was asked, what was proposed,
+   what was approved — enabling multi-turn editing sessions like:
+   "now do the same to slide 3" or "actually make it even larger"
+
+
+================================================================================
+  EXTENDING THE PIPELINE
+================================================================================
+
+ADD A NEW ELEMENT TYPE
+  1. types.ts — add to SlideElement.type union
+  2. SlideCanvas.tsx — add CSS rendering case
+  3. api/render/route.ts — add pptxgenjs rendering case
+  4. api/edit/route.ts — add type to system prompt description
+
+ADD SLIDE-LEVEL OPERATIONS (add/delete/reorder slides)
+  Extend Change type: { op: "addSlide" | "deleteSlide" | "reorderSlide", ... }
+  Handle in page.tsx applyChanges() with array operations on slides[]
+
+LOAD EXISTING PPTX
+  Add /api/import route: parse .pptx → convert to slides.json format
+  (pptxgenjs read mode or officegen)
+
+SAVE TO DATABASE
+  Replace static slides.json import with /api/slides/[id] fetch
+  Add autosave on every Apply (POST updated JSON to backend)
+
+MULTI-PRESENTATION SUPPORT
+  Add presentation selector UI, store multiple slides.json per user
+
+PDF / IMAGE EXPORT
+  Add /api/export/pdf using LibreOffice headless or a cloud API
+  Add /api/export/png per slide using puppeteer or playwright
+
+
+================================================================================
+  RUNNING THE APP
+================================================================================
+
+  1. cd C:\Users\KirillShavlovskiy\pptx-editor
+  2. Edit .env.local — set ANTHROPIC_API_KEY=sk-ant-...
+  3. npm install
+  4. npm run dev
+  5. Open http://localhost:3000
+
+
+================================================================================

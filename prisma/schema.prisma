@@ -1,0 +1,157 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+// NextAuth required tables
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String?
+  access_token      String?
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?
+  session_state     String?
+  user              User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model User {
+  id              String            @id @default(cuid())
+  name            String?
+  email           String?           @unique
+  emailVerified   DateTime?
+  image           String?
+  accounts        Account[]
+  sessions        Session[]
+  presentations   Presentation[]
+  knowledgeLayers KnowledgeLayer[]
+  branches        KnowledgeBranch[]
+  // Billing (Stripe)
+  plan               String    @default("free")
+  stripeCustomerId   String?   @unique
+  subscriptionId     String?
+  subscriptionStatus String?
+  currentPeriodStart DateTime?
+  currentPeriodEnd   DateTime?
+  usageRecords       UsageRecord[]
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+}
+
+// A "knowledge branch" groups presentations that share the same knowledge
+// layers and design system. Creating a presentation either starts a new
+// branch or joins an existing one.
+model KnowledgeBranch {
+  id              String           @id @default(cuid())
+  userId          String
+  user            User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name            String           @default("Untitled Branch")
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+  presentations   Presentation[]
+  knowledgeLayers KnowledgeLayer[]
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// App models
+model Presentation {
+  id                  String           @id @default(cuid())
+  userId              String
+  user                User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  branchId            String?
+  branch              KnowledgeBranch? @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  name                String           @default("Untitled Presentation")
+  slides              String // JSON string
+  conversationHistory String         @default("[]") // JSON: ConversationMessage[]
+  activeSlideId       String?
+  createdAt           DateTime       @default(now())
+  updatedAt           DateTime       @updatedAt
+  versions            SlideVersion[]
+  decisions           DecisionRecord[]
+}
+
+model SlideVersion {
+  id              String       @id @default(cuid())
+  presentationId  String
+  presentation    Presentation @relation(fields: [presentationId], references: [id], onDelete: Cascade)
+  branchId        String?  // deck-timeline branch this snapshot belongs to
+  branchLabel     String?  // denormalized branch name (rebuilds the branch list on load)
+  parentVersionId String?  // predecessor in the timeline tree
+  isBranchRoot    Boolean  @default(false)
+  label          String?
+  changeLog      String
+  slides         String // JSON string
+  decisionId     String?
+  slideCount     Int
+  changedSlideIds String // JSON string (array)
+  createdAt      DateTime     @default(now())
+}
+
+model KnowledgeLayer {
+  id        String           @id @default(cuid())
+  userId    String
+  user      User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  branchId  String?
+  branch    KnowledgeBranch? @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  type      String // style | terminology | stakeholder | workspace | custom
+  name      String
+  content   String
+  enabled   Boolean  @default(true)
+  source    String? // manual | template | inferred
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// Per-billing-period token usage. One row per user per period; usage "resets"
+// automatically when the periodKey changes (new Stripe cycle or new month).
+model UsageRecord {
+  id         String   @id @default(cuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  periodKey  String
+  tokensUsed Int      @default(0)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([userId, periodKey])
+}
+
+model DecisionRecord {
+  id                 String       @id @default(cuid())
+  presentationId     String
+  presentation       Presentation @relation(fields: [presentationId], references: [id], onDelete: Cascade)
+  instruction        String
+  proposedSummary    String
+  proposedChanges    String // JSON string
+  status             String       @default("pending") // accepted | rejected | pending
+  rejectionReason    String? // why the user rejected (optional, scopes the memory)
+  slideIds           String // JSON string
+  selectedElementIds String // JSON string
+  snapshotBefore     String? // JSON string
+  createdAt          DateTime     @default(now())
+}

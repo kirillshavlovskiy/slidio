@@ -1,0 +1,401 @@
+'use client'
+import { useMemo, useState } from 'react'
+import {
+  Plus,
+  FileText,
+  Clock,
+  LogOut,
+  Pencil,
+  Trash2,
+  X,
+  GitBranch,
+  Check,
+} from 'lucide-react'
+import { KnowledgeBranch, PresentationSummary } from '@/lib/types'
+
+interface Props {
+  branches: KnowledgeBranch[]
+  presentations: PresentationSummary[]
+  userName?: string | null
+  loading?: boolean
+  onOpen: (presentationId: string) => void
+  onCreate: (opts: { name: string; branchId?: string; newBranchName?: string }) => void
+  onRenameBranch: (id: string, name: string) => void
+  onDeleteBranch: (id: string) => void
+  onSignOut: () => void
+}
+
+function timeAgo(iso: string): string {
+  const t = new Date(iso).getTime()
+  if (!t) return ''
+  const diff = Date.now() - t
+  const m = Math.floor(diff / 60000)
+  if (m < 1) return 'just now'
+  if (m < 60) return `${m}m ago`
+  const h = Math.floor(m / 60)
+  if (h < 24) return `${h}h ago`
+  const d = Math.floor(h / 24)
+  if (d < 30) return `${d}d ago`
+  return new Date(t).toLocaleDateString()
+}
+
+export default function StartScreen({
+  branches,
+  presentations,
+  userName,
+  loading,
+  onOpen,
+  onCreate,
+  onRenameBranch,
+  onDeleteBranch,
+  onSignOut,
+}: Props) {
+  const [showCreate, setShowCreate] = useState(false)
+  const [renamingId, setRenamingId] = useState<string | null>(null)
+  const [renameValue, setRenameValue] = useState('')
+
+  const byBranch = useMemo(() => {
+    const map = new Map<string, PresentationSummary[]>()
+    for (const p of presentations) {
+      const key = p.branchId || '__none__'
+      const list = map.get(key) || []
+      list.push(p)
+      map.set(key, list)
+    }
+    return map
+  }, [presentations])
+
+  const orphans = byBranch.get('__none__') || []
+
+  return (
+    <div className="h-screen overflow-auto bg-[#060d1a] text-white">
+      {/* Header */}
+      <header className="sticky top-0 z-10 flex items-center justify-between gap-3 px-6 py-4 bg-[#060d1a]/90 backdrop-blur border-b border-[#13243a]">
+        <div className="flex items-center gap-3">
+          <div className="w-9 h-9 rounded-xl bg-[#0d1b2a] border border-[#1e3a5f] flex items-center justify-center">
+            <svg className="w-5 h-5 text-violet-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+            </svg>
+          </div>
+          <div>
+            <h1 className="text-base font-bold leading-tight">DeckPilot</h1>
+            <p className="text-[11px] text-[#64748B] leading-tight">
+              {userName ? `Signed in as ${userName}` : 'Your presentation portfolio'}
+            </p>
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setShowCreate(true)}
+            className="flex items-center gap-1.5 bg-violet-600 hover:bg-violet-500 text-white text-sm font-semibold px-3.5 py-2 rounded-lg transition-colors"
+          >
+            <Plus className="w-4 h-4" /> New presentation
+          </button>
+          <button
+            onClick={onSignOut}
+            title="Sign out"
+            className="flex items-center gap-1.5 text-[#64748B] hover:text-white text-xs px-2.5 py-2 rounded-lg hover:bg-[#0d1b2a] transition-colors"
+          >
+            <LogOut className="w-4 h-4" />
+          </button>
+        </div>
+      </header>
+
+      <main className="max-w-5xl mx-auto px-6 py-8">
+        <div className="mb-6">
+          <h2 className="text-lg font-semibold">Knowledge Hubs</h2>
+          <p className="text-xs text-[#64748B] mt-1">
+            A Knowledge Hub is a shared workspace — like a Git repo for presentations.
+            Decks in a hub share its knowledge, design system, and history, so a team can
+            read, edit, and build on the same context together.
+          </p>
+        </div>
+
+        {loading ? (
+          <div className="flex items-center justify-center py-20">
+            <div className="w-7 h-7 border-2 border-violet-400 border-t-transparent rounded-full animate-spin" />
+          </div>
+        ) : (
+          <div className="space-y-6">
+            {branches.map(branch => {
+              const decks = byBranch.get(branch.id) || []
+              return (
+                <section
+                  key={branch.id}
+                  className="rounded-2xl border border-[#13243a] bg-[#0a1525] overflow-hidden"
+                >
+                  <div className="flex items-center justify-between gap-3 px-5 py-3.5 border-b border-[#13243a] bg-[#0d1b2a]/60">
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <GitBranch className="w-4 h-4 text-violet-400 shrink-0" />
+                      {renamingId === branch.id ? (
+                        <form
+                          onSubmit={e => {
+                            e.preventDefault()
+                            if (renameValue.trim()) onRenameBranch(branch.id, renameValue.trim())
+                            setRenamingId(null)
+                          }}
+                          className="flex items-center gap-1.5"
+                        >
+                          <input
+                            autoFocus
+                            value={renameValue}
+                            onChange={e => setRenameValue(e.target.value)}
+                            className="bg-[#060d1a] border border-[#1e3a5f] rounded px-2 py-1 text-sm text-white outline-none focus:border-violet-500"
+                          />
+                          <button type="submit" className="text-green-400 hover:text-green-300">
+                            <Check className="w-4 h-4" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setRenamingId(null)}
+                            className="text-[#64748B] hover:text-white"
+                          >
+                            <X className="w-4 h-4" />
+                          </button>
+                        </form>
+                      ) : (
+                        <>
+                          <h3 className="text-sm font-semibold truncate">{branch.name}</h3>
+                          <span className="text-[11px] text-[#64748B] shrink-0">
+                            {decks.length} deck{decks.length !== 1 ? 's' : ''}
+                          </span>
+                          <button
+                            onClick={() => {
+                              setRenamingId(branch.id)
+                              setRenameValue(branch.name)
+                            }}
+                            className="text-[#475569] hover:text-white transition-colors"
+                            title="Rename hub"
+                          >
+                            <Pencil className="w-3.5 h-3.5" />
+                          </button>
+                        </>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <button
+                        onClick={() => onCreate({ name: '', branchId: branch.id })}
+                        className="flex items-center gap-1 text-xs text-violet-300 hover:text-white hover:bg-[#1e3a5f]/50 px-2 py-1 rounded transition-colors"
+                      >
+                        <Plus className="w-3.5 h-3.5" /> New deck
+                      </button>
+                      {decks.length === 0 && (
+                        <button
+                          onClick={() => onDeleteBranch(branch.id)}
+                          className="text-[#475569] hover:text-red-400 px-1.5 py-1 rounded transition-colors"
+                          title="Delete empty hub"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {decks.length === 0 ? (
+                    <div className="px-5 py-6 text-center text-xs text-[#475569]">
+                      No presentations yet — create one to populate this hub.
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 p-4">
+                      {decks.map(deck => (
+                        <button
+                          key={deck.id}
+                          onClick={() => onOpen(deck.id)}
+                          className="group text-left rounded-xl border border-[#13243a] bg-[#0d1b2a] hover:border-violet-500/60 hover:bg-[#11203a] transition-colors p-4"
+                        >
+                          <div className="flex items-start gap-2.5">
+                            <div className="w-9 h-9 rounded-lg bg-[#13243a] group-hover:bg-violet-600/20 flex items-center justify-center shrink-0 transition-colors">
+                              <FileText className="w-4 h-4 text-violet-300" />
+                            </div>
+                            <div className="min-w-0">
+                              <div className="text-sm font-medium truncate">{deck.name}</div>
+                              <div className="flex items-center gap-1 text-[11px] text-[#64748B] mt-1">
+                                <Clock className="w-3 h-3" /> {timeAgo(deck.updatedAt)}
+                              </div>
+                            </div>
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </section>
+              )
+            })}
+
+            {orphans.length > 0 && (
+              <section className="rounded-2xl border border-[#13243a] bg-[#0a1525] p-4">
+                <h3 className="text-sm font-semibold mb-3 px-1">Unassigned presentations</h3>
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                  {orphans.map(deck => (
+                    <button
+                      key={deck.id}
+                      onClick={() => onOpen(deck.id)}
+                      className="group text-left rounded-xl border border-[#13243a] bg-[#0d1b2a] hover:border-violet-500/60 transition-colors p-4"
+                    >
+                      <div className="text-sm font-medium truncate">{deck.name}</div>
+                      <div className="flex items-center gap-1 text-[11px] text-[#64748B] mt-1">
+                        <Clock className="w-3 h-3" /> {timeAgo(deck.updatedAt)}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </section>
+            )}
+
+            {branches.length === 0 && orphans.length === 0 && (
+              <div className="rounded-2xl border border-dashed border-[#1e3a5f] py-16 text-center">
+                <p className="text-sm text-[#64748B]">No presentations yet.</p>
+                <button
+                  onClick={() => setShowCreate(true)}
+                  className="mt-3 inline-flex items-center gap-1.5 bg-violet-600 hover:bg-violet-500 text-white text-sm font-semibold px-4 py-2 rounded-lg transition-colors"
+                >
+                  <Plus className="w-4 h-4" /> Create your first presentation
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+      </main>
+
+      {showCreate && (
+        <CreateDialog
+          branches={branches}
+          onClose={() => setShowCreate(false)}
+          onCreate={opts => {
+            onCreate(opts)
+            setShowCreate(false)
+          }}
+        />
+      )}
+    </div>
+  )
+}
+
+function CreateDialog({
+  branches,
+  onClose,
+  onCreate,
+}: {
+  branches: KnowledgeBranch[]
+  onClose: () => void
+  onCreate: (opts: { name: string; branchId?: string; newBranchName?: string }) => void
+}) {
+  const [name, setName] = useState('')
+  const [mode, setMode] = useState<'existing' | 'new'>(branches.length > 0 ? 'existing' : 'new')
+  const [branchId, setBranchId] = useState(branches[0]?.id || '')
+  const [newBranchName, setNewBranchName] = useState('')
+
+  const canSubmit = mode === 'existing' ? !!branchId : !!newBranchName.trim()
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-md rounded-2xl border border-[#1e3a5f] bg-[#0d1b2a] p-5 shadow-2xl"
+        onClick={e => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-base font-semibold text-white">New presentation</h3>
+          <button onClick={onClose} className="text-[#64748B] hover:text-white">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        <label className="block text-xs text-[#94a3b8] mb-1.5">Presentation name</label>
+        <input
+          autoFocus
+          value={name}
+          onChange={e => setName(e.target.value)}
+          placeholder="Untitled Presentation"
+          className="w-full bg-[#060d1a] border border-[#1e3a5f] rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-violet-500 mb-4"
+        />
+
+        <label className="block text-xs text-[#94a3b8] mb-1.5">Knowledge & design system</label>
+        <div className="space-y-2 mb-4">
+          <button
+            type="button"
+            onClick={() => setMode('existing')}
+            disabled={branches.length === 0}
+            className={`w-full text-left rounded-lg border px-3 py-2.5 transition-colors disabled:opacity-40 ${
+              mode === 'existing'
+                ? 'border-violet-500 bg-violet-600/10'
+                : 'border-[#1e3a5f] hover:border-[#2a4a6f]'
+            }`}
+          >
+            <div className="flex items-center gap-2 text-sm text-white">
+              <GitBranch className="w-4 h-4 text-violet-400" /> Join an existing hub
+            </div>
+            <p className="text-[11px] text-[#64748B] mt-1 ml-6">
+              Shares the hub&apos;s knowledge layers and design system.
+            </p>
+            {mode === 'existing' && branches.length > 0 && (
+              <select
+                value={branchId}
+                onChange={e => setBranchId(e.target.value)}
+                onClick={e => e.stopPropagation()}
+                className="mt-2 ml-6 w-[calc(100%-1.5rem)] bg-[#060d1a] border border-[#1e3a5f] rounded px-2 py-1.5 text-sm text-white outline-none focus:border-violet-500"
+              >
+                {branches.map(b => (
+                  <option key={b.id} value={b.id}>
+                    {b.name} ({b.presentationCount})
+                  </option>
+                ))}
+              </select>
+            )}
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setMode('new')}
+            className={`w-full text-left rounded-lg border px-3 py-2.5 transition-colors ${
+              mode === 'new'
+                ? 'border-violet-500 bg-violet-600/10'
+                : 'border-[#1e3a5f] hover:border-[#2a4a6f]'
+            }`}
+          >
+            <div className="flex items-center gap-2 text-sm text-white">
+              <Plus className="w-4 h-4 text-violet-400" /> Create a new hub
+            </div>
+            <p className="text-[11px] text-[#64748B] mt-1 ml-6">
+              A fresh shared workspace with its own knowledge and design system.
+            </p>
+            {mode === 'new' && (
+              <input
+                autoFocus
+                value={newBranchName}
+                onChange={e => setNewBranchName(e.target.value)}
+                onClick={e => e.stopPropagation()}
+                placeholder="New hub name"
+                className="mt-2 ml-6 w-[calc(100%-1.5rem)] bg-[#060d1a] border border-[#1e3a5f] rounded px-2 py-1.5 text-sm text-white outline-none focus:border-violet-500"
+              />
+            )}
+          </button>
+        </div>
+
+        <div className="flex justify-end gap-2">
+          <button
+            onClick={onClose}
+            className="px-3.5 py-2 rounded-lg text-sm text-[#94a3b8] hover:text-white hover:bg-[#1e3a5f]/40 transition-colors"
+          >
+            Cancel
+          </button>
+          <button
+            disabled={!canSubmit}
+            onClick={() =>
+              onCreate({
+                name: name.trim(),
+                branchId: mode === 'existing' ? branchId : undefined,
+                newBranchName: mode === 'new' ? newBranchName.trim() : undefined,
+              })
+            }
+            className="px-4 py-2 rounded-lg text-sm font-semibold bg-violet-600 hover:bg-violet-500 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+          >
+            Create
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
