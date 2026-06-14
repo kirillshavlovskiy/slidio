@@ -188,7 +188,7 @@ function CustomColorButton({
   title,
   round,
 }: {
-  value: string
+  value: string | undefined
   onChange: (hex: string) => void
   title: string
   round?: boolean
@@ -207,7 +207,7 @@ function CustomColorButton({
     >
       <input
         type="color"
-        value={normHex(value)}
+        value={normHex(value || '000000')}
         onChange={e => onChange(e.target.value.replace('#', '').toUpperCase())}
         className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
       />
