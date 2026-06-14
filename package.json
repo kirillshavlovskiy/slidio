@@ -8,7 +8,8 @@
     "build": "prisma generate && next build",
     "start": "next start",
     "db:push": "prisma db push",
-    "db:push:turso": "node scripts/push-turso.mjs"
+    "db:push:turso": "node scripts/push-turso.mjs",
+    "users": "node scripts/list-users.mjs"
   },
   "engines": {
     "node": ">=22.12"

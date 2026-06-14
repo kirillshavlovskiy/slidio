@@ -56,4 +56,36 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
       return session
     },
   },
+  events: {
+    // Fires exactly once, when the adapter creates a brand-new user row — i.e. a
+    // registration. New users default to the "free" plan (see schema), so every
+    // createUser is a free-plan signup until a Stripe webhook upgrades them.
+    async createUser({ user }) {
+      const record = {
+        event: 'free_plan_registration',
+        userId: user.id,
+        email: user.email ?? null,
+        name: user.name ?? null,
+        at: new Date().toISOString(),
+      }
+      // Always logged — visible in `vercel logs` / the dev terminal.
+      console.log('[registration]', JSON.stringify(record))
+
+      // Optional: POST to a Slack/Discord/generic webhook if configured.
+      const hook = process.env.SIGNUP_WEBHOOK_URL
+      if (hook) {
+        const message = `New free-plan registration: ${user.email ?? user.id}`
+        try {
+          await fetch(hook, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            // `text` satisfies Slack, `content` satisfies Discord; extra fields ignored.
+            body: JSON.stringify({ text: message, content: message, ...record }),
+          })
+        } catch (err) {
+          console.error('[registration] webhook POST failed:', err)
+        }
+      }
+    },
+  },
 })
