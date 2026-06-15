@@ -17,6 +17,13 @@ import {
 import { KnowledgeBranch, PresentationSummary } from '@/lib/types'
 import { IMPORT_ACCEPT } from '@/lib/importDeck'
 
+export interface ImportJob {
+  id: string
+  name: string
+  status: 'loading' | 'error'
+  error?: string
+}
+
 interface Props {
   branches: KnowledgeBranch[]
   presentations: PresentationSummary[]
@@ -25,6 +32,9 @@ interface Props {
   onOpen: (presentationId: string) => void
   onCreate: (opts: { name: string; branchId?: string; newBranchName?: string }) => void
   onImportFile?: (file: File) => Promise<void> | void
+  /** In-progress / failed background imports, shown as pending cards. */
+  importJobs?: ImportJob[]
+  onDismissImportJob?: (id: string) => void
   onRenameBranch: (id: string, name: string) => void
   onDeleteBranch: (id: string) => void
   onDeletePresentation?: (id: string) => void
@@ -57,6 +67,8 @@ export default function StartScreen({
   onOpen,
   onCreate,
   onImportFile,
+  importJobs,
+  onDismissImportJob,
   onRenameBranch,
   onDeleteBranch,
   onDeletePresentation,
@@ -170,6 +182,42 @@ export default function StartScreen({
             >
               Dismiss
             </button>
+          </div>
+        )}
+        {importJobs && importJobs.length > 0 && (
+          <div className="mb-6 space-y-2">
+            {importJobs.map(job => (
+              <div
+                key={job.id}
+                className={`flex items-center gap-3 rounded-lg border px-4 py-3 text-sm ${
+                  job.status === 'error'
+                    ? 'border-red-500/40 bg-red-500/10 text-red-300'
+                    : 'border-violet-500/30 bg-violet-500/10 text-violet-200'
+                }`}
+              >
+                {job.status === 'loading' ? (
+                  <span className="w-4 h-4 border-2 border-violet-300 border-t-transparent rounded-full animate-spin shrink-0" />
+                ) : (
+                  <X className="w-4 h-4 shrink-0" />
+                )}
+                <div className="min-w-0">
+                  <div className="font-medium truncate">{job.name}</div>
+                  <div className="text-[11px] opacity-80">
+                    {job.status === 'error'
+                      ? job.error
+                      : "Importing… you can keep working or open another deck — it'll appear here when ready."}
+                  </div>
+                </div>
+                {job.status === 'error' && onDismissImportJob && (
+                  <button
+                    onClick={() => onDismissImportJob(job.id)}
+                    className="ml-auto shrink-0 text-red-300/70 hover:text-red-200"
+                  >
+                    Dismiss
+                  </button>
+                )}
+              </div>
+            ))}
           </div>
         )}
         <div className="mb-6">

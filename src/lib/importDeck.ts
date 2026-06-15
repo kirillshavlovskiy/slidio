@@ -15,7 +15,11 @@ async function postToImport(file: File): Promise<Response> {
  * the browser, sample each page's background colour and apply it to the
  * matching slide while leaving Adobe's text untouched.
  */
-async function applyPdfBackgrounds(file: File, result: ImportResult): Promise<ImportResult> {
+async function applyPdfBackgrounds(
+  file: File,
+  result: ImportResult,
+  opts?: { recolorText?: boolean }
+): Promise<ImportResult> {
   try {
     const { samplePdfPageBackgrounds } = await import('@/lib/pdfImport')
     const backgrounds = await samplePdfPageBackgrounds(file)
@@ -29,6 +33,15 @@ async function applyPdfBackgrounds(file: File, result: ImportResult): Promise<Im
       slides[i].bg = bg.hex
       // The recovered background is a flat colour; drop any stale gradient.
       delete slides[i].bgGradient
+      // For OCR overlays we don't know the original text colour, so pick one
+      // that contrasts with the page background detected here.
+      if (opts?.recolorText) {
+        const color = bg.lum < 0.5 ? 'FFFFFF' : '111827'
+        for (const el of slides[i].elements) {
+          // Only recolour OCR-added overlays; leave real extracted text as-is.
+          if (el.type === 'text' && el.style && el.id.startsWith('ocr-')) el.style.color = color
+        }
+      }
     }
   } catch {
     // Background recovery is best-effort — keep the text-only result on failure.
@@ -62,8 +75,8 @@ export async function importDeckFile(file: File): Promise<ImportResult> {
     try {
       const res = await postToImport(file)
       if (res.ok) {
-        const result: ImportResult = await res.json()
-        return applyPdfBackgrounds(file, result)
+        const result: ImportResult & { ocr?: boolean } = await res.json()
+        return applyPdfBackgrounds(file, result, { recolorText: !!result.ocr })
       }
       const body = await res.json().catch(() => ({}))
       if (!body || body.fallback !== 'client-pdf') {

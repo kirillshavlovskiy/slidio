@@ -1,10 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { importPptx } from '@/lib/pptxImport'
-import { hasAdobeCredentials, convertPdfToPptx } from '@/lib/adobeExport'
+import { hasAdobeCredentials, convertPdfToPptx, extractPdfText } from '@/lib/adobeExport'
+import { mergeOcrTextIntoSlides } from '@/lib/ocrMerge'
 
 export const runtime = 'nodejs'
-// Imported decks (with embedded images) can be large; allow a generous body.
-export const maxDuration = 60
+// Large PDFs (tens of MB) can take a while to upload + convert via Adobe — and
+// image-only PDFs need a second OCR pass — so allow a generous duration
+// (hosting plan limits still apply in production).
+export const maxDuration = 300
 
 export async function POST(req: NextRequest) {
   try {
@@ -28,11 +31,34 @@ export async function POST(req: NextRequest) {
       }
       try {
         const pptx = await convertPdfToPptx(buffer)
-        const { slides, warnings } = await importPptx(pptx)
-        return NextResponse.json({
-          slides,
-          warnings: ['Converted from PDF via Adobe PDF Services.', ...warnings],
-        })
+        const parsed = await importPptx(pptx)
+        let slides = parsed.slides
+        const warnings = ['Converted from PDF via Adobe PDF Services.', ...parsed.warnings]
+        let ocr = false
+
+        // Image-only / flattened pages come back as a picture with no text.
+        // If ANY page lacks text, run Adobe Extract (which OCRs) and overlay
+        // editable text — but only onto the pages that have none, so pages with
+        // a real text layer keep their original text.
+        const slideHasText = (s: (typeof slides)[number]) =>
+          s.elements.some(e => e.type === 'text' && (e.content || '').trim())
+        const needsOcr = slides.some(s => !slideHasText(s))
+        if (needsOcr) {
+          try {
+            const extracted = await extractPdfText(buffer)
+            if (extracted.items.length > 0) {
+              slides = mergeOcrTextIntoSlides(slides, extracted)
+              ocr = true
+              warnings.push(
+                'This PDF had no selectable text (each page is an image). Text was recovered with Adobe OCR and added as editable text boxes — positions and spelling may be approximate.'
+              )
+            }
+          } catch (ocrErr) {
+            console.error('Adobe OCR text extraction failed:', ocrErr)
+          }
+        }
+
+        return NextResponse.json({ slides, warnings, ocr })
       } catch (err) {
         console.error('Adobe PDF→PPTX conversion failed:', err)
         // Conversion failed (quota, bad PDF, network) → fall back client-side.

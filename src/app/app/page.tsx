@@ -196,6 +196,9 @@ function bumpEffort(e: Effort): Effort {
   return order[Math.min(order.length - 1, order.indexOf(e) + 1)]
 }
 
+/** A background deck import (PPTX/PDF) shown as a pending card in the portfolio. */
+type ImportJob = { id: string; name: string; status: 'loading' | 'error'; error?: string }
+
 export default function Home() {
   const { data: session, status } = useSession()
 
@@ -279,6 +282,9 @@ export default function Home() {
   const imageInputRef = useRef<HTMLInputElement>(null)
   const importInputRef = useRef<HTMLInputElement>(null)
   const [importingDeck, setImportingDeck] = useState(false)
+  // Background deck imports (PPTX/PDF). They run async at the app root so the
+  // user can navigate away and return to find the finished deck in the portfolio.
+  const [importJobs, setImportJobs] = useState<ImportJob[]>([])
   // Media library: user-uploaded images kept so the AI can reference them by name.
   const [mediaLibrary, setMediaLibrary] = useState<MediaAsset[]>([])
   const designTokens = useMemo(() => designTokensView(designSystem), [designSystem])
@@ -713,6 +719,7 @@ export default function Home() {
       branchId?: string
       newBranchName?: string
       slides?: SlideData[]
+      open?: boolean
     }) => {
       try {
         let branchId = opts.branchId
@@ -743,12 +750,16 @@ export default function Home() {
             activeSlideId: deckSlides[0].id,
           }),
         })
-        if (!createRes.ok) return
+        if (!createRes.ok) throw new Error('Failed to save the presentation')
         const { id } = await createRes.json()
         await loadPortfolio()
-        await openPresentation(id)
+        // Background imports pass open:false so they don't yank the user out of
+        // whatever they're currently viewing.
+        if (opts.open !== false) await openPresentation(id)
+        return id as string
       } catch (err) {
         console.error('Failed to create presentation', err)
+        throw err
       }
     },
     [loadPortfolio, openPresentation, seedBranchKnowledge]
@@ -757,19 +768,70 @@ export default function Home() {
   // Import a .pptx/.pdf file from the start screen into a brand-new presentation.
   const importPresentation = useCallback(
     async (file: File) => {
-      const deckName = file.name.replace(/\.(pptx|pdf|ppt)$/i, '').trim() || 'Imported deck'
-      const { importDeckFile } = await import('@/lib/importDeck')
-      const { slides: imported, warnings } = await importDeckFile(file)
-      if (warnings.length > 0) console.warn('Import warnings:', warnings)
-      await createPresentation({
-        name: deckName,
-        branchId: branches[0]?.id,
-        newBranchName: branches.length === 0 ? 'Imported decks' : undefined,
-        slides: imported,
-      })
+      const baseName = file.name.replace(/\.(pptx|pdf|ppt)$/i, '').trim() || 'Imported deck'
+
+      // Avoid silently creating duplicates: if a saved presentation already uses
+      // this name, suggest a free "(n)" variant and let the user rename before
+      // we run the (potentially slow) import.
+      const taken = new Set(presentationSummaries.map(p => p.name.trim().toLowerCase()))
+      const suggestUnique = (base: string) => {
+        if (!taken.has(base.toLowerCase())) return base
+        let n = 2
+        while (taken.has(`${base} (${n})`.toLowerCase())) n++
+        return `${base} (${n})`
+      }
+      let deckName = baseName
+      while (taken.has(deckName.toLowerCase())) {
+        const answer = window.prompt(
+          `A presentation named "${deckName}" already exists in your knowledge hub. ` +
+            `Enter a different name for the imported deck:`,
+          suggestUnique(baseName)
+        )
+        if (answer === null) return // user cancelled the import
+        deckName = answer.trim() || suggestUnique(baseName)
+      }
+
+      // Run the import in the background so the user can keep working (open
+      // other decks, navigate around) while large PDFs convert/OCR. The result
+      // appears in the portfolio when ready.
+      const jobId = `imp-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
+      setImportJobs(prev => [...prev, { id: jobId, name: deckName, status: 'loading' }])
+
+      void (async () => {
+        try {
+          const { importDeckFile } = await import('@/lib/importDeck')
+          const { slides: imported, warnings } = await importDeckFile(file)
+          if (warnings.length > 0) console.warn('Import warnings:', warnings)
+          await createPresentation({
+            name: deckName,
+            branchId: branches[0]?.id,
+            newBranchName: branches.length === 0 ? 'Imported decks' : undefined,
+            slides: imported,
+            open: false,
+          })
+          setImportJobs(prev => prev.filter(j => j.id !== jobId))
+        } catch (err) {
+          console.error('Failed to import deck', err)
+          setImportJobs(prev =>
+            prev.map(j =>
+              j.id === jobId
+                ? {
+                    ...j,
+                    status: 'error',
+                    error: err instanceof Error ? err.message : 'Failed to import presentation.',
+                  }
+                : j
+            )
+          )
+        }
+      })()
     },
-    [branches, createPresentation]
+    [branches, createPresentation, presentationSummaries]
   )
+
+  const dismissImportJob = useCallback((id: string) => {
+    setImportJobs(prev => prev.filter(j => j.id !== id))
+  }, [])
 
   // Import a .pptx/.pdf file while editing: append its slides to the current deck.
   const appendImportedDeck = useCallback(
@@ -3246,6 +3308,8 @@ Return ONE complete "patch" (changes relative to the ORIGINAL slide data provide
           onOpen={openPresentation}
           onCreate={createPresentation}
           onImportFile={importPresentation}
+          importJobs={importJobs}
+          onDismissImportJob={dismissImportJob}
           onRenameBranch={renameBranch}
           onDeleteBranch={deleteBranch}
           onDeletePresentation={deletePresentation}
