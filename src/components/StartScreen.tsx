@@ -1,5 +1,5 @@
 'use client'
-import { useMemo, useRef, useState, type MouseEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
 import {
   Plus,
   FileText,
@@ -13,9 +13,22 @@ import {
   Upload,
   Palette,
   Brain,
+  Sparkles,
+  Zap,
+  Loader2,
 } from 'lucide-react'
 import { KnowledgeBranch, PresentationSummary } from '@/lib/types'
 import { IMPORT_ACCEPT } from '@/lib/importDeck'
+import {
+  PLANS,
+  PLAN_ORDER,
+  SHARED_FEATURES,
+  approxEdits,
+  formatTokens,
+  type BillingInterval,
+  type PlanId,
+} from '@/lib/billing/plans'
+import { startCheckout, openBillingPortal } from '@/lib/billing/client'
 
 export interface ImportJob {
   id: string
@@ -82,6 +95,25 @@ export default function StartScreen({
   const [importing, setImporting] = useState(false)
   const [importError, setImportError] = useState<string | null>(null)
   const importInputRef = useRef<HTMLInputElement>(null)
+
+  // Current tariff (plan) for the header badge + upgrade/manage button.
+  const [plan, setPlan] = useState<PlanId>('free')
+  const [showPlans, setShowPlans] = useState(false)
+  useEffect(() => {
+    let cancelled = false
+    fetch('/api/billing/state')
+      .then(r => (r.ok ? r.json() : null))
+      .then(data => {
+        if (!cancelled && data?.plan) setPlan(data.plan as PlanId)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  // Free/Pro can move up a tier; Max manages its existing subscription.
+  const canUpgrade = plan !== 'max'
   // Which branch a click on an "Import" button targets (set just before opening
   // the shared hidden file input).
   const importBranchRef = useRef<string | undefined>(undefined)
@@ -130,6 +162,33 @@ export default function StartScreen({
           </div>
         </div>
         <div className="flex items-center gap-2">
+          {/* Current tariff + upgrade/manage */}
+          <button
+            type="button"
+            onClick={() => setShowPlans(true)}
+            title={plan === 'free' ? 'You are on the Free plan' : 'View plans & manage your subscription'}
+            className={`flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1.5 rounded-lg border transition-colors ${
+              plan === 'max'
+                ? 'text-violet-300 border-violet-500/40 bg-violet-500/10 hover:bg-violet-500/20'
+                : plan === 'pro'
+                  ? 'text-blue-300 border-blue-500/40 bg-blue-500/10 hover:bg-blue-500/20'
+                  : 'text-[#94a3b8] border-[#1e3a5f] hover:text-white hover:bg-[#0d1b2a]'
+            }`}
+          >
+            <span className="h-1.5 w-1.5 rounded-full bg-current opacity-70" />
+            {PLANS[plan].name} plan
+          </button>
+          {canUpgrade && (
+            <button
+              type="button"
+              onClick={() => setShowPlans(true)}
+              title="See upgrade options"
+              className="inline-flex items-center gap-1.5 rounded-lg bg-gradient-to-r from-violet-500 to-blue-500 text-white text-sm font-semibold px-3.5 py-2 transition-opacity hover:opacity-90"
+            >
+              <Sparkles className="w-4 h-4" />
+              Upgrade
+            </button>
+          )}
           {onImportFile && (
             <input
               ref={importInputRef}
@@ -403,6 +462,221 @@ export default function StartScreen({
         />
       )}
 
+      {showPlans && (
+        <PlanDialog currentPlan={plan} onClose={() => setShowPlans(false)} />
+      )}
+
+    </div>
+  )
+}
+
+function PlanDialog({
+  currentPlan,
+  onClose,
+}: {
+  currentPlan: PlanId
+  onClose: () => void
+}) {
+  const [interval, setInterval] = useState<BillingInterval>('monthly')
+  const [busy, setBusy] = useState<PlanId | 'portal' | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  const handleSelect = async (planId: PlanId) => {
+    setError(null)
+    setBusy(planId)
+    try {
+      await startCheckout(planId, interval)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Something went wrong. Try again.')
+      setBusy(null)
+    }
+  }
+
+  const handleManage = async () => {
+    setError(null)
+    setBusy('portal')
+    try {
+      await openBillingPortal()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not open billing portal.')
+      setBusy(null)
+    }
+  }
+
+  const currentRank = PLAN_ORDER.indexOf(currentPlan)
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 overflow-auto"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-5xl rounded-2xl border border-[#1e3a5f] bg-[#0a0f1a] shadow-2xl"
+        onClick={e => e.stopPropagation()}
+      >
+        <div className="flex items-start justify-between gap-4 px-6 pt-6">
+          <div>
+            <h2 className="text-xl font-bold text-white">Choose your plan</h2>
+            <p className="mt-1 text-sm text-slate-400">
+              Same features on every plan — only the monthly token budget changes.
+            </p>
+          </div>
+          <button
+            onClick={onClose}
+            className="rounded-lg p-1.5 text-[#64748B] hover:text-white hover:bg-[#0d1b2a] transition-colors"
+            title="Close"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        <div className="mt-5 flex items-center justify-center gap-3">
+          <span className={`text-sm font-medium ${interval === 'monthly' ? 'text-white' : 'text-slate-500'}`}>
+            Monthly
+          </span>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={interval === 'yearly'}
+            onClick={() => setInterval(i => (i === 'monthly' ? 'yearly' : 'monthly'))}
+            className={`relative h-6 w-11 rounded-full transition-colors ${
+              interval === 'yearly' ? 'bg-gradient-to-r from-violet-500 to-blue-500' : 'bg-[#1e3a5f]'
+            }`}
+          >
+            <span
+              className={`absolute top-0.5 h-5 w-5 rounded-full bg-white transition-transform ${
+                interval === 'yearly' ? 'translate-x-5' : 'translate-x-0.5'
+              }`}
+            />
+          </button>
+          <span className={`text-sm font-medium ${interval === 'yearly' ? 'text-white' : 'text-slate-500'}`}>
+            Yearly <span className="text-emerald-400">(2 months free)</span>
+          </span>
+        </div>
+
+        <div className="grid gap-4 px-6 py-6 lg:grid-cols-3">
+          {PLAN_ORDER.map(planId => {
+            const plan = PLANS[planId]
+            const price = interval === 'yearly' ? plan.yearlyPrice : plan.monthlyPrice
+            const priceLabel =
+              plan.monthlyPrice === 0
+                ? '$0'
+                : interval === 'yearly'
+                  ? `$${Math.round(price / 12)}`
+                  : `$${price}`
+            const isCurrent = planId === currentPlan
+            const rank = PLAN_ORDER.indexOf(planId)
+
+            return (
+              <div
+                key={plan.id}
+                className={`flex flex-col rounded-2xl border bg-[#0d1b2a] p-5 ${
+                  isCurrent
+                    ? 'border-emerald-500/60 ring-1 ring-emerald-500/30'
+                    : plan.highlighted
+                      ? 'border-violet-500/60 ring-1 ring-violet-500/40'
+                      : 'border-[#1e3a5f]'
+                }`}
+              >
+                <div className="flex items-center justify-between">
+                  <h3 className="text-lg font-semibold text-white">{plan.name}</h3>
+                  {isCurrent ? (
+                    <span className="rounded-full bg-emerald-500/15 px-2.5 py-1 text-xs font-semibold text-emerald-300">
+                      Current
+                    </span>
+                  ) : plan.highlighted ? (
+                    <span className="rounded-full bg-gradient-to-r from-violet-500 to-blue-500 px-2.5 py-1 text-xs font-semibold text-white">
+                      Most popular
+                    </span>
+                  ) : null}
+                </div>
+                <p className="mt-1 text-sm text-slate-400">{plan.tagline}</p>
+
+                <div className="mt-4 flex items-baseline gap-1">
+                  <span className="text-3xl font-bold tracking-tight text-white">{priceLabel}</span>
+                  {plan.monthlyPrice > 0 && <span className="text-sm text-slate-400">/mo</span>}
+                </div>
+                {plan.paid && interval === 'yearly' && (
+                  <p className="mt-1 text-xs text-slate-500">Billed ${plan.yearlyPrice}/year</p>
+                )}
+
+                <div className="mt-4 rounded-xl bg-[#0a0f1a] p-3">
+                  <div className="flex items-center gap-2">
+                    <Zap className="h-4 w-4 text-amber-400" />
+                    <span className="text-lg font-bold text-white">{formatTokens(plan.monthlyTokens)}</span>
+                    <span className="text-sm text-slate-400">tokens / mo</span>
+                  </div>
+                  <p className="mt-1 text-xs text-slate-500">
+                    ≈ {approxEdits(plan.monthlyTokens).toLocaleString()} AI edits
+                  </p>
+                </div>
+
+                <ul className="mt-4 space-y-2 text-sm">
+                  {SHARED_FEATURES.map(feature => (
+                    <li key={feature} className="flex items-start gap-2">
+                      <Check className="mt-0.5 h-4 w-4 shrink-0 text-emerald-400" />
+                      <span className="text-slate-300">{feature}</span>
+                    </li>
+                  ))}
+                </ul>
+
+                <div className="mt-6">
+                  {isCurrent ? (
+                    plan.paid ? (
+                      <button
+                        type="button"
+                        onClick={handleManage}
+                        disabled={busy !== null}
+                        className="inline-flex w-full items-center justify-center rounded-xl border border-[#1e3a5f] px-4 py-2.5 text-sm font-semibold text-slate-200 transition-colors hover:bg-[#11233b] disabled:opacity-50"
+                      >
+                        {busy === 'portal' ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Manage billing'}
+                      </button>
+                    ) : (
+                      <div className="inline-flex w-full items-center justify-center rounded-xl border border-[#1e3a5f] px-4 py-2.5 text-sm font-semibold text-slate-500">
+                        Your current plan
+                      </div>
+                    )
+                  ) : !plan.paid ? (
+                    <button
+                      type="button"
+                      onClick={handleManage}
+                      disabled={busy !== null}
+                      className="inline-flex w-full items-center justify-center rounded-xl border border-[#1e3a5f] px-4 py-2.5 text-sm font-semibold text-slate-200 transition-colors hover:bg-[#11233b] disabled:opacity-50"
+                    >
+                      {busy === 'portal' ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Downgrade'}
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => handleSelect(planId)}
+                      disabled={busy !== null}
+                      className={`inline-flex w-full items-center justify-center rounded-xl px-4 py-2.5 text-sm font-semibold transition-opacity hover:opacity-90 disabled:opacity-50 ${
+                        plan.highlighted || rank > currentRank
+                          ? 'bg-gradient-to-r from-violet-500 to-blue-500 text-white'
+                          : 'border border-[#1e3a5f] text-slate-200 hover:bg-[#11233b]'
+                      }`}
+                    >
+                      {busy === planId ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : rank > currentRank ? (
+                        `Upgrade to ${plan.name}`
+                      ) : (
+                        `Switch to ${plan.name}`
+                      )}
+                    </button>
+                  )}
+                </div>
+              </div>
+            )
+          })}
+        </div>
+
+        {error && <p className="px-6 pb-4 text-center text-sm text-red-400">{error}</p>}
+        <p className="px-6 pb-6 text-center text-xs text-slate-500">
+          A token is one unit of AI work (input + output) across a single edit. Simple element-level
+          commands are cheap; deck-wide edits use more.
+        </p>
+      </div>
     </div>
   )
 }

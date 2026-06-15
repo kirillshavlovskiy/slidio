@@ -22,8 +22,11 @@ export function LandingNav() {
           <a href="#features" className="transition-colors hover:text-white">
             Features
           </a>
-          <a href="#how" className="transition-colors hover:text-white">
-            How it works
+          <a href="#convert" className="transition-colors hover:text-white">
+            PDF → PPTX
+          </a>
+          <a href="#knowledge" className="transition-colors hover:text-white">
+            Knowledge
           </a>
           <a href="#pricing" className="transition-colors hover:text-white">
             Pricing
