@@ -33,7 +33,13 @@ export async function GET() {
   const branches = await prisma.knowledgeBranch.findMany({
     where: { userId: session.user.id },
     orderBy: { updatedAt: 'desc' },
-    include: { _count: { select: { presentations: true } } },
+    include: {
+      _count: { select: { presentations: true } },
+      knowledgeLayers: {
+        orderBy: { updatedAt: 'desc' },
+        select: { id: true, name: true, type: true, enabled: true, source: true },
+      },
+    },
   })
 
   return NextResponse.json(
@@ -41,6 +47,13 @@ export async function GET() {
       id: b.id,
       name: b.name,
       presentationCount: b._count.presentations,
+      knowledgeLayers: b.knowledgeLayers.map(l => ({
+        id: l.id,
+        name: l.name,
+        type: l.type,
+        enabled: l.enabled,
+        source: l.source,
+      })),
       createdAt: new Date(b.createdAt).getTime(),
       updatedAt: new Date(b.updatedAt).getTime(),
     }))

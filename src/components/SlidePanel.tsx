@@ -1,6 +1,6 @@
 'use client'
 import { useRef, useState } from 'react'
-import { GripVertical } from 'lucide-react'
+import { GripVertical, CopyCheck } from 'lucide-react'
 import { SlideData } from '@/lib/types'
 import { SlideSelectModifiers } from '@/lib/slideSelection'
 import SlideCanvas from '@/components/SlideCanvas'
@@ -13,6 +13,8 @@ interface Props {
   pendingSlideIds?: string[]
   deletedSlideIds?: string[]
   onSelect: (id: string, modifiers: SlideSelectModifiers) => void
+  /** Select every slide in the deck. */
+  onSelectAll?: () => void
   /** Reorder slides: move slide at fromIndex to toIndex. */
   onReorder?: (fromIndex: number, toIndex: number) => void
 }
@@ -33,6 +35,7 @@ export default function SlidePanel({
   pendingSlideIds = [],
   deletedSlideIds = [],
   onSelect,
+  onSelectAll,
   onReorder,
 }: Props) {
   const panelRef = useRef<HTMLDivElement>(null)
@@ -41,11 +44,26 @@ export default function SlidePanel({
   const [overIndex, setOverIndex] = useState<number | null>(null)
 
   const draggable = !!onReorder
+  const allSelected = slides.length > 0 && selectedSlideIds.length === slides.length
 
   return (
     <div ref={panelRef} className="px-3 py-3 w-full">
       <div className="px-1 pb-3">
-        <p className="text-xs text-[#64748b] font-semibold tracking-widest">SLIDES</p>
+        <div className="flex items-center justify-between gap-2">
+          <p className="text-xs text-[#64748b] font-semibold tracking-widest">SLIDES</p>
+          {onSelectAll && slides.length > 1 && (
+            <button
+              type="button"
+              onClick={onSelectAll}
+              disabled={allSelected}
+              className="inline-flex items-center gap-1 rounded-md border border-[#334155] bg-[#112236] px-2 py-1 text-[10px] font-semibold text-[#93c5fd] transition-colors hover:border-[#60a5fa]/60 hover:bg-[#152a45] disabled:cursor-default disabled:opacity-40 disabled:hover:border-[#334155] disabled:hover:bg-[#112236]"
+              title="Select all slides"
+            >
+              <CopyCheck className="h-3 w-3" />
+              {allSelected ? 'All selected' : 'Select all'}
+            </button>
+          )}
+        </div>
         <p className="text-[10px] text-[#475569] mt-1 leading-snug">
           Ctrl/⌘ click · Shift click to multi-select · drag to reorder
         </p>
@@ -82,6 +100,20 @@ export default function SlidePanel({
             )}
             {indicatorBelow && (
               <div className="absolute -bottom-1.5 left-0 right-0 h-0.5 rounded-full bg-[#60a5fa]" />
+            )}
+            {isSelected && !isDeleted && onSelectAll && slides.length > 1 && !allSelected && (
+              <button
+                type="button"
+                onClick={e => {
+                  e.stopPropagation()
+                  onSelectAll()
+                }}
+                className="absolute right-1.5 top-1.5 z-10 inline-flex items-center gap-1 rounded-md border border-[#60a5fa]/60 bg-[#152a45] px-1.5 py-0.5 text-[9px] font-semibold text-[#93c5fd] shadow-sm transition-colors hover:bg-[#1e3a5f]"
+                title="Select all slides"
+              >
+                <CopyCheck className="h-2.5 w-2.5" />
+                All
+              </button>
             )}
             <button
             draggable={draggable}

@@ -1,5 +1,5 @@
 'use client'
-import { useMemo, useState } from 'react'
+import { useMemo, useRef, useState, type MouseEvent } from 'react'
 import {
   Plus,
   FileText,
@@ -10,8 +10,12 @@ import {
   X,
   GitBranch,
   Check,
+  Upload,
+  Palette,
+  Brain,
 } from 'lucide-react'
 import { KnowledgeBranch, PresentationSummary } from '@/lib/types'
+import { IMPORT_ACCEPT } from '@/lib/importDeck'
 
 interface Props {
   branches: KnowledgeBranch[]
@@ -20,8 +24,14 @@ interface Props {
   loading?: boolean
   onOpen: (presentationId: string) => void
   onCreate: (opts: { name: string; branchId?: string; newBranchName?: string }) => void
+  onImportFile?: (file: File) => Promise<void> | void
   onRenameBranch: (id: string, name: string) => void
   onDeleteBranch: (id: string) => void
+  onDeletePresentation?: (id: string) => void
+  /** Open the shared Knowledge layers panel scoped to a hub. */
+  onOpenKnowledge?: (branchId: string) => void
+  /** Open the shared Design System panel scoped to a hub. */
+  onOpenDesign?: (branchId: string) => void
   onSignOut: () => void
 }
 
@@ -46,13 +56,33 @@ export default function StartScreen({
   loading,
   onOpen,
   onCreate,
+  onImportFile,
   onRenameBranch,
   onDeleteBranch,
+  onDeletePresentation,
+  onOpenKnowledge,
+  onOpenDesign,
   onSignOut,
 }: Props) {
   const [showCreate, setShowCreate] = useState(false)
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
+  const [importing, setImporting] = useState(false)
+  const [importError, setImportError] = useState<string | null>(null)
+  const importInputRef = useRef<HTMLInputElement>(null)
+
+  const handleImport = async (file: File) => {
+    if (!onImportFile) return
+    setImportError(null)
+    setImporting(true)
+    try {
+      await onImportFile(file)
+    } catch (err) {
+      setImportError(err instanceof Error ? err.message : 'Failed to import presentation.')
+    } finally {
+      setImporting(false)
+    }
+  }
 
   const byBranch = useMemo(() => {
     const map = new Map<string, PresentationSummary[]>()
@@ -85,6 +115,34 @@ export default function StartScreen({
           </div>
         </div>
         <div className="flex items-center gap-2">
+          {onImportFile && (
+            <>
+              <input
+                ref={importInputRef}
+                type="file"
+                accept={IMPORT_ACCEPT}
+                className="hidden"
+                onChange={e => {
+                  const f = e.target.files?.[0]
+                  if (f) void handleImport(f)
+                  e.target.value = ''
+                }}
+              />
+              <button
+                onClick={() => importInputRef.current?.click()}
+                disabled={importing}
+                title="Import a .pptx or .pdf presentation"
+                className="flex items-center gap-1.5 border border-[#1e3a5f] text-[#94a3b8] hover:text-white hover:bg-[#0d1b2a] text-sm font-semibold px-3.5 py-2 rounded-lg transition-colors disabled:opacity-50"
+              >
+                {importing ? (
+                  <span className="w-4 h-4 border-2 border-violet-400 border-t-transparent rounded-full animate-spin" />
+                ) : (
+                  <Upload className="w-4 h-4" />
+                )}
+                {importing ? 'Importing…' : 'Import'}
+              </button>
+            </>
+          )}
           <button
             onClick={() => setShowCreate(true)}
             className="flex items-center gap-1.5 bg-violet-600 hover:bg-violet-500 text-white text-sm font-semibold px-3.5 py-2 rounded-lg transition-colors"
@@ -102,6 +160,18 @@ export default function StartScreen({
       </header>
 
       <main className="max-w-5xl mx-auto px-6 py-8">
+        {importError && (
+          <div className="mb-4 flex items-start gap-2 rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-300">
+            <X className="w-4 h-4 mt-0.5 shrink-0" />
+            <span>{importError}</span>
+            <button
+              onClick={() => setImportError(null)}
+              className="ml-auto text-red-300/70 hover:text-red-200"
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
         <div className="mb-6">
           <h2 className="text-lg font-semibold">Knowledge Hubs</h2>
           <p className="text-xs text-[#64748B] mt-1">
@@ -173,6 +243,31 @@ export default function StartScreen({
                       )}
                     </div>
                     <div className="flex items-center gap-1.5 shrink-0">
+                      {onOpenDesign && (
+                        <button
+                          onClick={() => onOpenDesign(branch.id)}
+                          title="Open the Design System for this hub"
+                          className="flex items-center gap-1 p-1.5 text-[#94a3b8] rounded hover:bg-[#1e3a5f] hover:text-white transition-colors"
+                        >
+                          <Palette className="w-4 h-4" />
+                          <span className="text-[10px] font-mono text-[#64748B]">
+                            {(branch.knowledgeLayers || []).filter(l => l.type === 'style').length}
+                          </span>
+                        </button>
+                      )}
+                      {onOpenKnowledge && (
+                        <button
+                          onClick={() => onOpenKnowledge(branch.id)}
+                          title="Open the Knowledge layers for this hub"
+                          className="flex items-center gap-1 p-1.5 text-[#94a3b8] rounded hover:bg-[#1e3a5f] hover:text-white transition-colors"
+                        >
+                          <Brain className="w-4 h-4" />
+                          <span className="text-[10px] font-mono text-[#64748B]">
+                            {(branch.knowledgeLayers || []).filter(l => l.enabled).length}
+                          </span>
+                        </button>
+                      )}
+                      <div className="w-px h-5 bg-[#1e3a5f] mx-0.5" />
                       <button
                         onClick={() => onCreate({ name: '', branchId: branch.id })}
                         className="flex items-center gap-1 text-xs text-violet-300 hover:text-white hover:bg-[#1e3a5f]/50 px-2 py-1 rounded transition-colors"
@@ -198,23 +293,13 @@ export default function StartScreen({
                   ) : (
                     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 p-4">
                       {decks.map(deck => (
-                        <button
+                        <DeckCard
                           key={deck.id}
-                          onClick={() => onOpen(deck.id)}
-                          className="group text-left rounded-xl border border-[#13243a] bg-[#0d1b2a] hover:border-violet-500/60 hover:bg-[#11203a] transition-colors p-4"
-                        >
-                          <div className="flex items-start gap-2.5">
-                            <div className="w-9 h-9 rounded-lg bg-[#13243a] group-hover:bg-violet-600/20 flex items-center justify-center shrink-0 transition-colors">
-                              <FileText className="w-4 h-4 text-violet-300" />
-                            </div>
-                            <div className="min-w-0">
-                              <div className="text-sm font-medium truncate">{deck.name}</div>
-                              <div className="flex items-center gap-1 text-[11px] text-[#64748B] mt-1">
-                                <Clock className="w-3 h-3" /> {timeAgo(deck.updatedAt)}
-                              </div>
-                            </div>
-                          </div>
-                        </button>
+                          deck={deck}
+                          withIcon
+                          onOpen={onOpen}
+                          onDelete={onDeletePresentation}
+                        />
                       ))}
                     </div>
                   )}
@@ -227,16 +312,12 @@ export default function StartScreen({
                 <h3 className="text-sm font-semibold mb-3 px-1">Unassigned presentations</h3>
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
                   {orphans.map(deck => (
-                    <button
+                    <DeckCard
                       key={deck.id}
-                      onClick={() => onOpen(deck.id)}
-                      className="group text-left rounded-xl border border-[#13243a] bg-[#0d1b2a] hover:border-violet-500/60 transition-colors p-4"
-                    >
-                      <div className="text-sm font-medium truncate">{deck.name}</div>
-                      <div className="flex items-center gap-1 text-[11px] text-[#64748B] mt-1">
-                        <Clock className="w-3 h-3" /> {timeAgo(deck.updatedAt)}
-                      </div>
-                    </button>
+                      deck={deck}
+                      onOpen={onOpen}
+                      onDelete={onDeletePresentation}
+                    />
                   ))}
                 </div>
               </section>
@@ -266,6 +347,61 @@ export default function StartScreen({
             setShowCreate(false)
           }}
         />
+      )}
+
+    </div>
+  )
+}
+
+// A single deck tile with an inline delete affordance. The delete button is a
+// sibling of the clickable card (not nested) so we don't nest <button> elements.
+function DeckCard({
+  deck,
+  withIcon,
+  onOpen,
+  onDelete,
+}: {
+  deck: PresentationSummary
+  withIcon?: boolean
+  onOpen: (id: string) => void
+  onDelete?: (id: string) => void
+}) {
+  const handleDelete = (e: MouseEvent) => {
+    e.stopPropagation()
+    const ok = window.confirm(
+      `Delete "${deck.name || 'Untitled Presentation'}"? This removes the deck and its history. The hub's shared knowledge and design layers are kept.`
+    )
+    if (ok) onDelete?.(deck.id)
+  }
+
+  return (
+    <div className="group relative">
+      <button
+        onClick={() => onOpen(deck.id)}
+        className="w-full text-left rounded-xl border border-[#13243a] bg-[#0d1b2a] hover:border-violet-500/60 hover:bg-[#11203a] transition-colors p-4"
+      >
+        <div className="flex items-start gap-2.5">
+          {withIcon && (
+            <div className="w-9 h-9 rounded-lg bg-[#13243a] group-hover:bg-violet-600/20 flex items-center justify-center shrink-0 transition-colors">
+              <FileText className="w-4 h-4 text-violet-300" />
+            </div>
+          )}
+          <div className="min-w-0">
+            <div className="text-sm font-medium truncate pr-6">{deck.name}</div>
+            <div className="flex items-center gap-1 text-[11px] text-[#64748B] mt-1">
+              <Clock className="w-3 h-3" /> {timeAgo(deck.updatedAt)}
+            </div>
+          </div>
+        </div>
+      </button>
+      {onDelete && (
+        <button
+          onClick={handleDelete}
+          title="Delete presentation"
+          className="absolute top-2.5 right-2.5 rounded-md p-1.5 text-[#475569] opacity-0 group-hover:opacity-100 hover:text-red-400 hover:bg-red-500/10 transition-all focus:opacity-100"
+        >
+          <Trash2 className="w-3.5 h-3.5" />
+        </button>
       )}
     </div>
   )

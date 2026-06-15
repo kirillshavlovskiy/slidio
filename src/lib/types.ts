@@ -8,6 +8,8 @@ export interface ElementStyle {
   lineHeight?: number
   color?: string
   bg?: string
+  /** Optional gradient fill for the element's box (overrides `bg` visually). */
+  bgGradient?: SlideGradient
   align?: 'left' | 'center' | 'right'
   valign?: 'top' | 'middle' | 'bottom'
   charSpacing?: number
@@ -100,9 +102,26 @@ export interface SlideElement {
   style: ElementStyle
 }
 
+/** Optional gradient fill for a slide background. */
+export interface SlideGradient {
+  /** Gradient kind. Defaults to "linear". */
+  type?: 'linear' | 'radial'
+  /** Linear gradient angle in degrees (CSS convention). Defaults to 135. */
+  angle?: number
+  /** Start color (hex, no #). */
+  from: string
+  /** End color (hex, no #). */
+  to: string
+  /** Optional middle stop (hex, no #) for a 3-color gradient. */
+  via?: string
+}
+
 export interface SlideData {
   id: string
+  /** Solid background color (hex, no #). Also the fallback when a gradient is set. */
   bg: string
+  /** Optional gradient background; when present it renders over `bg`. */
+  bgGradient?: SlideGradient
   elements: SlideElement[]
 }
 
@@ -192,10 +211,21 @@ export interface KnowledgeLayer {
 // ── Knowledge Branches ────────────────────────────────────────────────────────
 // A branch groups presentations that share the same knowledge layers + design
 // system. A new presentation either starts a new branch or joins an existing one.
+// Compact knowledge/design layer reference shown on the portfolio/hub view.
+export interface KnowledgeLayerSummary {
+  id: string
+  name: string
+  type: KnowledgeLayerType
+  enabled: boolean
+  source?: KnowledgeLayer['source']
+}
+
 export interface KnowledgeBranch {
   id: string
   name: string
   presentationCount: number
+  /** Knowledge + design layers shared across the hub (style = design system). */
+  knowledgeLayers?: KnowledgeLayerSummary[]
   createdAt: number
   updatedAt: number
 }

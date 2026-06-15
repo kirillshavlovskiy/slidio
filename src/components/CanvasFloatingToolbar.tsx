@@ -36,8 +36,9 @@ import {
   Wand2,
   type LucideIcon,
 } from 'lucide-react'
-import { SlideElement, ElementStyle } from '@/lib/types'
+import { SlideElement, ElementStyle, SlideGradient } from '@/lib/types'
 import { elementFillHex, elementTextHex, isFillElement } from '@/lib/elementStyle'
+import { gradientCss, GRADIENT_PRESETS } from '@/lib/slideBackground'
 import { QuickAction, QuickActionContext } from '@/lib/quickActions'
 import FontFamilySelect from '@/components/FontFamilySelect'
 
@@ -104,6 +105,8 @@ interface Props {
   onMergeSlides: () => void
   slideBg: string
   onUpdateSlideBg: (hex: string) => void
+  slideGradient: SlideGradient | null
+  onUpdateSlideGradient: (g: SlideGradient | null) => void
   quickActions: QuickAction[]
   quickActionCtx: QuickActionContext
   onRunQuickAction: (action: QuickAction) => void
@@ -251,6 +254,8 @@ export default function CanvasFloatingToolbar({
   onMergeSlides,
   slideBg,
   onUpdateSlideBg,
+  slideGradient,
+  onUpdateSlideGradient,
   quickActions,
   quickActionCtx,
   onRunQuickAction,
@@ -345,7 +350,7 @@ export default function CanvasFloatingToolbar({
 
   const applyFill = (hex: string) => {
     if (!single || !isFillEl) return
-    const patch: Partial<ElementStyle> = { bg: hex }
+    const patch: Partial<ElementStyle> = { bg: hex, bgGradient: undefined }
     if (single.type === 'bar') patch.color = hex
     onUpdateElement(single.id, { style: patch })
   }
@@ -353,7 +358,7 @@ export default function CanvasFloatingToolbar({
   return (
     <div
       ref={toolbarRef}
-      className="absolute z-40 flex items-center gap-1.5 rounded-xl border border-[#1e3a5f]/80 bg-[#0d1b2a]/95 backdrop-blur-md px-1.5 py-1.5 shadow-2xl pointer-events-auto"
+      className="absolute z-40 flex flex-wrap items-center gap-y-1.5 gap-x-1.5 rounded-xl border border-[#1e3a5f]/80 bg-[#0d1b2a]/95 backdrop-blur-md px-1.5 py-1.5 shadow-2xl pointer-events-auto max-w-[calc(100vw-2rem)]"
       style={{ left: pos.x, top: pos.y }}
       onClick={e => e.stopPropagation()}
     >
@@ -504,8 +509,17 @@ export default function CanvasFloatingToolbar({
           </div>
           <Divider />
           {/* Slide background color */}
-          <div className="flex items-center gap-1 flex-wrap max-w-[176px]">
-            <span className="text-[10px] text-[#64748b] pr-0.5 flex-shrink-0">BG</span>
+          <div className="flex items-center gap-1 flex-wrap flex-shrink-0 max-w-[176px]">
+            <span
+              className="text-[10px] text-[#64748b] pr-0.5 flex-shrink-0"
+              title={
+                selectedSlideCount > 1
+                  ? `Background applies to all ${selectedSlideCount} selected slides`
+                  : 'Slide background'
+              }
+            >
+              {selectedSlideCount > 1 ? `BG ×${selectedSlideCount}` : 'BG'}
+            </span>
             {SLIDE_BG_PRESETS.map(hex => (
               <button
                 key={hex}
@@ -525,6 +539,25 @@ export default function CanvasFloatingToolbar({
               value={slideBg}
               onChange={onUpdateSlideBg}
             />
+            <span className="w-px h-4 bg-[#1e3a5f] mx-0.5" />
+            {GRADIENT_PRESETS.slice(0, 6).map((preset, i) => {
+              const active =
+                slideGradient?.from === preset.from &&
+                slideGradient?.to === preset.to &&
+                (slideGradient?.type ?? 'linear') === (preset.type ?? 'linear')
+              return (
+                <button
+                  key={i}
+                  type="button"
+                  title="Gradient background"
+                  onClick={() => onUpdateSlideGradient(preset)}
+                  className={`w-4 h-4 rounded-sm border transition-transform hover:scale-110 ${
+                    active ? 'border-[#60a5fa] ring-1 ring-[#60a5fa]' : 'border-[#334155]'
+                  }`}
+                  style={{ backgroundImage: gradientCss(preset) }}
+                />
+              )
+            })}
           </div>
         </>
       )}
@@ -813,7 +846,7 @@ export default function CanvasFloatingToolbar({
                 key={hex}
                 type="button"
                 title={`Chip fill #${hex}`}
-                onClick={() => onUpdateElement(single.id, { style: { bg: hex } })}
+                onClick={() => onUpdateElement(single.id, { style: { bg: hex, bgGradient: undefined } })}
                 className={`w-4 h-4 rounded-sm border transition-transform hover:scale-110 ${
                   single.style.bg === hex ? 'border-white' : 'border-transparent'
                 }`}
@@ -823,7 +856,7 @@ export default function CanvasFloatingToolbar({
             <CustomColorButton
               title="Custom chip fill"
               value={single.style.bg ?? 'FFFFFF'}
-              onChange={hex => onUpdateElement(single.id, { style: { bg: hex } })}
+              onChange={hex => onUpdateElement(single.id, { style: { bg: hex, bgGradient: undefined } })}
             />
           </div>
         </>
@@ -833,7 +866,7 @@ export default function CanvasFloatingToolbar({
       {!annotationMode && single?.type === 'text' && (
         <>
           <Divider />
-          <div className="flex items-center gap-1 flex-wrap max-w-[176px]">
+          <div className="flex items-center gap-1 flex-wrap flex-shrink-0 max-w-[176px]">
             {TEXT_PRESETS.map(hex => (
               <button
                 key={hex}

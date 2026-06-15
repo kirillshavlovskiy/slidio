@@ -1,12 +1,13 @@
 'use client'
 
-import { SlideElement, ElementStyle, ChartSpec, ChartType, SeriesType } from '@/lib/types'
+import { SlideElement, ElementStyle, ChartSpec, ChartType, SeriesType, SlideGradient } from '@/lib/types'
 import { DEFAULT_FONT } from '@/lib/fonts'
 import { elementFillHex, elementTextHex, isFillElement } from '@/lib/elementStyle'
 import { getIcon } from '@/lib/icons'
 import { useDesignTokens } from '@/components/DesignTokensProvider'
 import FontFamilySelect from '@/components/FontFamilySelect'
 import type { DSColorToken } from '@/lib/designSystem'
+import { gradientCss, GRADIENT_PRESETS } from '@/lib/slideBackground'
 
 type Patch = {
   content?: string
@@ -25,6 +26,14 @@ interface Props {
   onUpdate: (elementId: string, patch: Patch) => void
   /** Open the icon picker for the given element id (icon elements only). */
   onPickIcon?: (elementId: string) => void
+  /** Current slide background hex (no leading #). Enables the slide editor when nothing is selected. */
+  slideBg?: string
+  /** Change the active slide background. */
+  onUpdateSlideBg?: (hex: string) => void
+  /** Current slide gradient (or null for solid). */
+  slideGradient?: SlideGradient | null
+  /** Set or clear the active slide gradient (null = solid). */
+  onUpdateSlideGradient?: (g: SlideGradient | null) => void
 }
 
 const WEIGHTS = [100, 200, 300, 400, 500, 600, 700, 800, 900]
@@ -482,14 +491,161 @@ function ChartEditor({ spec, onChange }: { spec: ChartSpec; onChange: (next: Cha
   )
 }
 
-export default function ElementInspector({ element, selectedCount, onUpdate, onPickIcon }: Props) {
+/** Slide-level background editor: solid color or gradient. Shown when nothing is selected. */
+function SlideBackgroundSection({
+  slideBg,
+  gradient,
+  onUpdateSlideBg,
+  onUpdateGradient,
+  dsColors,
+  dsPalette,
+}: {
+  slideBg?: string
+  gradient: SlideGradient | null
+  onUpdateSlideBg: (hex: string) => void
+  onUpdateGradient: (g: SlideGradient | null) => void
+  dsColors: DSColorToken[]
+  dsPalette: string[]
+}) {
+  const isGradient = !!gradient
+  const g: SlideGradient = gradient ?? {
+    type: 'linear',
+    angle: 135,
+    from: slideBg || '0EA5E9',
+    to: '6366F1',
+  }
+  const setG = (patch: Partial<SlideGradient>) => onUpdateGradient({ ...g, ...patch })
+
+  return (
+    <Section title="Slide background">
+      {/* Solid / Gradient toggle */}
+      <div className="flex items-center gap-1 rounded-md border border-[#1e3a5f] bg-[#0b1626] p-0.5">
+        <button
+          type="button"
+          onClick={() => onUpdateGradient(null)}
+          className={`flex-1 rounded px-2 py-1 text-[11px] font-medium transition-colors ${
+            !isGradient ? 'bg-[#1e3a5f] text-white' : 'text-[#64748b] hover:text-[#94a3b8]'
+          }`}
+        >
+          Solid
+        </button>
+        <button
+          type="button"
+          onClick={() => onUpdateGradient(g)}
+          className={`flex-1 rounded px-2 py-1 text-[11px] font-medium transition-colors ${
+            isGradient ? 'bg-[#1e3a5f] text-white' : 'text-[#64748b] hover:text-[#94a3b8]'
+          }`}
+        >
+          Gradient
+        </button>
+      </div>
+
+      {!isGradient ? (
+        <>
+          <Row>
+            <Field label="Color">
+              <ColorInput hex={slideBg} onChange={onUpdateSlideBg} />
+            </Field>
+          </Row>
+          <SwatchStrip tokens={dsColors} palette={dsPalette} onPick={onUpdateSlideBg} />
+        </>
+      ) : (
+        <>
+          {/* Live preview */}
+          <div
+            className="h-10 w-full rounded-md border border-[#1e3a5f]"
+            style={{ backgroundImage: gradientCss(g) }}
+          />
+          <Row>
+            <Field label="From">
+              <ColorInput hex={g.from} onChange={hex => setG({ from: hex })} />
+            </Field>
+            <Field label="To">
+              <ColorInput hex={g.to} onChange={hex => setG({ to: hex })} />
+            </Field>
+          </Row>
+          <Row>
+            <Field label="Type">
+              <SelectInput
+                value={g.type ?? 'linear'}
+                options={[
+                  { value: 'linear', label: 'linear' },
+                  { value: 'radial', label: 'radial' },
+                ]}
+                onChange={v => setG({ type: v })}
+              />
+            </Field>
+            {(g.type ?? 'linear') === 'linear' && (
+              <Field label="Angle">
+                <NumberInput
+                  value={g.angle ?? 135}
+                  step={5}
+                  suffix="°"
+                  onCommit={n => setG({ angle: n ?? 0 })}
+                />
+              </Field>
+            )}
+          </Row>
+        </>
+      )}
+
+      {/* Gradient presets */}
+      <div className="flex flex-wrap gap-1 px-0.5">
+        {GRADIENT_PRESETS.map((preset, i) => (
+          <button
+            key={i}
+            type="button"
+            title="Apply gradient"
+            onClick={() => onUpdateGradient(preset)}
+            className="h-6 w-6 rounded-md border border-black/40 hover:ring-1 hover:ring-[#60a5fa]"
+            style={{ backgroundImage: gradientCss(preset) }}
+          />
+        ))}
+      </div>
+
+      <p className="text-[10px] text-[#475569] leading-relaxed">
+        Click any element on the slide to edit its typography, size and box styling.
+      </p>
+    </Section>
+  )
+}
+
+export default function ElementInspector({
+  element,
+  selectedCount,
+  onUpdate,
+  onPickIcon,
+  slideBg,
+  onUpdateSlideBg,
+  slideGradient,
+  onUpdateSlideGradient,
+}: Props) {
+  const tokens = useDesignTokens()
+  const dsColors = tokens?.colorTokens ?? []
+  const dsPalette = tokens?.palette ?? []
+  const dsSizes = tokens?.typeScalePt ?? []
+
   if (selectedCount === 0 || !element) {
     return (
-      <div className="flex flex-col items-center justify-center h-full px-6 text-center">
-        <p className="text-sm text-[#475569] font-medium">No element selected</p>
-        <p className="text-[11px] text-[#334155] mt-1 leading-relaxed">
-          Click an element on the slide to edit its typography, size and box styling here.
-        </p>
+      <div className="w-full">
+        {onUpdateSlideBg && (
+          <SlideBackgroundSection
+            slideBg={slideBg}
+            gradient={slideGradient ?? null}
+            onUpdateSlideBg={onUpdateSlideBg}
+            onUpdateGradient={onUpdateSlideGradient ?? (() => {})}
+            dsColors={dsColors}
+            dsPalette={dsPalette}
+          />
+        )}
+        {!onUpdateSlideBg && (
+          <div className="flex flex-col items-center justify-center h-full px-6 text-center">
+            <p className="text-sm text-[#475569] font-medium">No element selected</p>
+            <p className="text-[11px] text-[#334155] mt-1 leading-relaxed">
+              Click an element on the slide to edit its typography, size and box styling here.
+            </p>
+          </div>
+        )}
       </div>
     )
   }
@@ -514,10 +670,6 @@ export default function ElementInspector({ element, selectedCount, onUpdate, onP
   const fillEl = isFillElement(el)
   const font = s.fontFace || DEFAULT_FONT
 
-  const tokens = useDesignTokens()
-  const dsColors = tokens?.colorTokens ?? []
-  const dsPalette = tokens?.palette ?? []
-  const dsSizes = tokens?.typeScalePt ?? []
   const sizeListId = dsSizes.length > 0 ? `ds-size-${el.id}` : undefined
 
   return (
@@ -736,10 +888,14 @@ export default function ElementInspector({ element, selectedCount, onUpdate, onP
             <Field label="Fill">
               <ColorInput
                 hex={fillEl ? elementFillHex(el) : s.bg}
-                onChange={c => setStyle({ bg: c })}
+                onChange={c => setStyle({ bg: c, bgGradient: undefined })}
               />
             </Field>
-            <SwatchStrip tokens={dsColors} palette={dsPalette} onPick={c => setStyle({ bg: c })} />
+            <SwatchStrip
+              tokens={dsColors}
+              palette={dsPalette}
+              onPick={c => setStyle({ bg: c, bgGradient: undefined })}
+            />
           </>
         )}
         <p className="text-[9px] text-[#475569] mt-0.5">Padding (in)</p>

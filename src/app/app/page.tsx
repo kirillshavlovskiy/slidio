@@ -3,7 +3,8 @@
 import { useState, useCallback, useEffect, useRef, useMemo } from 'react'
 import { useSession, signOut } from 'next-auth/react'
 import { toPng } from 'html-to-image'
-import { Brain, History, Undo2, Download, FileDown, LogOut, Layers, Image as ImageIcon, Home as HomeIcon, BarChart3, Sparkles, Type, Square, Table } from 'lucide-react'
+import { Brain, History, Undo2, Download, FileDown, LogOut, Palette, Image as ImageIcon, Home as HomeIcon, BarChart3, Sparkles, Type, Square, Table, Upload } from 'lucide-react'
+import { IMPORT_ACCEPT } from '@/lib/importDeck'
 import SlidePanel from '@/components/SlidePanel'
 import ElementInspector from '@/components/ElementInspector'
 import SlideCanvas from '@/components/SlideCanvas'
@@ -60,6 +61,7 @@ import StartScreen from '@/components/StartScreen'
 import initialSlides from '@/lib/slides.json'
 import {
   SlideData,
+  SlideGradient,
   SlideElement,
   Change,
   ClaudeResponse,
@@ -275,6 +277,8 @@ export default function Home() {
   const [designSystem, setDesignSystem] = useState<DesignSystem | null>(null)
   const designSystemRef = useRef<DesignSystem | null>(null)
   const imageInputRef = useRef<HTMLInputElement>(null)
+  const importInputRef = useRef<HTMLInputElement>(null)
+  const [importingDeck, setImportingDeck] = useState(false)
   // Media library: user-uploaded images kept so the AI can reference them by name.
   const [mediaLibrary, setMediaLibrary] = useState<MediaAsset[]>([])
   const designTokens = useMemo(() => designTokensView(designSystem), [designSystem])
@@ -701,8 +705,15 @@ export default function Home() {
   )
 
   // Create a presentation, optionally inside a new branch, then open it.
+  // When `slides` is provided (e.g. from an imported deck), the new presentation
+  // starts from those slides instead of a single blank slide.
   const createPresentation = useCallback(
-    async (opts: { name: string; branchId?: string; newBranchName?: string }) => {
+    async (opts: {
+      name: string
+      branchId?: string
+      newBranchName?: string
+      slides?: SlideData[]
+    }) => {
       try {
         let branchId = opts.branchId
         if (opts.newBranchName) {
@@ -717,16 +728,19 @@ export default function Home() {
           }
         }
 
-        const blankSlide: SlideData = { id: `slide-${Date.now()}`, bg: 'FFFFFF', elements: [] }
+        const deckSlides =
+          opts.slides && opts.slides.length > 0
+            ? opts.slides
+            : [{ id: `slide-${Date.now()}`, bg: 'FFFFFF', elements: [] } as SlideData]
         const createRes = await fetch('/api/presentations', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             name: opts.name || 'Untitled Presentation',
             branchId,
-            slides: [blankSlide],
+            slides: deckSlides,
             conversationHistory: [],
-            activeSlideId: blankSlide.id,
+            activeSlideId: deckSlides[0].id,
           }),
         })
         if (!createRes.ok) return
@@ -738,6 +752,46 @@ export default function Home() {
       }
     },
     [loadPortfolio, openPresentation, seedBranchKnowledge]
+  )
+
+  // Import a .pptx/.pdf file from the start screen into a brand-new presentation.
+  const importPresentation = useCallback(
+    async (file: File) => {
+      const deckName = file.name.replace(/\.(pptx|pdf|ppt)$/i, '').trim() || 'Imported deck'
+      const { importDeckFile } = await import('@/lib/importDeck')
+      const { slides: imported, warnings } = await importDeckFile(file)
+      if (warnings.length > 0) console.warn('Import warnings:', warnings)
+      await createPresentation({
+        name: deckName,
+        branchId: branches[0]?.id,
+        newBranchName: branches.length === 0 ? 'Imported decks' : undefined,
+        slides: imported,
+      })
+    },
+    [branches, createPresentation]
+  )
+
+  // Import a .pptx/.pdf file while editing: append its slides to the current deck.
+  const appendImportedDeck = useCallback(
+    async (file: File) => {
+      setImportingDeck(true)
+      try {
+        const { importDeckFile } = await import('@/lib/importDeck')
+        const { slides: imported, warnings } = await importDeckFile(file)
+        if (warnings.length > 0) console.warn('Import warnings:', warnings)
+        if (imported.length === 0) return
+        pushHistory()
+        setSlides(prev => [...prev, ...imported])
+        setSelectedSlideIds([imported[0].id])
+        setActiveSlideId(imported[0].id)
+      } catch (err) {
+        console.error('Failed to import deck', err)
+        alert(err instanceof Error ? err.message : 'Failed to import presentation.')
+      } finally {
+        setImportingDeck(false)
+      }
+    },
+    [pushHistory]
   )
 
   // Return to the start screen (refreshing the portfolio list).
@@ -765,6 +819,32 @@ export default function Home() {
       body: JSON.stringify({ id }),
     }).catch(() => {})
   }, [])
+
+  // Delete a presentation from the portfolio. Optimistically drop it from the
+  // list and decrement its hub's deck count; reload on failure to resync.
+  const deletePresentation = useCallback(
+    async (id: string) => {
+      const target = presentationSummaries.find(p => p.id === id)
+      setPresentationSummaries(prev => prev.filter(p => p.id !== id))
+      if (target?.branchId) {
+        setBranches(prev =>
+          prev.map(b =>
+            b.id === target.branchId
+              ? { ...b, presentationCount: Math.max(0, b.presentationCount - 1) }
+              : b
+          )
+        )
+      }
+      try {
+        const res = await fetch(`/api/presentations/${id}`, { method: 'DELETE' })
+        if (!res.ok) throw new Error('Delete failed')
+      } catch (err) {
+        console.error('Failed to delete presentation', err)
+        void loadPortfolio()
+      }
+    },
+    [presentationSummaries, loadPortfolio]
+  )
 
   // Pipe uncaught client errors + unhandled promise rejections to the dev terminal.
   useEffect(() => {
@@ -1539,17 +1619,54 @@ export default function Home() {
     applySlideOp(mergeSlides(slides, selectedSlideIds))
   }, [slides, selectedSlideIds, applySlideOp])
 
-  // Change the background color of the active slide (records one undo step).
+  // Change the background color of every selected slide (records one undo step).
+  // Picking a solid color also clears any gradient on those slides. When nothing
+  // is multi-selected this falls back to just the active slide.
   const updateSlideBg = useCallback(
     (hex: string) => {
       const clean = hex.replace('#', '').toUpperCase()
+      const targets = new Set(selectedSlideIds.length > 0 ? selectedSlideIds : [activeSlideId])
       pushHistory()
       setSlides(prev =>
-        prev.map(slide => (slide.id === activeSlideId ? { ...slide, bg: clean } : slide))
+        prev.map(slide =>
+          targets.has(slide.id) ? { ...slide, bg: clean, bgGradient: undefined } : slide
+        )
       )
     },
-    [activeSlideId, pushHistory]
+    [selectedSlideIds, activeSlideId, pushHistory]
   )
+
+  // Set or clear the gradient background on every selected slide. Passing null
+  // reverts to the solid `bg`. When set, `bg` is synced to the gradient's start
+  // color so exports (PPTX/PDF) have a sensible solid fallback.
+  const updateSlideGradient = useCallback(
+    (gradient: SlideGradient | null) => {
+      const targets = new Set(selectedSlideIds.length > 0 ? selectedSlideIds : [activeSlideId])
+      pushHistory()
+      setSlides(prev =>
+        prev.map(slide => {
+          if (!targets.has(slide.id)) return slide
+          if (!gradient) return { ...slide, bgGradient: undefined }
+          return {
+            ...slide,
+            bg: (gradient.from || slide.bg).replace('#', '').toUpperCase(),
+            bgGradient: gradient,
+          }
+        })
+      )
+    },
+    [selectedSlideIds, activeSlideId, pushHistory]
+  )
+
+  // Select every slide in the deck (keeps the current active slide as the anchor
+  // so background/quick-action targeting stays intuitive).
+  const selectAllSlides = useCallback(() => {
+    const allIds = slides.map(s => s.id)
+    if (allIds.length === 0) return
+    setSelectedSlideIds(allIds)
+    setSelectionAnchorId(activeSlideId && allIds.includes(activeSlideId) ? activeSlideId : allIds[0])
+    setSelectedElementIds([])
+  }, [slides, activeSlideId])
 
   // Run a one-click "quick action" (split/merge/tidy…) straight through the agent.
   // Bypasses the router (we already know it's a tool-using edit) and carries a
@@ -2976,6 +3093,110 @@ Return ONE complete "patch" (changes relative to the ORIGINAL slide data provide
     handleKnowledgeChange(syncDesignSystemLayers(active, knowledgeLayers))
   }, [knowledgeLayers, handleKnowledgeChange])
 
+  // Load a hub's knowledge layers into editor state so the existing Knowledge /
+  // Design panels can browse + edit them straight from the portfolio screen.
+  const loadBranchKnowledge = useCallback(
+    async (branchId: string) => {
+      setActiveBranchId(branchId)
+      activeBranchIdRef.current = branchId
+      try {
+        const res = await fetch(`/api/knowledge?branchId=${branchId}`)
+        if (res.ok) {
+          const layers: KnowledgeLayer[] = await res.json()
+          setKnowledgeLayers(layers.length > 0 ? layers : await seedBranchKnowledge(branchId))
+        }
+      } catch {
+        /* keep current layers */
+      }
+    },
+    [seedBranchKnowledge]
+  )
+
+  const openHubKnowledge = useCallback(
+    async (branchId: string) => {
+      await loadBranchKnowledge(branchId)
+      setShowKnowledge(true)
+    },
+    [loadBranchKnowledge]
+  )
+
+  const openHubDesign = useCallback(
+    async (branchId: string) => {
+      await loadBranchKnowledge(branchId)
+      const restoredDs = await loadStoredDesignSystem(dsId, branchId)
+      if (restoredDs) {
+        designSystemRef.current = restoredDs
+        setDsName(restoredDs.name)
+        setDsFiles(restoredDs.files)
+        setDesignSystem(restoredDs)
+      } else {
+        designSystemRef.current = null
+        setDsName('')
+        setDsFiles([])
+        setDesignSystem(null)
+      }
+      setShowDesignSystem(true)
+    },
+    [loadBranchKnowledge, dsId]
+  )
+
+  // Knowledge + Design System modals are shared between the portfolio (Knowledge
+  // Hub) view and the deck editor, so they can be opened from either place.
+  const knowledgeAndDesignModals = (
+    <>
+      {showKnowledge && (
+        <KnowledgePanel
+          layers={knowledgeLayers}
+          onChange={handleKnowledgeChange}
+          onClose={() => setShowKnowledge(false)}
+        />
+      )}
+      {showDesignSystem && (
+        <DesignSystemPanel
+          dsId={dsId}
+          initialName={dsName}
+          initialFiles={dsFiles}
+          onChange={handleDesignSystemChange}
+          onClose={closeDesignSystem}
+          templatesSlot={
+            <TemplateUploader
+              templates={templates}
+              onLoadedBatch={batch => {
+                setTemplates(prev => {
+                  const next = mergeTemplateList(prev, batch)
+                  const nextLayers = syncTemplateKnowledgeLayers(next, knowledgeLayers)
+                  handleKnowledgeChange(nextLayers)
+                  return next
+                })
+                const names = batch.map(t => t.filename).join(', ')
+                const notif =
+                  batch.length === 1
+                    ? `Template added: "${batch[0].filename}" (${batch[0].source.toUpperCase()}). Style tokens extracted.`
+                    : `${batch.length} templates added: ${names}. Combined style tokens are active.`
+                setDisplay(prev => [
+                  ...prev,
+                  { role: 'assistant', response: { type: 'clarification', question: notif } },
+                ])
+              }}
+              onRemove={id => {
+                setTemplates(prev => {
+                  const next = prev.filter(t => t.id !== id)
+                  const nextLayers = syncTemplateKnowledgeLayers(next, knowledgeLayers)
+                  handleKnowledgeChange(nextLayers)
+                  return next
+                })
+              }}
+              onClearAll={() => {
+                setTemplates([])
+                handleKnowledgeChange(knowledgeLayers.filter(l => l.source !== 'template'))
+              }}
+            />
+          }
+        />
+      )}
+    </>
+  )
+
   // ── Download PPTX ────────────────────────────────────────────────────────────
   const downloadPptx = useCallback(async () => {
     // Bake lucide icons into PNGs first so they survive in PowerPoint (which can't
@@ -3016,17 +3237,24 @@ Return ONE complete "patch" (changes relative to the ORIGINAL slide data provide
 
   if (showStartScreen) {
     return (
-      <StartScreen
-        branches={branches}
-        presentations={presentationSummaries}
-        userName={session?.user?.name || session?.user?.email}
-        loading={portfolioLoading}
-        onOpen={openPresentation}
-        onCreate={createPresentation}
-        onRenameBranch={renameBranch}
-        onDeleteBranch={deleteBranch}
-        onSignOut={() => signOut()}
-      />
+      <>
+        <StartScreen
+          branches={branches}
+          presentations={presentationSummaries}
+          userName={session?.user?.name || session?.user?.email}
+          loading={portfolioLoading}
+          onOpen={openPresentation}
+          onCreate={createPresentation}
+          onImportFile={importPresentation}
+          onRenameBranch={renameBranch}
+          onDeleteBranch={deleteBranch}
+          onDeletePresentation={deletePresentation}
+          onOpenKnowledge={openHubKnowledge}
+          onOpenDesign={openHubDesign}
+          onSignOut={() => signOut()}
+        />
+        {knowledgeAndDesignModals}
+      </>
     )
   }
 
@@ -3064,6 +3292,17 @@ Return ONE complete "patch" (changes relative to the ORIGINAL slide data provide
             onChange={e => {
               const f = e.target.files?.[0]
               if (f) handleImageFile(f)
+              e.target.value = ''
+            }}
+          />
+          <input
+            ref={importInputRef}
+            type="file"
+            accept={IMPORT_ACCEPT}
+            className="hidden"
+            onChange={e => {
+              const f = e.target.files?.[0]
+              if (f) void appendImportedDeck(f)
               e.target.value = ''
             }}
           />
@@ -3170,7 +3409,7 @@ Return ONE complete "patch" (changes relative to the ORIGINAL slide data provide
             }
             className="flex items-center gap-1 p-1.5 text-[#94a3b8] rounded hover:bg-[#1e3a5f] hover:text-white transition-colors"
           >
-            <Layers className="w-4 h-4" />
+            <Palette className="w-4 h-4" />
             <span className="text-[10px] font-mono text-[#64748B]">{dsFiles.length}</span>
           </button>
           <button
@@ -3202,6 +3441,18 @@ Return ONE complete "patch" (changes relative to the ORIGINAL slide data provide
             <Undo2 className="w-4 h-4" />
           </button>
           <div className="w-px h-5 bg-[#1e3a5f] mx-0.5" />
+          <button
+            onClick={() => importInputRef.current?.click()}
+            disabled={importingDeck}
+            title="Import .pptx / .pdf — appends its slides to this deck"
+            className="p-1.5 text-[#94a3b8] rounded hover:bg-[#1e3a5f] hover:text-white transition-colors disabled:opacity-40"
+          >
+            {importingDeck ? (
+              <span className="block w-4 h-4 border-2 border-violet-400 border-t-transparent rounded-full animate-spin" />
+            ) : (
+              <Upload className="w-4 h-4" />
+            )}
+          </button>
           <button
             onClick={downloadPptx}
             title="Download PPTX"
@@ -3276,6 +3527,7 @@ Return ONE complete "patch" (changes relative to the ORIGINAL slide data provide
               pendingSlideIds={pendingSlideIds}
               deletedSlideIds={pendingDeletedSlideIds}
               onSelect={handleSlideSelect}
+              onSelectAll={selectAllSlides}
               onReorder={reorderSlides}
             />
           ) : (
@@ -3284,6 +3536,10 @@ Return ONE complete "patch" (changes relative to the ORIGINAL slide data provide
               selectedCount={selectedElementIds.length}
               onUpdate={updateElementWithHistory}
               onPickIcon={id => setIconPickerFor(id)}
+              slideBg={slides.find(s => s.id === activeSlideId)?.bg ?? 'FFFFFF'}
+              onUpdateSlideBg={updateSlideBg}
+              slideGradient={slides.find(s => s.id === activeSlideId)?.bgGradient ?? null}
+              onUpdateSlideGradient={updateSlideGradient}
             />
           )}
         </div>
@@ -3348,6 +3604,8 @@ Return ONE complete "patch" (changes relative to the ORIGINAL slide data provide
                   onMergeSlides={mergeSelectedSlides}
                   slideBg={slides.find(s => s.id === activeSlideId)?.bg ?? 'FFFFFF'}
                   onUpdateSlideBg={updateSlideBg}
+                  slideGradient={slides.find(s => s.id === activeSlideId)?.bgGradient ?? null}
+                  onUpdateSlideGradient={updateSlideGradient}
                   quickActions={QUICK_ACTIONS}
                   quickActionCtx={{
                     slides,
@@ -3415,6 +3673,11 @@ Return ONE complete "patch" (changes relative to the ORIGINAL slide data provide
                     onCanvasClick={() => {
                       setEditingElementId(null)
                       setSelectedElementIds([])
+                    }}
+                    onCanvasDoubleClick={() => {
+                      setEditingElementId(null)
+                      setSelectedElementIds([])
+                      setLeftTab('design')
                     }}
                     onMarqueeSelect={ids => {
                       setEditingElementId(null)
@@ -3503,14 +3766,6 @@ Return ONE complete "patch" (changes relative to the ORIGINAL slide data provide
       )}
 
       {/* ── Knowledge Manager Modal ─────────────────────────────────────────── */}
-      {showKnowledge && (
-        <KnowledgePanel
-          layers={knowledgeLayers}
-          onChange={handleKnowledgeChange}
-          onClose={() => setShowKnowledge(false)}
-        />
-      )}
-
       {iconPickerFor && (
         <IconPicker
           current={
@@ -3527,49 +3782,7 @@ Return ONE complete "patch" (changes relative to the ORIGINAL slide data provide
         />
       )}
 
-      {showDesignSystem && (
-        <DesignSystemPanel
-          dsId={dsId}
-          initialName={dsName}
-          initialFiles={dsFiles}
-          onChange={handleDesignSystemChange}
-          onClose={closeDesignSystem}
-          templatesSlot={
-            <TemplateUploader
-              templates={templates}
-              onLoadedBatch={batch => {
-                setTemplates(prev => {
-                  const next = mergeTemplateList(prev, batch)
-                  const nextLayers = syncTemplateKnowledgeLayers(next, knowledgeLayers)
-                  handleKnowledgeChange(nextLayers)
-                  return next
-                })
-                const names = batch.map(t => t.filename).join(', ')
-                const notif =
-                  batch.length === 1
-                    ? `Template added: "${batch[0].filename}" (${batch[0].source.toUpperCase()}). Style tokens extracted.`
-                    : `${batch.length} templates added: ${names}. Combined style tokens are active.`
-                setDisplay(prev => [
-                  ...prev,
-                  { role: 'assistant', response: { type: 'clarification', question: notif } },
-                ])
-              }}
-              onRemove={id => {
-                setTemplates(prev => {
-                  const next = prev.filter(t => t.id !== id)
-                  const nextLayers = syncTemplateKnowledgeLayers(next, knowledgeLayers)
-                  handleKnowledgeChange(nextLayers)
-                  return next
-                })
-              }}
-              onClearAll={() => {
-                setTemplates([])
-                handleKnowledgeChange(knowledgeLayers.filter(l => l.source !== 'template'))
-              }}
-            />
-          }
-        />
-      )}
+      {knowledgeAndDesignModals}
 
       {/* ── Version Control Modal ───────────────────────────────────────────── */}
       {showVersions && (

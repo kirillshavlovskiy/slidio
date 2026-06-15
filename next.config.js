@@ -7,6 +7,7 @@ const nextConfig = {
       '@prisma/client',
       '@prisma/adapter-libsql',
       '@libsql/client',
+      '@adobe/pdfservices-node-sdk',
     ],
   },
 }

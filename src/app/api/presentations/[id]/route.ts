@@ -59,3 +59,20 @@ export async function GET(_req: NextRequest, { params }: { params: { id: string 
     })),
   })
 }
+
+// Delete a presentation. Its versions and decisions cascade away with it
+// (schema onDelete: Cascade). The hub's shared knowledge/design layers are tied
+// to the branch, not the deck, so they are intentionally left untouched.
+export async function DELETE(_req: NextRequest, { params }: { params: { id: string } }) {
+  const session = await auth()
+  if (!session?.user?.id) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+
+  const existing = await prisma.presentation.findFirst({
+    where: { id: params.id, userId: session.user.id },
+    select: { id: true },
+  })
+  if (!existing) return NextResponse.json({ error: 'Not found' }, { status: 404 })
+
+  await prisma.presentation.delete({ where: { id: params.id } })
+  return NextResponse.json({ ok: true })
+}

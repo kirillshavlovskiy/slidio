@@ -2,6 +2,7 @@
 import { useRef, useState } from 'react'
 import { SlideData, SlideElement, ElementStyle } from '@/lib/types'
 import { elementFillHex, elementTextHex, isFillElement } from '@/lib/elementStyle'
+import { slideBackgroundStyle, gradientCss } from '@/lib/slideBackground'
 import { fontFamilyCss } from '@/lib/fonts'
 import ElementTextEditor from '@/components/ElementTextEditor'
 import ChartElement from '@/components/ChartElement'
@@ -30,6 +31,8 @@ interface Props {
   onElementResizeStart?: () => void
   onEditingEnd?: () => void
   onCanvasClick?: () => void
+  /** Double-click on empty slide area (not on an element). Used to open slide-level editing. */
+  onCanvasDoubleClick?: () => void
   /** Called while/after dragging a marquee over empty canvas; receives ids inside the rect. */
   onMarqueeSelect?: (ids: string[]) => void
   interactive?: boolean
@@ -385,6 +388,8 @@ function elementStyle(el: SlideElement): React.CSSProperties {
           ? `#${fill}`
           : DEFAULT_FILLS[el.type]
         : 'transparent',
+    // A gradient fill (e.g. imported from PPTX) paints over the solid color.
+    backgroundImage: s.bgGradient ? gradientCss(s.bgGradient) : undefined,
     textAlign: (s.align as React.CSSProperties['textAlign']) || 'left',
     letterSpacing: s.charSpacing ? `${s.charSpacing * 0.06}em` : undefined,
     display: 'flex',
@@ -423,6 +428,7 @@ export default function SlideCanvas({
   onElementResizeStart,
   onEditingEnd,
   onCanvasClick,
+  onCanvasDoubleClick,
   onMarqueeSelect,
   interactive = true,
 }: Props) {
@@ -587,6 +593,14 @@ export default function SlideCanvas({
       <div
         ref={slideRef}
         onMouseDown={interactive ? onSlideMouseDown : undefined}
+        onDoubleClick={
+          interactive && onCanvasDoubleClick
+            ? e => {
+                // Only when double-clicking the empty slide surface, not an element.
+                if (e.target === e.currentTarget) onCanvasDoubleClick()
+              }
+            : undefined
+        }
         style={{
           position: 'relative',
           // Contain ALL internal z-indexes (selection outline, handles, guides,
@@ -596,7 +610,7 @@ export default function SlideCanvas({
           isolation: 'isolate',
           width: 960,
           height: 720,
-          backgroundColor: `#${slide.bg}`,
+          ...slideBackgroundStyle(slide),
           boxShadow: showShadow ? '0 8px 40px rgba(0,0,0,0.6)' : undefined,
           transform: scale !== 1 ? `scale(${scale})` : undefined,
           transformOrigin: 'top left',
