@@ -3,7 +3,7 @@
 import { useState, useCallback, useEffect, useRef, useMemo } from 'react'
 import { useSession, signOut } from 'next-auth/react'
 import { toPng } from 'html-to-image'
-import { Brain, History, Undo2, Download, FileDown, LogOut, Palette, Image as ImageIcon, Home as HomeIcon, BarChart3, Sparkles, Type, Square, Table, Upload } from 'lucide-react'
+import { Brain, History, Undo2, Download, FileDown, LogOut, Palette, Image as ImageIcon, Home as HomeIcon, BarChart3, Sparkles, Type, Square, Table, Upload, PanelLeftOpen, PanelRightOpen, Pin } from 'lucide-react'
 import { IMPORT_ACCEPT } from '@/lib/importDeck'
 import SlidePanel from '@/components/SlidePanel'
 import ElementInspector from '@/components/ElementInspector'
@@ -346,6 +346,25 @@ export default function Home() {
     }
   }, [])
 
+  // ── Manual-edit version capture ───────────────────────────────────────────────
+  // AI flows snapshot the deck into the version timeline; direct manual edits
+  // (drag, type, recolor, etc.) did not. These refs let a debounced effect commit
+  // manual edits as a single, continuously-updated "Manual edits" snapshot that
+  // coalesces a burst of tweaks until the next boundary (AI edit / restore /
+  // branch / open) closes the session and starts a fresh one.
+  const lastCommittedSlidesRef = useRef<string>('') // JSON of the deck the timeline head reflects
+  const manualVersionIdRef = useRef<string | null>(null) // open manual snapshot to update in place
+  const manualBaselineRef = useRef<SlideData[] | null>(null) // parent deck, for diffing the manual snapshot
+
+  // Mark `committed` as the deck the version timeline already reflects and close
+  // any open manual session. Called at every version boundary so the manual-commit
+  // effect doesn't re-capture AI/restore/branch changes as "manual edits".
+  const closeManualSession = useCallback((committed: SlideData[]) => {
+    lastCommittedSlidesRef.current = JSON.stringify(committed)
+    manualVersionIdRef.current = null
+    manualBaselineRef.current = null
+  }, [])
+
   // ── Decision Memory ────────────────────────────────────────────────────────────
   const [decisions, setDecisions] = useState<DecisionRecord[]>([])
   const [pendingDecisionId, setPendingDecisionId] = useState<string | null>(null)
@@ -379,14 +398,27 @@ export default function Home() {
   // ── Resizable side panels ────────────────────────────────────────────────────
   const [leftPanelWidth, setLeftPanelWidth] = useState(LEFT_PANEL_DEFAULT)
   const [rightPanelWidth, setRightPanelWidth] = useState(RIGHT_PANEL_DEFAULT)
+  // Collapsed = pinned shut (panel removed from layout). Peek = transient hover
+  // preview that floats the collapsed panel over the canvas without reflowing.
+  const [leftCollapsed, setLeftCollapsed] = useState(false)
+  const [rightCollapsed, setRightCollapsed] = useState(false)
+  const [leftPeek, setLeftPeek] = useState(false)
+  const [rightPeek, setRightPeek] = useState(false)
 
   useEffect(() => {
     try {
       const raw = localStorage.getItem('deckpanel-widths')
       if (!raw) return
-      const { left, right } = JSON.parse(raw) as { left?: number; right?: number }
+      const { left, right, leftCollapsed: lc, rightCollapsed: rc } = JSON.parse(raw) as {
+        left?: number
+        right?: number
+        leftCollapsed?: boolean
+        rightCollapsed?: boolean
+      }
       if (typeof left === 'number') setLeftPanelWidth(clamp(left, LEFT_PANEL_MIN, LEFT_PANEL_MAX))
       if (typeof right === 'number') setRightPanelWidth(clamp(right, RIGHT_PANEL_MIN, RIGHT_PANEL_MAX))
+      if (typeof lc === 'boolean') setLeftCollapsed(lc)
+      if (typeof rc === 'boolean') setRightCollapsed(rc)
     } catch {
       // ignore invalid saved widths
     }
@@ -395,9 +427,14 @@ export default function Home() {
   useEffect(() => {
     localStorage.setItem(
       'deckpanel-widths',
-      JSON.stringify({ left: leftPanelWidth, right: rightPanelWidth })
+      JSON.stringify({
+        left: leftPanelWidth,
+        right: rightPanelWidth,
+        leftCollapsed,
+        rightCollapsed,
+      })
     )
-  }, [leftPanelWidth, rightPanelWidth])
+  }, [leftPanelWidth, rightPanelWidth, leftCollapsed, rightCollapsed])
 
   const resizeLeftPanel = useCallback((delta: number) => {
     setLeftPanelWidth(w => clamp(w + delta, LEFT_PANEL_MIN, LEFT_PANEL_MAX))
@@ -494,7 +531,12 @@ export default function Home() {
         return el
       }),
     }))
-    if (changed) setSlides(next)
+    if (changed) {
+      setSlides(next)
+      // Auto-resolving image refs isn't a user edit — keep the manual-edit
+      // baseline aligned so it isn't committed as a "Manual edits" version.
+      if (!manualVersionIdRef.current) lastCommittedSlidesRef.current = JSON.stringify(next)
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [slides, mediaLibrary, designSystem, collectAllAssets])
 
@@ -548,6 +590,71 @@ export default function Home() {
     }, 400)
     return () => clearTimeout(timer)
   }, [slides, conversationHistory, activeSlideId, presentationId, initialLoadDone])
+
+  // Commit manual edits into the version timeline. Debounced + coalesced: a burst
+  // of direct edits becomes one "Manual edits" snapshot that keeps updating until
+  // a boundary (AI edit / restore / branch) closes the session.
+  useEffect(() => {
+    if (!presentationId || !initialLoadDone) return
+    if (JSON.stringify(slides) === lastCommittedSlidesRef.current) return
+    const timer = setTimeout(() => {
+      const cur = slidesRef.current
+      const curJson = JSON.stringify(cur)
+      if (curJson === lastCommittedSlidesRef.current) return
+
+      // Opening a new manual session: the parent baseline is the deck the timeline
+      // head currently reflects.
+      if (!manualVersionIdRef.current) {
+        manualBaselineRef.current = lastCommittedSlidesRef.current
+          ? (JSON.parse(lastCommittedSlidesRef.current) as SlideData[])
+          : cur
+      }
+      const base = manualBaselineRef.current ?? cur
+      const changedSlideIds = diffSlideIds(base, cur)
+      const diff = summarizeDeckChanges(base, cur)
+      const snapshot = JSON.parse(curJson) as SlideData[]
+
+      if (manualVersionIdRef.current) {
+        // Update the open manual snapshot in place (same id → DB upsert).
+        const id = manualVersionIdRef.current
+        const existing = versionsRef.current.find(v => v.id === id)
+        if (existing) {
+          const updated: SlideVersion = {
+            ...existing,
+            timestamp: Date.now(),
+            changeLog: `Manual edits · ${diff.text}`,
+            slides: snapshot,
+            slideCount: cur.length,
+            changedSlideIds,
+          }
+          setVersions(prev => prev.map(v => (v.id === id ? updated : v)))
+          saveVersion(presentationId, updated).catch(e =>
+            console.warn('[persist] manual version update failed', e)
+          )
+        }
+      } else {
+        const version: SlideVersion = {
+          id: crypto.randomUUID(),
+          timestamp: Date.now(),
+          label: null,
+          changeLog: `Manual edits · ${diff.text}`,
+          slides: snapshot,
+          decisionId: null,
+          slideCount: cur.length,
+          changedSlideIds,
+          ...makeBranchMeta(),
+        }
+        manualVersionIdRef.current = version.id
+        setVersions(prev => [...prev, version])
+        setCurrentVersionId(version.id)
+        saveVersion(presentationId, version).catch(e =>
+          console.warn('[persist] manual version save failed', e)
+        )
+      }
+      lastCommittedSlidesRef.current = curJson
+    }, 1500)
+    return () => clearTimeout(timer)
+  }, [slides, presentationId, initialLoadDone, makeBranchMeta])
 
   // ── Portfolio: load branches + presentation list for the start screen ─────────
   const loadPortfolio = useCallback(async () => {
@@ -701,13 +808,17 @@ export default function Home() {
           setDesignSystem(null)
         }
 
+        // Baseline the manual-edit tracker so loading a deck doesn't get captured
+        // as a "manual edit" on the first tweak.
+        closeManualSession(loadedSlides)
+
         setShowStartScreen(false)
         setInitialLoadDone(true)
       } catch (err) {
         console.error('Failed to open presentation', err)
       }
     },
-    [dsId, seedBranchKnowledge]
+    [dsId, seedBranchKnowledge, closeManualSession]
   )
 
   // Create a presentation, optionally inside a new branch, then open it.
@@ -767,7 +878,7 @@ export default function Home() {
 
   // Import a .pptx/.pdf file from the start screen into a brand-new presentation.
   const importPresentation = useCallback(
-    async (file: File) => {
+    async (file: File, branchId?: string) => {
       const baseName = file.name.replace(/\.(pptx|pdf|ppt)$/i, '').trim() || 'Imported deck'
 
       // Avoid silently creating duplicates: if a saved presentation already uses
@@ -802,10 +913,11 @@ export default function Home() {
           const { importDeckFile } = await import('@/lib/importDeck')
           const { slides: imported, warnings } = await importDeckFile(file)
           if (warnings.length > 0) console.warn('Import warnings:', warnings)
+          const targetBranchId = branchId ?? branches[0]?.id
           await createPresentation({
             name: deckName,
-            branchId: branches[0]?.id,
-            newBranchName: branches.length === 0 ? 'Imported decks' : undefined,
+            branchId: targetBranchId,
+            newBranchName: !targetBranchId ? 'Imported decks' : undefined,
             slides: imported,
             open: false,
           })
@@ -2027,6 +2139,7 @@ export default function Home() {
       }
       setVersions(prev => [...prev, version])
       setCurrentVersionId(version.id)
+      closeManualSession(after)
 
       if (presentationId) {
         persistDecision(presentationId, decision).catch(e =>
@@ -2037,7 +2150,7 @@ export default function Home() {
         )
       }
     },
-    [presentationId, makeBranchMeta]
+    [presentationId, makeBranchMeta, closeManualSession]
   )
 
   // ── Agentic editor loop: inspect → edit → render → verify, like Claude in PPT ────
@@ -2573,6 +2686,7 @@ export default function Home() {
       setVersions(prev => [...prev, rootVersion])
       setCurrentVersionId(rootVersion.id)
       setCurrentBranchId(newBranchId)
+      closeManualSession(checkpoint)
       if (presentationId) {
         saveVersion(presentationId, rootVersion).catch(e =>
           console.warn('[persist] branch root failed', e)
@@ -2596,7 +2710,7 @@ export default function Home() {
       // Load the message text back into the input for editing/resubmitting.
       setChatDraft({ text: target.text ?? '', nonce: Date.now() })
     },
-    [display, slides, presentationId, makeBranchMeta]
+    [display, slides, presentationId, makeBranchMeta, closeManualSession]
   )
 
   // Switch the active branch: restore the deck to that branch's latest snapshot and
@@ -2607,9 +2721,11 @@ export default function Home() {
       if (onBranch.length === 0) return
       const latest = onBranch[onBranch.length - 1]
       pushHistory()
-      setSlides(JSON.parse(JSON.stringify(latest.slides)) as SlideData[])
+      const branchSlides = JSON.parse(JSON.stringify(latest.slides)) as SlideData[]
+      setSlides(branchSlides)
       setCurrentBranchId(branchId)
       setCurrentVersionId(latest.id)
+      closeManualSession(branchSlides)
       setPendingChanges(null)
       setPendingSummary('')
       setEditingElementId(null)
@@ -2622,7 +2738,7 @@ export default function Home() {
         setSelectionAnchorId(nextActive)
       }
     },
-    [versions, activeSlideId, pushHistory]
+    [versions, activeSlideId, pushHistory, closeManualSession]
   )
 
   // Distinct branches present in the version timeline (Main always first).
@@ -2716,6 +2832,7 @@ export default function Home() {
 
     pushHistory()
     setSlides(newSlides)
+    closeManualSession(newSlides)
 
     if (!newSlides.some(s => s.id === activeSlideId)) {
       const nextActive = newSlides[0]?.id
@@ -2760,7 +2877,7 @@ export default function Home() {
       { role: 'user', text: confirmMsg.content },
       { role: 'assistant', response: doneResponse },
     ])
-  }, [pendingChanges, pendingSummary, pendingDecisionId, slides, presentationId, activeSlideId, makeBranchMeta])
+  }, [pendingChanges, pendingSummary, pendingDecisionId, slides, presentationId, activeSlideId, makeBranchMeta, closeManualSession])
 
   // ── Discard patch ─────────────────────────────────────────────────────────────
   const discardChanges = useCallback((reason?: string) => {
@@ -3050,6 +3167,7 @@ Return ONE complete "patch" (changes relative to the ORIGINAL slide data provide
     setSlides(restoredSlides)
     setCurrentVersionId(v.id)
     setCurrentBranchId(v.branchId ?? MAIN_BRANCH_ID)
+    closeManualSession(restoredSlides)
     setPendingChanges(null)
     setPendingSummary('')
     setEditingElementId(null)
@@ -3062,7 +3180,7 @@ Return ONE complete "patch" (changes relative to the ORIGINAL slide data provide
       setSelectedSlideIds([nextActive])
       setSelectionAnchorId(nextActive)
     }
-  }, [activeSlideId, pushHistory])
+  }, [activeSlideId, pushHistory, closeManualSession])
 
   // ── Restore single slide from a version ───────────────────────────────────────
   const restoreSlide = useCallback((slideId: string, fromVersion: SlideVersion) => {
@@ -3554,12 +3672,52 @@ Return ONE complete "patch" (changes relative to the ORIGINAL slide data provide
         </div>
       </header>
 
-      <div className="flex flex-1 overflow-hidden">
-      {/* Left — slide list / design inspector */}
+      <div className="relative flex flex-1 overflow-hidden">
+      {/* Left — slide list / design inspector (collapsible with hover-peek) */}
       <div
-        style={{ width: leftPanelWidth }}
-        className="flex-shrink-0 bg-[#0d1b2a] flex flex-col overflow-hidden"
+        className="relative flex-shrink-0 transition-[width] duration-200 ease-out"
+        style={{ width: leftCollapsed ? 0 : leftPanelWidth }}
+        onMouseLeave={() => setLeftPeek(false)}
       >
+        {/* Edge rail — hover to peek the collapsed panel, click to reopen it. */}
+        {leftCollapsed && (
+          <button
+            type="button"
+            onMouseEnter={() => setLeftPeek(true)}
+            onClick={() => {
+              setLeftCollapsed(false)
+              setLeftPeek(false)
+            }}
+            title="Show slide panel"
+            aria-label="Show slide panel"
+            className="absolute inset-y-0 left-0 z-30 flex w-2.5 items-center justify-center bg-[#1e3a5f]/40 transition-colors hover:bg-[#60a5fa]/40"
+          >
+            <PanelLeftOpen className="h-4 w-4 text-[#64748b]" />
+          </button>
+        )}
+      <div
+        onMouseEnter={() => {
+          if (leftCollapsed) setLeftPeek(true)
+        }}
+        style={{ width: leftPanelWidth }}
+        className={`absolute inset-y-0 left-0 bg-[#0d1b2a] flex flex-col overflow-hidden transition-transform duration-200 ease-out ${
+          leftCollapsed && !leftPeek ? '-translate-x-full' : 'translate-x-0'
+        } ${leftCollapsed && leftPeek ? 'z-40 border-r border-[#1e3a5f] shadow-2xl' : ''}`}
+      >
+        {leftCollapsed && leftPeek && (
+          <button
+            type="button"
+            onClick={() => {
+              setLeftCollapsed(false)
+              setLeftPeek(false)
+            }}
+            title="Keep panel open"
+            aria-label="Keep panel open"
+            className="absolute right-1.5 top-1.5 z-50 flex h-6 w-6 items-center justify-center rounded text-[#475569] transition-colors hover:bg-[#1e3a5f] hover:text-[#93c5fd]"
+          >
+            <Pin className="h-3.5 w-3.5" />
+          </button>
+        )}
         <div className="flex-shrink-0 flex border-b border-[#16263b]">
           {([
             ['slides', 'Slides'],
@@ -3608,7 +3766,14 @@ Return ONE complete "patch" (changes relative to the ORIGINAL slide data provide
           )}
         </div>
       </div>
-      <ResizeHandle side="left" onResize={resizeLeftPanel} />
+      </div>
+      {!leftCollapsed && (
+        <ResizeHandle
+          side="left"
+          onResize={resizeLeftPanel}
+          onCollapse={() => setLeftCollapsed(true)}
+        />
+      )}
 
       {/* Center — canvas + diff bar */}
       <div className="flex-1 flex flex-col overflow-hidden min-h-0">
@@ -3766,7 +3931,13 @@ Return ONE complete "patch" (changes relative to the ORIGINAL slide data provide
 
       </div>
 
-      <ResizeHandle side="right" onResize={resizeRightPanel} />
+      {!rightCollapsed && (
+        <ResizeHandle
+          side="right"
+          onResize={resizeRightPanel}
+          onCollapse={() => setRightCollapsed(true)}
+        />
+      )}
 
       {/* Off-screen render target: the agent screenshots THIS to "see" a slide. */}
       <div
@@ -3787,30 +3958,72 @@ Return ONE complete "patch" (changes relative to the ORIGINAL slide data provide
         </div>
       </div>
 
-      {/* Right — chat */}
+      {/* Right — chat (collapsible with hover-peek) */}
       <div
-        style={{ width: rightPanelWidth }}
-        className="flex-shrink-0 bg-[#0d1b2a] flex flex-col overflow-hidden"
+        className="relative flex-shrink-0 transition-[width] duration-200 ease-out"
+        style={{ width: rightCollapsed ? 0 : rightPanelWidth }}
+        onMouseLeave={() => setRightPeek(false)}
       >
-        <ChatPanel
-          isLoading={isLoading || isAgentRunning}
-          isAgentRunning={isAgentRunning}
-          selectedSlideIds={selectedSlideIds}
-          selectedElementIds={selectedElementIds}
-          display={display}
-          onSend={handleSend}
-          onRunAgent={runAgent}
-          onStopAgent={stopAgent}
-          onPickOption={handlePickOption}
-          onRevert={revertToMessage}
-          draft={chatDraft}
-          slides={slides}
-          pendingChanges={pendingChanges}
-          pendingSummary={pendingSummary}
-          onApproveProposal={applyChanges}
-          onDeclineProposal={discardChanges}
-          onOpenProposal={() => setIsPreviewOpen(true)}
-        />
+        {/* Edge rail — hover to peek the collapsed chat, click to reopen it. */}
+        {rightCollapsed && (
+          <button
+            type="button"
+            onMouseEnter={() => setRightPeek(true)}
+            onClick={() => {
+              setRightCollapsed(false)
+              setRightPeek(false)
+            }}
+            title="Show chat panel"
+            aria-label="Show chat panel"
+            className="absolute inset-y-0 right-0 z-30 flex w-2.5 items-center justify-center bg-[#1e3a5f]/40 transition-colors hover:bg-[#60a5fa]/40"
+          >
+            <PanelRightOpen className="h-4 w-4 text-[#64748b]" />
+          </button>
+        )}
+        <div
+          onMouseEnter={() => {
+            if (rightCollapsed) setRightPeek(true)
+          }}
+          style={{ width: rightPanelWidth }}
+          className={`absolute inset-y-0 right-0 bg-[#0d1b2a] flex flex-col overflow-hidden transition-transform duration-200 ease-out ${
+            rightCollapsed && !rightPeek ? 'translate-x-full' : 'translate-x-0'
+          } ${rightCollapsed && rightPeek ? 'z-40 border-l border-[#1e3a5f] shadow-2xl' : ''}`}
+        >
+          {rightCollapsed && rightPeek && (
+            <button
+              type="button"
+              onClick={() => {
+                setRightCollapsed(false)
+                setRightPeek(false)
+              }}
+              title="Keep panel open"
+              aria-label="Keep panel open"
+              className="absolute left-1.5 top-1.5 z-50 flex h-6 w-6 items-center justify-center rounded text-[#475569] transition-colors hover:bg-[#1e3a5f] hover:text-[#93c5fd]"
+            >
+              <Pin className="h-3.5 w-3.5" />
+            </button>
+          )}
+          <ChatPanel
+            isLoading={isLoading || isAgentRunning}
+            isAgentRunning={isAgentRunning}
+            selectedSlideIds={selectedSlideIds}
+            selectedElementIds={selectedElementIds}
+            display={display}
+            onSend={handleSend}
+            onRunAgent={runAgent}
+            onStopAgent={stopAgent}
+            onPickOption={handlePickOption}
+            onRevert={revertToMessage}
+            draft={chatDraft}
+            slides={slides}
+            pendingChanges={pendingChanges}
+            pendingSummary={pendingSummary}
+            onApproveProposal={applyChanges}
+            onDeclineProposal={discardChanges}
+            onOpenProposal={() => setIsPreviewOpen(true)}
+            onCollapse={() => setRightCollapsed(true)}
+          />
+        </div>
       </div>
       </div>
 

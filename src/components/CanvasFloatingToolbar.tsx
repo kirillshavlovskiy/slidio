@@ -22,6 +22,8 @@ import {
   GripVertical,
   Italic,
   LayoutGrid,
+  List,
+  ListOrdered,
   Minus,
   MousePointer2,
   Pen,
@@ -40,6 +42,7 @@ import { SlideElement, ElementStyle, SlideGradient } from '@/lib/types'
 import { elementFillHex, elementTextHex, isFillElement } from '@/lib/elementStyle'
 import { gradientCss, GRADIENT_PRESETS } from '@/lib/slideBackground'
 import { QuickAction, QuickActionContext } from '@/lib/quickActions'
+import { listState, toggleListMode } from '@/lib/textLists'
 import FontFamilySelect from '@/components/FontFamilySelect'
 
 // Icons for the AI smart-action rows (resolved by the action's `icon` name).
@@ -218,6 +221,58 @@ function CustomColorButton({
   )
 }
 
+// A compact color control: shows just the current color as one swatch, and
+// reveals the full palette (passed as children) in a popover only when clicked.
+function ColorPopover({
+  label,
+  title,
+  previewColor,
+  previewGradient,
+  round,
+  children,
+}: {
+  label?: string
+  title: string
+  previewColor?: string
+  previewGradient?: string
+  round?: boolean
+  children: React.ReactNode
+}) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div className="relative flex items-center gap-1 flex-shrink-0">
+      {label && (
+        <span className="text-[10px] text-[#64748b] pr-0.5 flex-shrink-0">{label}</span>
+      )}
+      <button
+        type="button"
+        title={title}
+        onMouseDown={e => e.preventDefault()}
+        onClick={() => setOpen(o => !o)}
+        className={`w-5 h-5 flex-shrink-0 border transition-transform hover:scale-110 ${
+          round ? 'rounded-full' : 'rounded-sm'
+        } ${open ? 'border-[#60a5fa] ring-1 ring-[#60a5fa]' : 'border-[#334155]'}`}
+        style={
+          previewGradient
+            ? { backgroundImage: previewGradient }
+            : { backgroundColor: `#${(previewColor || 'FFFFFF').replace('#', '')}` }
+        }
+      />
+      {open && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
+          <div
+            className="absolute left-0 top-full z-50 mt-1.5 flex w-[164px] flex-wrap items-center gap-1 rounded-lg border border-[#1e3a5f] bg-[#0b1526] p-2 shadow-2xl"
+            onMouseDown={e => e.preventDefault()}
+          >
+            {children}
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
 function selectionLabel(elements: SlideElement[]): string {
   if (elements.length === 0) return 'Slide'
   if (elements.length > 1) return `${elements.length} elements`
@@ -353,6 +408,12 @@ export default function CanvasFloatingToolbar({
     const patch: Partial<ElementStyle> = { bg: hex, bgGradient: undefined }
     if (single.type === 'bar') patch.color = hex
     onUpdateElement(single.id, { style: patch })
+  }
+
+  const textListMode = single?.type === 'text' ? listState(single.content ?? '') : 'none'
+  const toggleList = (mode: 'bullet' | 'number') => {
+    if (!single) return
+    onUpdateElement(single.id, { content: toggleListMode(single.content ?? '', mode) })
   }
 
   return (
@@ -508,18 +569,17 @@ export default function CanvasFloatingToolbar({
             </ToolBtn>
           </div>
           <Divider />
-          {/* Slide background color */}
-          <div className="flex items-center gap-1 flex-wrap flex-shrink-0 max-w-[176px]">
-            <span
-              className="text-[10px] text-[#64748b] pr-0.5 flex-shrink-0"
-              title={
-                selectedSlideCount > 1
-                  ? `Background applies to all ${selectedSlideCount} selected slides`
-                  : 'Slide background'
-              }
-            >
-              {selectedSlideCount > 1 ? `BG ×${selectedSlideCount}` : 'BG'}
-            </span>
+          {/* Slide background color (collapsed to one swatch; opens on click) */}
+          <ColorPopover
+            label={selectedSlideCount > 1 ? `BG ×${selectedSlideCount}` : 'BG'}
+            title={
+              selectedSlideCount > 1
+                ? `Background applies to all ${selectedSlideCount} selected slides`
+                : 'Slide background'
+            }
+            previewColor={slideGradient ? undefined : slideBg}
+            previewGradient={slideGradient ? gradientCss(slideGradient) : undefined}
+          >
             {SLIDE_BG_PRESETS.map(hex => (
               <button
                 key={hex}
@@ -539,7 +599,7 @@ export default function CanvasFloatingToolbar({
               value={slideBg}
               onChange={onUpdateSlideBg}
             />
-            <span className="w-px h-4 bg-[#1e3a5f] mx-0.5" />
+            <span className="w-full h-px bg-[#1e3a5f] my-0.5" />
             {GRADIENT_PRESETS.slice(0, 6).map((preset, i) => {
               const active =
                 slideGradient?.from === preset.from &&
@@ -558,7 +618,7 @@ export default function CanvasFloatingToolbar({
                 />
               )
             })}
-          </div>
+          </ColorPopover>
         </>
       )}
 
@@ -683,6 +743,25 @@ export default function CanvasFloatingToolbar({
           >
             <AlignRight className="w-3.5 h-3.5" />
           </IconBtn>
+          {single.type === 'text' && (
+            <>
+              <Divider />
+              <IconBtn
+                title="Bulleted list"
+                active={textListMode === 'bullet'}
+                onClick={() => toggleList('bullet')}
+              >
+                <List className="w-3.5 h-3.5" />
+              </IconBtn>
+              <IconBtn
+                title="Numbered list"
+                active={textListMode === 'number'}
+                onClick={() => toggleList('number')}
+              >
+                <ListOrdered className="w-3.5 h-3.5" />
+              </IconBtn>
+            </>
+          )}
           <Divider />
           <IconBtn
             title="Smaller text"
@@ -812,7 +891,7 @@ export default function CanvasFloatingToolbar({
       {!annotationMode && single && isFillEl && single.type !== 'chip' && (
         <>
           <Divider />
-          <div className="flex items-center gap-1">
+          <ColorPopover title="Fill color" previewColor={elementFillHex(single)}>
             {FILL_PRESETS.map(hex => (
               <button
                 key={hex}
@@ -832,7 +911,7 @@ export default function CanvasFloatingToolbar({
               value={elementFillHex(single)}
               onChange={applyFill}
             />
-          </div>
+          </ColorPopover>
         </>
       )}
 
@@ -840,15 +919,15 @@ export default function CanvasFloatingToolbar({
       {!annotationMode && single?.type === 'chip' && (
         <>
           <Divider />
-          <div className="flex items-center gap-1">
-            {FILL_PRESETS.slice(0, 5).map(hex => (
+          <ColorPopover title="Chip fill" previewColor={single.style.bg ?? 'FFFFFF'}>
+            {FILL_PRESETS.map(hex => (
               <button
                 key={hex}
                 type="button"
                 title={`Chip fill #${hex}`}
                 onClick={() => onUpdateElement(single.id, { style: { bg: hex, bgGradient: undefined } })}
                 className={`w-4 h-4 rounded-sm border transition-transform hover:scale-110 ${
-                  single.style.bg === hex ? 'border-white' : 'border-transparent'
+                  single.style.bg === hex ? 'border-[#60a5fa] ring-1 ring-[#60a5fa]' : 'border-[#334155]'
                 }`}
                 style={{ backgroundColor: `#${hex}` }}
               />
@@ -858,7 +937,7 @@ export default function CanvasFloatingToolbar({
               value={single.style.bg ?? 'FFFFFF'}
               onChange={hex => onUpdateElement(single.id, { style: { bg: hex, bgGradient: undefined } })}
             />
-          </div>
+          </ColorPopover>
         </>
       )}
 
@@ -866,7 +945,7 @@ export default function CanvasFloatingToolbar({
       {!annotationMode && single?.type === 'text' && (
         <>
           <Divider />
-          <div className="flex items-center gap-1 flex-wrap flex-shrink-0 max-w-[176px]">
+          <ColorPopover title="Text color" round previewColor={elementTextHex(single)}>
             {TEXT_PRESETS.map(hex => (
               <button
                 key={hex}
@@ -885,7 +964,7 @@ export default function CanvasFloatingToolbar({
               value={elementTextHex(single)}
               onChange={hex => onUpdateElement(single.id, { style: { color: hex } })}
             />
-          </div>
+          </ColorPopover>
         </>
       )}
     </div>

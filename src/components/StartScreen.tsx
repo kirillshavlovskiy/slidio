@@ -31,7 +31,7 @@ interface Props {
   loading?: boolean
   onOpen: (presentationId: string) => void
   onCreate: (opts: { name: string; branchId?: string; newBranchName?: string }) => void
-  onImportFile?: (file: File) => Promise<void> | void
+  onImportFile?: (file: File, branchId?: string) => Promise<void> | void
   /** In-progress / failed background imports, shown as pending cards. */
   importJobs?: ImportJob[]
   onDismissImportJob?: (id: string) => void
@@ -82,13 +82,16 @@ export default function StartScreen({
   const [importing, setImporting] = useState(false)
   const [importError, setImportError] = useState<string | null>(null)
   const importInputRef = useRef<HTMLInputElement>(null)
+  // Which branch a click on an "Import" button targets (set just before opening
+  // the shared hidden file input).
+  const importBranchRef = useRef<string | undefined>(undefined)
 
   const handleImport = async (file: File) => {
     if (!onImportFile) return
     setImportError(null)
     setImporting(true)
     try {
-      await onImportFile(file)
+      await onImportFile(file, importBranchRef.current)
     } catch (err) {
       setImportError(err instanceof Error ? err.message : 'Failed to import presentation.')
     } finally {
@@ -128,38 +131,23 @@ export default function StartScreen({
         </div>
         <div className="flex items-center gap-2">
           {onImportFile && (
-            <>
-              <input
-                ref={importInputRef}
-                type="file"
-                accept={IMPORT_ACCEPT}
-                className="hidden"
-                onChange={e => {
-                  const f = e.target.files?.[0]
-                  if (f) void handleImport(f)
-                  e.target.value = ''
-                }}
-              />
-              <button
-                onClick={() => importInputRef.current?.click()}
-                disabled={importing}
-                title="Import a .pptx or .pdf presentation"
-                className="flex items-center gap-1.5 border border-[#1e3a5f] text-[#94a3b8] hover:text-white hover:bg-[#0d1b2a] text-sm font-semibold px-3.5 py-2 rounded-lg transition-colors disabled:opacity-50"
-              >
-                {importing ? (
-                  <span className="w-4 h-4 border-2 border-violet-400 border-t-transparent rounded-full animate-spin" />
-                ) : (
-                  <Upload className="w-4 h-4" />
-                )}
-                {importing ? 'Importing…' : 'Import'}
-              </button>
-            </>
+            <input
+              ref={importInputRef}
+              type="file"
+              accept={IMPORT_ACCEPT}
+              className="hidden"
+              onChange={e => {
+                const f = e.target.files?.[0]
+                if (f) void handleImport(f)
+                e.target.value = ''
+              }}
+            />
           )}
           <button
             onClick={() => setShowCreate(true)}
             className="flex items-center gap-1.5 bg-violet-600 hover:bg-violet-500 text-white text-sm font-semibold px-3.5 py-2 rounded-lg transition-colors"
           >
-            <Plus className="w-4 h-4" /> New presentation
+            <Plus className="w-4 h-4" /> New knowledge branch
           </button>
           <button
             onClick={onSignOut}
@@ -221,7 +209,7 @@ export default function StartScreen({
           </div>
         )}
         <div className="mb-6">
-          <h2 className="text-lg font-semibold">Knowledge Hubs</h2>
+          <h2 className="text-lg font-semibold">Knowledge Hub</h2>
           <p className="text-xs text-[#64748B] mt-1">
             A Knowledge Hub is a shared workspace — like a Git repo for presentations.
             Decks in a hub share its knowledge, design system, and history, so a team can
@@ -316,6 +304,24 @@ export default function StartScreen({
                         </button>
                       )}
                       <div className="w-px h-5 bg-[#1e3a5f] mx-0.5" />
+                      {onImportFile && (
+                        <button
+                          onClick={() => {
+                            importBranchRef.current = branch.id
+                            importInputRef.current?.click()
+                          }}
+                          disabled={importing}
+                          title="Import a .pptx or .pdf into this branch"
+                          className="flex items-center gap-1 text-xs text-[#94a3b8] hover:text-white hover:bg-[#1e3a5f]/50 px-2 py-1 rounded transition-colors disabled:opacity-50"
+                        >
+                          {importing ? (
+                            <span className="w-3.5 h-3.5 border-2 border-violet-400 border-t-transparent rounded-full animate-spin" />
+                          ) : (
+                            <Upload className="w-3.5 h-3.5" />
+                          )}
+                          Import
+                        </button>
+                      )}
                       <button
                         onClick={() => onCreate({ name: '', branchId: branch.id })}
                         className="flex items-center gap-1 text-xs text-violet-300 hover:text-white hover:bg-[#1e3a5f]/50 px-2 py-1 rounded transition-colors"
