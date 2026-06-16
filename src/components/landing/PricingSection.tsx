@@ -107,7 +107,7 @@ export function PricingSection() {
                 ? "$0"
                 : interval === "yearly"
                   ? `$${Math.round(price / 12)}`
-                  : `$${price}`;
+                  : `$${Number.isInteger(price) ? price : price.toFixed(2)}`;
 
             return (
               <div

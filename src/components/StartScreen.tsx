@@ -678,7 +678,7 @@ function PlanDialog({
                 ? '$0'
                 : interval === 'yearly'
                   ? `$${Math.round(price / 12)}`
-                  : `$${price}`
+                  : `$${Number.isInteger(price) ? price : price.toFixed(2)}`
             const isCurrent = planId === currentPlan
             const rank = PLAN_ORDER.indexOf(planId)
 

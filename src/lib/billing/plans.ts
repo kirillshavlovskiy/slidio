@@ -41,9 +41,12 @@ export const PLANS: Record<PlanId, Plan> = {
   },
   pro: {
     id: "pro",
+    // Stripe rejects any charge below its per-currency minimum (~$0.50 USD), so a
+    // $0.02 test price can never be collected. 0.50 is the smallest amount Stripe
+    // will actually process. Bump to the real price before going live.
     name: "Pro",
     tagline: "For weekly deck work.",
-    monthlyPrice: 0.02,
+    monthlyPrice: 0.5,
     yearlyPrice: 200,
     monthlyTokens: PRO_TOKENS,
     paid: true,
@@ -53,7 +56,7 @@ export const PLANS: Record<PlanId, Plan> = {
     id: "max",
     name: "Max",
     tagline: "For heavy, daily editing.",
-    monthlyPrice: 0.05,
+    monthlyPrice: 1,
     yearlyPrice: 500,
     monthlyTokens: MAX_TOKENS,
     paid: true,

@@ -20,9 +20,12 @@ if (!key) {
 const stripe = new Stripe(key);
 
 // Prices are in cents. Keep these in sync with src/lib/billing/plans.ts.
+// NOTE: Stripe rejects charges below its per-currency minimum (~50¢ USD), so the
+// monthly amounts must be >= 50. These are low TEST amounts; raise to real prices
+// (e.g. monthly: 2000 / 5000) before going live.
 const PLANS = [
-  { id: "pro", name: "Slidio Pro", monthly: 2000, yearly: 20000 },
-  { id: "max", name: "Slidio Max", monthly: 5000, yearly: 50000 },
+  { id: "pro", name: "Slidio Pro", monthly: 50, yearly: 20000 },
+  { id: "max", name: "Slidio Max", monthly: 100, yearly: 50000 },
 ];
 
 const mode = key.startsWith("sk_live_") ? "LIVE" : "TEST";
