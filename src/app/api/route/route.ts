@@ -76,6 +76,20 @@ function isComplexEdit(instruction: string): boolean {
   return COMPLEX_EDIT.test(instruction)
 }
 
+/**
+ * CREATE/BUILD intent: the user wants slides/a deck generated or populated. This
+ * ALWAYS belongs to the iterative agent (which reads context, builds incrementally
+ * across slides, renders and verifies) — never the one-shot editor, which would
+ * try to emit a whole deck blind or pester the user with scope questions. Used as
+ * a hard floor so the cheap router can't mislabel a build as a small "single" edit.
+ */
+const CREATE_DECK_INTENT =
+  /\b(build|create|generate|produce|draft|assemble|compose|populate|flesh\s+out|write\s+up|put\s+together|lay\s+out|fill\s+(?:in|out))\b[^.?!]*\b(deck|decks|presentation|presentations|slide|slides|slideshow|slide\s*deck|pitch\s+deck|investor\s+deck|sections?|outline|the\s+rest)\b/i
+
+function isCreateDeckIntent(instruction: string): boolean {
+  return CREATE_DECK_INTENT.test(instruction)
+}
+
 export async function POST(req: NextRequest) {
   const body = await req.json().catch(() => ({}))
   const instruction: string = typeof body.instruction === 'string' ? body.instruction : ''
@@ -114,7 +128,7 @@ Return the routing JSON now.`
     const raw = textBlock?.type === 'text' ? textBlock.text : ''
     const match = raw.match(/\{[\s\S]*\}/)
     const parsed = match ? JSON.parse(match[0]) : null
-    const mode = coerceMode(parsed?.mode)
+    let mode = coerceMode(parsed?.mode)
     if (mode) {
       // Scope is irrelevant for questions; never let it be "ask" when there's a selection.
       let scope = coerceScope(parsed?.scope)
@@ -132,6 +146,14 @@ Return the routing JSON now.`
       // regardless of slide count. Questions are never bumped.
       if (mode !== 'ask' && (effort === 'low' || effort === 'medium') && isComplexEdit(instruction)) {
         effort = 'high'
+      }
+
+      // Hard floor: a build/populate-a-deck request must run on the AGENT (never the
+      // one-shot editor). The cheap router occasionally labels "create slides …" as
+      // "single"; force it to the agent at high effort so big builds aren't one-shot.
+      if (mode === 'single' && isCreateDeckIntent(instruction)) {
+        mode = 'agent'
+        if (effort === 'low' || effort === 'medium') effort = 'high'
       }
 
       return NextResponse.json({ mode, effort, scope })

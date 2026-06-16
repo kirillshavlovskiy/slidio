@@ -2,6 +2,7 @@
 
 import { useRef, useState } from 'react'
 import type { TemplateKnowledge } from '@/lib/templateKnowledge'
+import { isClientParsableTemplate, parseTemplateClient } from '@/lib/parseTemplateClient'
 
 export type { TemplateKnowledge } from '@/lib/templateKnowledge'
 
@@ -13,6 +14,11 @@ interface Props {
 }
 
 async function parseTemplateFile(file: File): Promise<TemplateKnowledge> {
+  // .pptx / .key are parsed in the browser so big files don't hit the
+  // serverless body-size limit (HTTP 413). PDFs still use the server route.
+  if (isClientParsableTemplate(file.name)) {
+    return parseTemplateClient(file)
+  }
   const fd = new FormData()
   fd.append('file', file)
   const res = await fetch('/api/parse-template', { method: 'POST', body: fd })
@@ -37,11 +43,11 @@ export default function TemplateUploader({
   const handleFiles = async (files: FileList | File[]) => {
     const list = Array.from(files).filter(f => {
       const n = f.name.toLowerCase()
-      return n.endsWith('.pptx') || n.endsWith('.pdf')
+      return n.endsWith('.pptx') || n.endsWith('.pdf') || n.endsWith('.key')
     })
 
     if (list.length === 0) {
-      setError('Only .pptx or .pdf template files are supported')
+      setError('Only .pptx, .key or .pdf template files are supported')
       return
     }
 
@@ -148,7 +154,7 @@ export default function TemplateUploader({
             <p className="text-xs text-[#475569] group-hover:text-[#F59E0B] transition-colors">
               {templates.length > 0
                 ? '+ Add more templates'
-                : '📎 Drop .pptx / .pdf templates (multiple)'}
+                : '📎 Drop .pptx / .key / .pdf templates (multiple)'}
             </p>
             <p className="text-[10px] text-[#334155] mt-0.5">
               Select or drop several files at once
@@ -160,7 +166,7 @@ export default function TemplateUploader({
       <input
         ref={inputRef}
         type="file"
-        accept=".pptx,.pdf,application/pdf"
+        accept=".pptx,.key,.pdf,application/pdf"
         multiple
         className="hidden"
         onChange={e => {

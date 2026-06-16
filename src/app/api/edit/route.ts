@@ -265,6 +265,41 @@ Options are optional — omit them if you need a free-form text answer.
 Use clarification when: instruction targets multiple possible elements, change is subjective,
 you need to know a specific value, or the user's intent is unclear.
 
+#### MODE 2b — STRUCTURED MULTI-QUESTION CLARIFICATION (PREFERRED when you need SEVERAL inputs)
+When you would otherwise ask the user 2+ separate questions (e.g. scope AND content source AND
+data handling), DO NOT cram them into one paragraph. Return a "questions" array so each question
+renders as its own block with clickable answer buttons (and an optional typed answer). Shape:
+{
+  "type": "clarification",
+  "question": "Before I build this, a few quick choices:",   // short lead-in (optional)
+  "questions": [
+    {
+      "id": "scope",
+      "question": "What scope should I build?",
+      "options": [
+        { "id": "full", "label": "The entire 19-slide deck" },
+        { "id": "active", "label": "Only the current slide" }
+      ]
+    },
+    {
+      "id": "data",
+      "question": "How should I handle placeholder values like [Phone Number]?",
+      "options": [
+        { "id": "keep", "label": "Leave as-is" },
+        { "id": "tbd", "label": "Replace with TBD*" }
+      ],
+      "allowText": true
+    }
+  ]
+}
+Rules for "questions":
+- Each item needs a unique "id", a clear "question", and usually 2–5 "options" (each with "id" + "label", optional "description").
+- Set "allowText": true when a typed answer makes sense in addition to the buttons.
+- Set "allowMultiple": true when more than one option can apply.
+- Omit "options" entirely for a pure free-form question (a text box renders instead).
+- Keep "question" (the top-level lead-in) short; put the real questions inside the array.
+- Prefer this structured form over a wall of numbered questions in plain text.
+
 ### MODE 3 — NEEDS_AGENT (when the task needs the iterative visual agent, not one shot)
 You are the SINGLE-SHOT editor: you emit one patch without seeing the rendered result. Some
 tasks genuinely need the agent loop, which can RENDER the slide, look at the screenshot, and
@@ -514,7 +549,12 @@ ${knowledgeContext}
           const n = Array.isArray(parsed.changes) ? parsed.changes.length : 0
           return `[applied ${n} change(s)] ${parsed.summary ?? ''}`.trim()
         }
-        if (parsed.type === 'clarification') return `[asked] ${parsed.question ?? ''}`.trim()
+        if (parsed.type === 'clarification') {
+          const qs = Array.isArray(parsed.questions)
+            ? parsed.questions.map((q: { question?: string }) => q?.question).filter(Boolean).join(' | ')
+            : ''
+          return `[asked] ${[parsed.question, qs].filter(Boolean).join(' — ')}`.trim()
+        }
       }
     } catch {
       /* not JSON — keep as-is */

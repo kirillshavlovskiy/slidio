@@ -53,6 +53,8 @@ interface Props {
   onRenameBranch: (id: string, name: string) => void
   onDeleteBranch: (id: string) => void
   onDeletePresentation?: (id: string) => void
+  /** Rename a presentation in place. */
+  onRenamePresentation?: (id: string, name: string) => void
   /** Open the shared Knowledge layers panel scoped to a hub. */
   onOpenKnowledge?: (branchId: string) => void
   /** Open the shared Design System panel scoped to a hub. */
@@ -88,6 +90,7 @@ export default function StartScreen({
   onRenameBranch,
   onDeleteBranch,
   onDeletePresentation,
+  onRenamePresentation,
   onOpenKnowledge,
   onOpenDesign,
   onSignOut,
@@ -420,6 +423,7 @@ export default function StartScreen({
                           withIcon
                           onOpen={onOpen}
                           onDelete={onDeletePresentation}
+                          onRename={onRenamePresentation}
                         />
                       ))}
                     </div>
@@ -438,6 +442,7 @@ export default function StartScreen({
                       deck={deck}
                       onOpen={onOpen}
                       onDelete={onDeletePresentation}
+                      onRename={onRenamePresentation}
                     />
                   ))}
                 </div>
@@ -798,12 +803,17 @@ function DeckCard({
   withIcon,
   onOpen,
   onDelete,
+  onRename,
 }: {
   deck: PresentationSummary
   withIcon?: boolean
   onOpen: (id: string) => void
   onDelete?: (id: string) => void
+  onRename?: (id: string, name: string) => void
 }) {
+  const [editing, setEditing] = useState(false)
+  const [value, setValue] = useState(deck.name)
+
   const handleDelete = (e: MouseEvent) => {
     e.stopPropagation()
     const ok = window.confirm(
@@ -811,6 +821,22 @@ function DeckCard({
     )
     if (ok) onDelete?.(deck.id)
   }
+
+  const startRename = (e: MouseEvent) => {
+    e.stopPropagation()
+    setValue(deck.name)
+    setEditing(true)
+  }
+
+  const commitRename = () => {
+    const next = value.trim()
+    setEditing(false)
+    if (next && next !== deck.name) onRename?.(deck.id, next)
+  }
+
+  // How much right padding the title needs so it clears the hover action buttons.
+  const actionCount = (onRename ? 1 : 0) + (onDelete ? 1 : 0)
+  const titlePad = actionCount >= 2 ? 'pr-14' : actionCount === 1 ? 'pr-7' : ''
 
   return (
     <div className="group relative">
@@ -824,15 +850,44 @@ function DeckCard({
               <FileText className="w-4 h-4 text-violet-300" />
             </div>
           )}
-          <div className="min-w-0">
-            <div className="text-sm font-medium truncate pr-6">{deck.name}</div>
+          <div className="min-w-0 flex-1">
+            {editing ? (
+              <input
+                autoFocus
+                value={value}
+                onChange={e => setValue(e.target.value)}
+                onClick={e => {
+                  e.stopPropagation()
+                  e.preventDefault()
+                }}
+                onKeyDown={e => {
+                  e.stopPropagation()
+                  if (e.key === 'Enter') commitRename()
+                  if (e.key === 'Escape') setEditing(false)
+                }}
+                onBlur={commitRename}
+                placeholder="Presentation name"
+                className="w-full bg-[#060d1a] border border-violet-500 rounded px-2 py-1 text-sm text-white outline-none mb-1"
+              />
+            ) : (
+              <div className={`text-sm font-medium truncate ${titlePad}`}>{deck.name}</div>
+            )}
             <div className="flex items-center gap-1 text-[11px] text-[#64748B] mt-1">
               <Clock className="w-3 h-3" /> {timeAgo(deck.updatedAt)}
             </div>
           </div>
         </div>
       </button>
-      {onDelete && (
+      {!editing && onRename && (
+        <button
+          onClick={startRename}
+          title="Rename presentation"
+          className={`absolute top-2.5 ${onDelete ? 'right-9' : 'right-2.5'} rounded-md p-1.5 text-[#475569] opacity-0 group-hover:opacity-100 hover:text-violet-300 hover:bg-violet-500/10 transition-all focus:opacity-100`}
+        >
+          <Pencil className="w-3.5 h-3.5" />
+        </button>
+      )}
+      {!editing && onDelete && (
         <button
           onClick={handleDelete}
           title="Delete presentation"

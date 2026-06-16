@@ -150,6 +150,19 @@ export interface ClarificationOption {
   description?: string // optional extra detail
 }
 
+/**
+ * A single structured question inside a multi-question clarification. Each one
+ * renders as its own block in the chat: option buttons for multiple choice plus
+ * an optional free-form answer field.
+ */
+export interface ClarificationQuestion {
+  id: string                       // stable id, e.g. "scope", "data"
+  question: string                 // the question text
+  options?: ClarificationOption[]  // pickable answers (omit for a pure text answer)
+  allowText?: boolean              // also show a free-form answer window
+  allowMultiple?: boolean          // let the user pick more than one option
+}
+
 export interface PatchResponse {
   type: 'patch'
   changes: Change[]
@@ -158,8 +171,9 @@ export interface PatchResponse {
 
 export interface ClarificationResponse {
   type: 'clarification'
-  question: string
-  options?: ClarificationOption[]  // if absent, user just types a free-form reply
+  question: string                       // lead-in / summary, or a full free-form answer
+  options?: ClarificationOption[]        // legacy single-question quick choices
+  questions?: ClarificationQuestion[]    // structured multi-question form (preferred when asking for several inputs)
 }
 
 /**

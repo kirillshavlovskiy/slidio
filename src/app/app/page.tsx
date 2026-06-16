@@ -66,6 +66,7 @@ import {
   Change,
   ClaudeResponse,
   ClarificationOption,
+  ClarificationQuestion,
   ConversationMessage,
   KnowledgeLayer,
   KnowledgeBranch,
@@ -118,7 +119,14 @@ type AgentToolUse = {
   type: 'tool_use'
   id: string
   name: string
-  input: { slideId?: string; slideIds?: string[]; changes?: Change[]; summary?: string }
+  input: {
+    slideId?: string
+    slideIds?: string[]
+    changes?: Change[]
+    summary?: string
+    intro?: string
+    questions?: ClarificationQuestion[]
+  }
 }
 type AgentThinkingBlock =
   | { type: 'thinking'; thinking: string; signature?: string }
@@ -376,6 +384,9 @@ export default function Home() {
   // Holds a broad instruction whose scope (this slide vs whole deck) we asked the
   // user to disambiguate; cleared when they pick or send something else.
   const [pendingScopeInstruction, setPendingScopeInstruction] = useState<string | null>(null)
+  // Holds the original instruction for an agent run that paused on ask_user; when
+  // the user answers the structured questions we resume the agent with their answers.
+  const [pendingAgentInstruction, setPendingAgentInstruction] = useState<string | null>(null)
   const canvasCaptureRef = useRef<HTMLDivElement>(null)
   const canvasViewportRef = useRef<HTMLDivElement>(null)
   const [canvasZoom, setCanvasZoom] = useState(1)
@@ -1040,6 +1051,30 @@ export default function Home() {
       }
     },
     [presentationSummaries, loadPortfolio]
+  )
+
+  // Rename a presentation from the portfolio. Optimistically update the list,
+  // then persist via the existing presentations POST (which updates name by id).
+  const renamePresentation = useCallback(
+    async (id: string, name: string) => {
+      const clean = name.trim()
+      if (!clean) return
+      setPresentationSummaries(prev =>
+        prev.map(p => (p.id === id ? { ...p, name: clean } : p))
+      )
+      try {
+        const res = await fetch('/api/presentations', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id, name: clean }),
+        })
+        if (!res.ok) throw new Error('Rename failed')
+      } catch (err) {
+        console.error('Failed to rename presentation', err)
+        void loadPortfolio()
+      }
+    },
+    [loadPortfolio]
   )
 
   // Pipe uncaught client errors + unhandled promise rejections to the dev terminal.
@@ -1934,6 +1969,8 @@ export default function Home() {
   const handleSend = useCallback(
     async (text: string, images: string[] = [], uiMode: UiMode = 'auto') => {
      try {
+      // A fresh free-form message supersedes any unanswered agent clarification.
+      setPendingAgentInstruction(null)
       // If the user drew annotations, capture the slide + strokes as a PNG to attach.
       // pixelRatio 1 keeps the base64 small (960×720 is ample for vision); a failed
       // capture must NOT silently drop the drawing — we tell the user and keep the
@@ -2379,6 +2416,9 @@ export default function Home() {
 
           const toolResults: AgentToolResult[] = []
           let finished = false
+          // Set when the agent calls ask_user: we render structured questions and
+          // pause the run until the user answers (which resumes a fresh agent turn).
+          let askPayload: { intro?: string; questions: ClarificationQuestion[] } | null = null
 
           for (const block of content) {
             if (block.type === 'thinking') {
@@ -2412,6 +2452,23 @@ export default function Home() {
                 finished = true
                 if (input?.summary) runSummary = input.summary
                 addStep({ kind: 'done', label: input?.summary || 'Done.' })
+              }
+            } else if (name === 'ask_user') {
+              // Pause the loop and surface structured questions to the user. We end
+              // this run (changes so far are kept) and resume once they answer.
+              const questions = Array.isArray(input?.questions) ? input!.questions! : []
+              if (questions.length > 0) {
+                askPayload = { intro: input?.intro, questions }
+                addStep({ kind: 'done', label: 'Paused — waiting for your answers.' })
+              } else {
+                // Malformed call with no questions: nudge it to either act or ask properly.
+                toolResults.push({
+                  type: 'tool_result',
+                  tool_use_id: id,
+                  content:
+                    'ask_user needs a non-empty questions[] array. Either ask with real questions, or just build the deck from the context.',
+                  is_error: true,
+                })
               }
             } else if (name === 'get_slide') {
               const slide = slidesRef.current.find(s => s.id === input?.slideId)
@@ -2555,6 +2612,29 @@ export default function Home() {
           }
 
           if (finished) break
+
+          // Agent asked the user structured questions → render them and pause the
+          // run. The user's answers resume a fresh agent turn (handleSubmitAnswers).
+          if (askPayload) {
+            const payload = askPayload
+            setDisplay(prev => [
+              ...prev,
+              {
+                role: 'assistant',
+                response: {
+                  type: 'clarification',
+                  question: payload.intro ?? '',
+                  questions: payload.questions,
+                },
+              },
+            ])
+            setPendingAgentInstruction(instruction)
+            // Record what was asked so the resumed run has continuity.
+            const asked = payload.questions.map(q => q.question).filter(Boolean).join(' | ')
+            runSummary =
+              `[asked the user]${payload.intro ? ` ${payload.intro}` : ''}${asked ? ` — ${asked}` : ''}`.trim()
+            break
+          }
 
           // Cost/oscillation abort — surface why and stop (changes already applied).
           if (stopFlag) {
@@ -2836,6 +2916,25 @@ export default function Home() {
       handleSend(text)
     },
     [handleSend, pendingScopeInstruction]
+  )
+
+  // Answers to a structured clarification. If the agent paused on ask_user, resume
+  // it with the answers; otherwise (single-shot clarification) send them normally.
+  const handleSubmitAnswers = useCallback(
+    (text: string) => {
+      if (pendingAgentInstruction) {
+        const orig = pendingAgentInstruction
+        setPendingAgentInstruction(null)
+        setDisplay(prev => [...prev, { role: 'user', text }])
+        runAgentRef.current?.(
+          `${orig}\n\n[Earlier you paused to ask me clarifying questions. My answers:]\n${text}\n\nNow proceed and build exactly that — do not ask again.`,
+          { skipUserEcho: true }
+        )
+        return
+      }
+      handleSend(text)
+    },
+    [handleSend, pendingAgentInstruction]
   )
 
   // ── Apply patch to slides ────────────────────────────────────────────────────
@@ -3486,6 +3585,7 @@ Return ONE complete "patch" (changes relative to the ORIGINAL slide data provide
           onRenameBranch={renameBranch}
           onDeleteBranch={deleteBranch}
           onDeletePresentation={deletePresentation}
+          onRenamePresentation={renamePresentation}
           onOpenKnowledge={openHubKnowledge}
           onOpenDesign={openHubDesign}
           onSignOut={() => signOut()}
@@ -4056,6 +4156,7 @@ Return ONE complete "patch" (changes relative to the ORIGINAL slide data provide
             onRunAgent={runAgent}
             onStopAgent={stopAgent}
             onPickOption={handlePickOption}
+            onSubmitAnswers={handleSubmitAnswers}
             onRevert={revertToMessage}
             draft={chatDraft}
             slides={slides}

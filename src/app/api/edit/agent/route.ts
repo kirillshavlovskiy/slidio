@@ -132,6 +132,7 @@ When the knowledge block includes a DESIGN SYSTEM (marked AUTHORITATIVE) and the
   - delete slide:  { slideId, op: "delete" } (no elementId)
   - slide bg:      { slideId, slidePatch: { bg } }
 - finish({ summary }): call ONLY when the rendered result is correct. Ends the session.
+- ask_user({ intro?, questions[] }): pause and ask the user structured questions, rendered as clickable buttons (and optional answer fields). Use this — NOT a question buried in a finish summary — on the RARE occasion you are genuinely blocked on a decision only the user can make. Each question has { id, question, options?: [{id,label,description?}], allowText?, allowMultiple? }. Omit options for a free-form question. See "When to BUILD vs ASK" below — default is to BUILD.
 
 ## Z-ORDER (layering) — critical for "behind/in front"
 Elements paint in array order: index 0 = BACK (bottom), the last index = FRONT (top). To place a
@@ -182,7 +183,24 @@ Before each tool call, write at most ONE short sentence (≤25 words) on what yo
 - ZEBRA ROWS / TABLES: row backgrounds must span the SAME x and w as their container (full width, no side gaps — inset the TEXT via padLeft, not the box), be vertically contiguous, and use TWO CLEARLY DISTINCT shades (obvious lightness step, both distinct from the background). Near-identical shades like 1E3A5F vs 162C44 are WRONG. To match an existing striped panel, read its band colors with get_slide and reuse the exact hexes.
 - When matching one side to another, replicate the geometry and the EXACT colors of the reference side.
 
-Keep going through the loop autonomously; only stop to ask the user (via finish with a question in the summary) if the request is genuinely ambiguous.`
+## When to BUILD vs ASK (default: BUILD — do not pester)
+You are an autonomous builder. When the user asks you to "create slides", "build the deck",
+"populate the slides", "fill it in from the context / knowledge base", or similar, DEFAULT TO
+BUILDING A COMPLETE, MULTI-SLIDE DECK that covers the source material — do NOT stop to ask
+whether you should build the whole deck vs one slide. Just build it:
+- If only one blank/placeholder slide exists, POPULATE it AND ADD the remaining slides (add slide
+  ops) so the full narrative is covered. Use the knowledge base, uploaded documents and template
+  styling already in context as your source of truth for structure, text and styling.
+- Cover the natural sections of the source (e.g. cover, problem, solution, market, business model,
+  product, traction, team, ask) — build a coherent deck, not a single slide.
+- For missing real-world figures, use clearly-marked PLACEHOLDERS (the "*" rule above) instead of
+  asking — only ask if a figure is BOTH essential AND impossible to placeholder.
+ONLY call ask_user when you are genuinely blocked on a decision that materially changes the output
+and that you cannot reasonably infer (e.g. two equally-valid directions the user hinted at). When
+you do ask, use the ask_user TOOL with structured questions — never bury questions in prose or in a
+finish summary. Asking to confirm work you were already told to do is NOT allowed.
+
+Keep going through the loop autonomously; build first, ask (via ask_user) only when truly blocked.`
 
 const TOOLS: Anthropic.Tool[] = [
   {
@@ -255,6 +273,51 @@ const TOOLS: Anthropic.Tool[] = [
       properties: { summary: { type: 'string', description: 'One sentence describing what was done.' } },
       required: ['summary'],
       additionalProperties: false,
+    },
+  },
+  {
+    // Pause the loop and ask the user structured questions (rendered as clickable
+    // buttons + answer fields in the chat). Use ONLY when blocked by a genuine
+    // decision the user must make — never to ask permission to do the obvious work.
+    name: 'ask_user',
+    description:
+      'Pause and ask the user one or more clarifying questions, shown as clickable options. Use ONLY when genuinely blocked on a decision the user must make. Do NOT use it to ask whether to do work you can already infer from the request and context — in that case just do it.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        intro: {
+          type: 'string',
+          description: 'Optional one-line lead-in shown above the questions.',
+        },
+        questions: {
+          type: 'array',
+          description: 'One or more questions. Prefer 1–4 focused questions, each with 2–5 options.',
+          items: {
+            type: 'object',
+            properties: {
+              id: { type: 'string', description: 'Stable id for the question, e.g. "scope".' },
+              question: { type: 'string', description: 'The question text.' },
+              options: {
+                type: 'array',
+                description: 'Pickable answers. Omit for a free-form text question.',
+                items: {
+                  type: 'object',
+                  properties: {
+                    id: { type: 'string' },
+                    label: { type: 'string' },
+                    description: { type: 'string' },
+                  },
+                  required: ['id', 'label'],
+                },
+              },
+              allowText: { type: 'boolean', description: 'Also show a free-form answer box.' },
+              allowMultiple: { type: 'boolean', description: 'Allow selecting more than one option.' },
+            },
+            required: ['id', 'question'],
+          },
+        },
+      },
+      required: ['questions'],
     },
   },
 ]

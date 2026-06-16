@@ -22,7 +22,13 @@ import {
   PanelRightClose,
   Pin,
 } from 'lucide-react'
-import { Change, ClaudeResponse, ClarificationOption, SlideData } from '@/lib/types'
+import {
+  Change,
+  ClaudeResponse,
+  ClarificationOption,
+  ClarificationQuestion,
+  SlideData,
+} from '@/lib/types'
 import { applyChangesToSlides, getDeletedSlideIds } from '@/lib/preview'
 import SlideCanvas from '@/components/SlideCanvas'
 
@@ -62,6 +68,8 @@ interface Props {
   // Cancel an in-flight agent run.
   onStopAgent?: () => void
   onPickOption: (option: ClarificationOption) => void
+  // Submit a consolidated answer for a multi-question structured clarification.
+  onSubmitAnswers?: (text: string) => void
   // Restore the deck to this message's checkpoint and load its text for editing.
   onRevert?: (index: number) => void
   // When set (nonce changes), prefill the input with this text (used by revert/edit).
@@ -131,6 +139,7 @@ export default function ChatPanel({
   onRunAgent,
   onStopAgent,
   onPickOption,
+  onSubmitAnswers,
   onRevert,
   draft,
   slides,
@@ -289,6 +298,7 @@ export default function ChatPanel({
                   <AssistantBubble
                     response={msg.response}
                     onPickOption={onPickOption}
+                    onSubmitAnswers={onSubmitAnswers}
                     patchStatus={msg.patchStatus}
                     isLivePending={isLivePending}
                     slides={slides}
@@ -584,6 +594,7 @@ function UserBubble({
 function AssistantBubble({
   response,
   onPickOption,
+  onSubmitAnswers,
   patchStatus,
   isLivePending,
   slides,
@@ -595,6 +606,7 @@ function AssistantBubble({
 }: {
   response: ClaudeResponse
   onPickOption: (opt: ClarificationOption) => void
+  onSubmitAnswers?: (text: string) => void
   patchStatus?: 'pending' | 'approved' | 'declined'
   isLivePending?: boolean
   slides?: SlideData[]
@@ -657,7 +669,25 @@ function AssistantBubble({
     )
   }
 
-  // clarification
+  // clarification — structured multi-question form
+  if (response.questions && response.questions.length > 0) {
+    return (
+      <div className="flex justify-start">
+        <div className="max-w-[92%] bg-[#112236] border border-[#1e3a5f] rounded-lg rounded-tl-none px-3 py-3">
+          <p className="text-xs font-bold text-[#2dd4bf] mb-2">AI · A FEW QUESTIONS</p>
+          {response.question && (
+            <p className="text-sm text-white mb-3 whitespace-pre-wrap">{response.question}</p>
+          )}
+          <ClarificationForm
+            questions={response.questions}
+            onSubmit={onSubmitAnswers}
+          />
+        </div>
+      </div>
+    )
+  }
+
+  // clarification — single question / free-form
   return (
     <div className="flex justify-start">
       <div className="max-w-[92%] bg-[#112236] border border-[#1e3a5f] rounded-lg rounded-tl-none px-3 py-3">
@@ -687,6 +717,127 @@ function AssistantBubble({
           </div>
         )}
       </div>
+    </div>
+  )
+}
+
+// Structured multi-question clarification: each question renders option buttons
+// (single- or multi-select) plus an optional free-form answer field. Answers are
+// collected locally and submitted as one consolidated reply to the AI.
+function ClarificationForm({
+  questions,
+  onSubmit,
+}: {
+  questions: ClarificationQuestion[]
+  onSubmit?: (text: string) => void
+}) {
+  const [picks, setPicks] = useState<Record<string, Set<string>>>({})
+  const [texts, setTexts] = useState<Record<string, string>>({})
+  const [sent, setSent] = useState(false)
+
+  const toggle = (q: ClarificationQuestion, optId: string) => {
+    setPicks(prev => {
+      const cur = new Set(prev[q.id] ?? [])
+      if (q.allowMultiple) {
+        cur.has(optId) ? cur.delete(optId) : cur.add(optId)
+      } else {
+        cur.clear()
+        cur.add(optId)
+      }
+      return { ...prev, [q.id]: cur }
+    })
+  }
+
+  const answeredCount = questions.filter(q => {
+    const hasPick = (picks[q.id]?.size ?? 0) > 0
+    const hasText = (texts[q.id] ?? '').trim().length > 0
+    return hasPick || hasText
+  }).length
+
+  const submit = () => {
+    if (sent || !onSubmit) return
+    const lines = questions.map((q, i) => {
+      const picked = Array.from(picks[q.id] ?? [])
+        .map(id => q.options?.find(o => o.id === id)?.label ?? id)
+      const free = (texts[q.id] ?? '').trim()
+      const parts = [...picked]
+      if (free) parts.push(free)
+      const answer = parts.length > 0 ? parts.join('; ') : '(no preference — you decide)'
+      return `${i + 1}. ${q.question}\n   → ${answer}`
+    })
+    setSent(true)
+    onSubmit(`Here are my answers:\n\n${lines.join('\n')}`)
+  }
+
+  return (
+    <div className="space-y-3">
+      {questions.map((q, qi) => {
+        const picked = picks[q.id] ?? new Set<string>()
+        return (
+          <div key={q.id} className="rounded-lg border border-[#1e3a5f] bg-[#0d1b2a]/60 p-2.5">
+            <p className="text-sm text-white font-medium mb-2 leading-snug">
+              <span className="text-[#2dd4bf] font-bold mr-1.5">{qi + 1}.</span>
+              {q.question}
+            </p>
+            {q.options && q.options.length > 0 && (
+              <div className="space-y-1.5">
+                {q.options.map(opt => {
+                  const active = picked.has(opt.id)
+                  return (
+                    <button
+                      key={opt.id}
+                      disabled={sent}
+                      onClick={() => toggle(q, opt.id)}
+                      className={`w-full text-left flex items-start gap-2.5 px-3 py-2 rounded border transition-all
+                        ${active
+                          ? 'bg-[#0e3a5f] border-[#60a5fa]'
+                          : 'bg-[#1e3a5f] hover:bg-[#2a4a6f] border-[#2a4a6f] hover:border-[#60a5fa]'}
+                        ${sent ? 'opacity-60 cursor-default' : ''}`}
+                    >
+                      <span
+                        className={`mt-0.5 flex h-4 w-4 flex-shrink-0 items-center justify-center border text-[10px] font-bold
+                          ${q.allowMultiple ? 'rounded-sm' : 'rounded-full'}
+                          ${active ? 'border-[#60a5fa] bg-[#60a5fa] text-[#0b1526]' : 'border-[#475569] text-transparent'}`}
+                      >
+                        {active ? '✓' : ''}
+                      </span>
+                      <span className="text-sm text-[#cbd5e1] leading-snug">
+                        {opt.label}
+                        {opt.description && (
+                          <span className="block text-xs text-[#64748b] mt-0.5">{opt.description}</span>
+                        )}
+                      </span>
+                    </button>
+                  )
+                })}
+              </div>
+            )}
+            {(q.allowText || !q.options || q.options.length === 0) && (
+              <input
+                type="text"
+                disabled={sent}
+                value={texts[q.id] ?? ''}
+                onChange={e => setTexts(prev => ({ ...prev, [q.id]: e.target.value }))}
+                placeholder={q.options && q.options.length > 0 ? 'Or type your own answer…' : 'Type your answer…'}
+                className="mt-2 w-full rounded border border-[#2a4a6f] bg-[#0b1526] px-2.5 py-1.5 text-sm text-white
+                           placeholder:text-[#475569] focus:border-[#60a5fa] focus:outline-none disabled:opacity-60"
+              />
+            )}
+          </div>
+        )
+      })}
+      <button
+        onClick={submit}
+        disabled={sent || !onSubmit || answeredCount === 0}
+        className="w-full rounded-lg bg-[#2dd4bf] px-3 py-2 text-sm font-semibold text-[#06231f]
+                   transition-opacity hover:opacity-90 disabled:cursor-default disabled:opacity-40"
+      >
+        {sent
+          ? 'Answers sent'
+          : answeredCount < questions.length
+            ? `Send answers (${answeredCount}/${questions.length})`
+            : 'Send answers'}
+      </button>
     </div>
   )
 }

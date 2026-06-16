@@ -10,6 +10,7 @@ import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Switch } from '@/components/ui/switch'
 import { cn } from '@/lib/utils'
+import { parseDocumentToText } from '@/lib/parseDocumentClient'
 
 interface Props {
   layers: KnowledgeLayer[]
@@ -101,14 +102,9 @@ export default function KnowledgePanel({ layers, onChange, onClose }: Props) {
     setUploadingType(type)
     setUploadError(null)
     try {
-      const form = new FormData()
-      form.append('file', file)
-      const res = await fetch('/api/parse-document', { method: 'POST', body: form })
-      const data = await res.json()
-      if (!res.ok) {
-        setUploadError(data.error || 'Failed to parse document')
-        return
-      }
+      // Parse in the browser so large files don't hit the serverless body-size
+      // limit (which rejected big DOCX/PDF uploads with HTTP 413).
+      const data = await parseDocumentToText(file)
       const layer: KnowledgeLayer = {
         id: `${type}-${Date.now()}`,
         type,
@@ -120,8 +116,8 @@ export default function KnowledgePanel({ layers, onChange, onClose }: Props) {
         updatedAt: Date.now(),
       }
       onChange([...layers, layer])
-    } catch {
-      setUploadError('Failed to upload document')
+    } catch (err) {
+      setUploadError(err instanceof Error ? err.message : 'Failed to parse document')
     } finally {
       setUploadingType(null)
     }

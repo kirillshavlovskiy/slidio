@@ -56,7 +56,7 @@ export default function ElementTextEditor({ element, onUpdate, onEnd }: Props) {
             commit()
           }
         }}
-        className="w-full h-full resize-none bg-[#0d1b2a]/90 border-2 border-[#60a5fa] rounded-sm outline-none p-1"
+        className="w-full h-full resize-none bg-transparent border-2 border-[#60a5fa] rounded-sm outline-none p-1"
         style={{
           fontSize: fontSize * 1.2,
           fontFamily: fontFamilyCss(s.fontFace),

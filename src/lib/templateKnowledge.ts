@@ -1,6 +1,6 @@
 import type { KnowledgeLayer } from './types'
 
-export type TemplateSource = 'pptx' | 'pdf'
+export type TemplateSource = 'pptx' | 'pdf' | 'keynote'
 
 export interface StyleTokens {
   palette: {
