@@ -30,6 +30,13 @@ import {
 } from '@/lib/billing/plans'
 import { startCheckout, openBillingPortal } from '@/lib/billing/client'
 
+interface BillingUsage {
+  tokensUsed: number
+  tokenLimit: number
+  tokensRemaining: number
+  periodKey: string
+}
+
 export interface ImportJob {
   id: string
   name: string
@@ -105,19 +112,40 @@ export default function StartScreen({
 
   // Current tariff (plan) for the header badge + upgrade/manage button.
   const [plan, setPlan] = useState<PlanId>('free')
+  const [usage, setUsage] = useState<BillingUsage | null>(null)
   const [showPlans, setShowPlans] = useState(false)
+
   useEffect(() => {
     let cancelled = false
     fetch('/api/billing/state')
       .then(r => (r.ok ? r.json() : null))
       .then(data => {
-        if (!cancelled && data?.plan) setPlan(data.plan as PlanId)
+        if (cancelled || !data) return
+        if (data.plan) setPlan(data.plan as PlanId)
+        if (data.usage) setUsage(data.usage as BillingUsage)
       })
       .catch(() => {})
     return () => {
       cancelled = true
     }
   }, [])
+
+  // Refresh usage when the plan dialog opens so numbers are current.
+  useEffect(() => {
+    if (!showPlans) return
+    let cancelled = false
+    fetch('/api/billing/state')
+      .then(r => (r.ok ? r.json() : null))
+      .then(data => {
+        if (cancelled || !data) return
+        if (data.plan) setPlan(data.plan as PlanId)
+        if (data.usage) setUsage(data.usage as BillingUsage)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [showPlans])
 
   // Free/Pro can move up a tier; Max manages its existing subscription.
   const canUpgrade = plan !== 'max'
@@ -487,7 +515,7 @@ export default function StartScreen({
       )}
 
       {showPlans && (
-        <PlanDialog currentPlan={plan} onClose={() => setShowPlans(false)} />
+        <PlanDialog currentPlan={plan} usage={usage} onClose={() => setShowPlans(false)} />
       )}
 
     </div>
@@ -587,9 +615,11 @@ function BranchDialog({
 
 function PlanDialog({
   currentPlan,
+  usage,
   onClose,
 }: {
   currentPlan: PlanId
+  usage: BillingUsage | null
   onClose: () => void
 }) {
   const [interval, setInterval] = useState<BillingInterval>('monthly')
@@ -725,6 +755,42 @@ function PlanDialog({
                     ≈ {approxEdits(plan.monthlyTokens).toLocaleString()} AI edits
                   </p>
                 </div>
+
+                {isCurrent && usage && (
+                  <div className="mt-3 rounded-xl border border-emerald-500/30 bg-emerald-500/5 p-3">
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="font-semibold text-emerald-300">This period</span>
+                      <span className="text-slate-400">
+                        {formatTokens(usage.tokensUsed)} / {formatTokens(usage.tokenLimit)}
+                      </span>
+                    </div>
+                    <div className="mt-2 h-2 overflow-hidden rounded-full bg-[#0a0f1a]">
+                      <div
+                        className={`h-full rounded-full transition-all ${
+                          usage.tokensRemaining <= 0
+                            ? 'bg-red-500'
+                            : usage.tokensUsed / usage.tokenLimit >= 0.85
+                              ? 'bg-amber-400'
+                              : 'bg-emerald-400'
+                        }`}
+                        style={{
+                          width: `${Math.min(100, Math.round((usage.tokensUsed / usage.tokenLimit) * 100))}%`,
+                        }}
+                      />
+                    </div>
+                    <p className="mt-2 text-xs text-slate-400">
+                      {usage.tokensRemaining <= 0 ? (
+                        <span className="text-red-400">Limit reached — upgrade or wait for reset</span>
+                      ) : (
+                        <>
+                          <span className="text-slate-300">{formatTokens(usage.tokensRemaining)}</span> remaining
+                          {' · '}
+                          ≈ {approxEdits(usage.tokensRemaining).toLocaleString()} edits left
+                        </>
+                      )}
+                    </p>
+                  </div>
+                )}
 
                 <ul className="mt-4 space-y-2 text-sm">
                   {SHARED_FEATURES.map(feature => (

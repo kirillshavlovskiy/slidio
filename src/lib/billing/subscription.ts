@@ -11,6 +11,15 @@ export interface BillingState {
   hasStripeCustomer: boolean;
 }
 
+export interface BillingUsageState {
+  tokensUsed: number;
+  tokenLimit: number;
+  tokensRemaining: number;
+  periodKey: string;
+}
+
+export type BillingStateResponse = BillingState & { usage: BillingUsageState };
+
 const ACTIVE_STATUSES = new Set(["active", "trialing", "past_due"]);
 
 export function resolvePlan(user: {
