@@ -25,9 +25,16 @@ function tokenQuota(envVar: string, fallback: number): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-const FREE_TOKENS = tokenQuota("DECKPILOT_FREE_TOKENS", 200_000);
-const PRO_TOKENS = tokenQuota("DECKPILOT_PRO_TOKENS", 2_000_000);
-const MAX_TOKENS = tokenQuota("DECKPILOT_MAX_TOKENS", 5_000_000);
+/** Server-resolved monthly token budgets (reads DECKPILOT_*_TOKENS env vars). */
+export function readPlanTokenLimits(): Record<PlanId, number> {
+  return {
+    free: tokenQuota("DECKPILOT_FREE_TOKENS", 200_000),
+    pro: tokenQuota("DECKPILOT_PRO_TOKENS", 2_000_000),
+    max: tokenQuota("DECKPILOT_MAX_TOKENS", 5_000_000),
+  };
+}
+
+const TOKEN_LIMITS = readPlanTokenLimits();
 
 export const PLANS: Record<PlanId, Plan> = {
   free: {
@@ -36,7 +43,7 @@ export const PLANS: Record<PlanId, Plan> = {
     tagline: "Kick the tires on real decks.",
     monthlyPrice: 0,
     yearlyPrice: 0,
-    monthlyTokens: FREE_TOKENS,
+    monthlyTokens: TOKEN_LIMITS.free,
     paid: false,
   },
   pro: {
@@ -48,7 +55,7 @@ export const PLANS: Record<PlanId, Plan> = {
     tagline: "For weekly deck work.",
     monthlyPrice: 0.5,
     yearlyPrice: 200,
-    monthlyTokens: PRO_TOKENS,
+    monthlyTokens: TOKEN_LIMITS.pro,
     paid: true,
     highlighted: true,
   },
@@ -58,7 +65,7 @@ export const PLANS: Record<PlanId, Plan> = {
     tagline: "For heavy, daily editing.",
     monthlyPrice: 1,
     yearlyPrice: 500,
-    monthlyTokens: MAX_TOKENS,
+    monthlyTokens: TOKEN_LIMITS.max,
     paid: true,
   },
 };
@@ -115,6 +122,14 @@ export function planForPriceId(priceId: string | null | undefined): PlanId {
 
 export function tokenLimitForPlan(plan: PlanId | undefined | null): number {
   return PLANS[plan ?? "free"]?.monthlyTokens ?? PLANS.free.monthlyTokens;
+}
+
+/** Resolve display/enforcement limit — prefer server-fetched limits on the client. */
+export function tokensForPlan(
+  planId: PlanId,
+  limits?: Record<PlanId, number> | null
+): number {
+  return limits?.[planId] ?? PLANS[planId].monthlyTokens;
 }
 
 export function isPaidPlan(plan: PlanId | undefined | null): boolean {

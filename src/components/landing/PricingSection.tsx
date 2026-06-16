@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Check, Loader2, Zap } from "lucide-react";
 import { useSession } from "next-auth/react";
@@ -10,6 +10,7 @@ import {
   SHARED_FEATURES,
   approxEdits,
   formatTokens,
+  tokensForPlan,
   type BillingInterval,
   type PlanId,
 } from "@/lib/billing/plans";
@@ -23,6 +24,16 @@ export function PricingSection() {
   const [interval, setInterval] = useState<BillingInterval>("monthly");
   const [busy, setBusy] = useState<PlanId | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [planLimits, setPlanLimits] = useState<Record<PlanId, number> | null>(null);
+
+  useEffect(() => {
+    fetch("/api/billing/plans")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (data?.limits) setPlanLimits(data.limits as Record<PlanId, number>);
+      })
+      .catch(() => {});
+  }, []);
 
   const handleCta = async (planId: PlanId) => {
     setError(null);
@@ -101,6 +112,7 @@ export function PricingSection() {
         <div className="mx-auto mt-12 grid max-w-5xl gap-6 lg:grid-cols-3">
           {PLAN_ORDER.map((planId) => {
             const plan = PLANS[planId];
+            const monthlyTokens = tokensForPlan(planId, planLimits);
             const price = interval === "yearly" ? plan.yearlyPrice : plan.monthlyPrice;
             const priceLabel =
               plan.monthlyPrice === 0
@@ -143,12 +155,12 @@ export function PricingSection() {
                   <div className="flex items-center gap-2">
                     <Zap className="h-4 w-4 text-amber-400" />
                     <span className="text-xl font-bold text-white">
-                      {formatTokens(plan.monthlyTokens)}
+                      {formatTokens(monthlyTokens)}
                     </span>
                     <span className="text-sm text-slate-400">tokens / month</span>
                   </div>
                   <p className="mt-1 text-xs text-slate-500">
-                    ≈ {approxEdits(plan.monthlyTokens).toLocaleString()} AI edits
+                    ≈ {approxEdits(monthlyTokens).toLocaleString()} AI edits
                   </p>
                 </div>
 

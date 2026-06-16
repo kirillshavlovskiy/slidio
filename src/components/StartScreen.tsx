@@ -25,6 +25,7 @@ import {
   SHARED_FEATURES,
   approxEdits,
   formatTokens,
+  tokensForPlan,
   type BillingInterval,
   type PlanId,
 } from '@/lib/billing/plans'
@@ -113,39 +114,48 @@ export default function StartScreen({
   // Current tariff (plan) for the header badge + upgrade/manage button.
   const [plan, setPlan] = useState<PlanId>('free')
   const [usage, setUsage] = useState<BillingUsage | null>(null)
+  const [planLimits, setPlanLimits] = useState<Record<PlanId, number> | null>(null)
   const [showPlans, setShowPlans] = useState(false)
+  const [showUsage, setShowUsage] = useState(false)
+  const usagePopoverRef = useRef<HTMLDivElement>(null)
 
-  useEffect(() => {
-    let cancelled = false
+  const refreshBillingState = () =>
     fetch('/api/billing/state')
       .then(r => (r.ok ? r.json() : null))
       .then(data => {
-        if (cancelled || !data) return
+        if (!data) return
         if (data.plan) setPlan(data.plan as PlanId)
         if (data.usage) setUsage(data.usage as BillingUsage)
       })
       .catch(() => {})
-    return () => {
-      cancelled = true
-    }
+
+  useEffect(() => {
+    void refreshBillingState()
+    fetch('/api/billing/plans')
+      .then(r => (r.ok ? r.json() : null))
+      .then(data => {
+        if (data?.limits) setPlanLimits(data.limits as Record<PlanId, number>)
+      })
+      .catch(() => {})
   }, [])
 
-  // Refresh usage when the plan dialog opens so numbers are current.
+  // Refresh when the usage popover or upgrade dialog opens.
   useEffect(() => {
-    if (!showPlans) return
-    let cancelled = false
-    fetch('/api/billing/state')
-      .then(r => (r.ok ? r.json() : null))
-      .then(data => {
-        if (cancelled || !data) return
-        if (data.plan) setPlan(data.plan as PlanId)
-        if (data.usage) setUsage(data.usage as BillingUsage)
-      })
-      .catch(() => {})
-    return () => {
-      cancelled = true
+    if (!showPlans && !showUsage) return
+    void refreshBillingState()
+  }, [showPlans, showUsage])
+
+  // Close usage popover on outside click.
+  useEffect(() => {
+    if (!showUsage) return
+    const onDoc = (e: Event) => {
+      if (usagePopoverRef.current && !usagePopoverRef.current.contains(e.target as Node)) {
+        setShowUsage(false)
+      }
     }
-  }, [showPlans])
+    document.addEventListener('mousedown', onDoc)
+    return () => document.removeEventListener('mousedown', onDoc)
+  }, [showUsage])
 
   // Free/Pro can move up a tier; Max manages its existing subscription.
   const canUpgrade = plan !== 'max'
@@ -197,26 +207,56 @@ export default function StartScreen({
           </div>
         </div>
         <div className="flex items-center gap-2">
-          {/* Current tariff + upgrade/manage */}
-          <button
-            type="button"
-            onClick={() => setShowPlans(true)}
-            title={plan === 'free' ? 'You are on the Free plan' : 'View plans & manage your subscription'}
-            className={`flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1.5 rounded-lg border transition-colors ${
-              plan === 'max'
-                ? 'text-violet-300 border-violet-500/40 bg-violet-500/10 hover:bg-violet-500/20'
-                : plan === 'pro'
-                  ? 'text-blue-300 border-blue-500/40 bg-blue-500/10 hover:bg-blue-500/20'
-                  : 'text-[#94a3b8] border-[#1e3a5f] hover:text-white hover:bg-[#0d1b2a]'
-            }`}
-          >
-            <span className="h-1.5 w-1.5 rounded-full bg-current opacity-70" />
-            {PLANS[plan].name} plan
-          </button>
+          {/* Current plan badge — shows usage popover; upgrade opens full plan picker */}
+          <div ref={usagePopoverRef} className="relative">
+            <button
+              type="button"
+              onClick={() => setShowUsage(v => !v)}
+              title="View token usage this period"
+              className={`flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1.5 rounded-lg border transition-colors ${
+                showUsage
+                  ? 'text-white border-[#1e3a5f] bg-[#0d1b2a]'
+                  : plan === 'max'
+                    ? 'text-violet-300 border-violet-500/40 bg-violet-500/10 hover:bg-violet-500/20'
+                    : plan === 'pro'
+                      ? 'text-blue-300 border-blue-500/40 bg-blue-500/10 hover:bg-blue-500/20'
+                      : 'text-[#94a3b8] border-[#1e3a5f] hover:text-white hover:bg-[#0d1b2a]'
+              }`}
+            >
+              <span className="h-1.5 w-1.5 rounded-full bg-current opacity-70" />
+              {PLANS[plan].name} plan
+            </button>
+            {showUsage && (
+              <div className="absolute right-0 top-full z-30 mt-2 w-72 rounded-xl border border-[#1e3a5f] bg-[#0a0f1a] p-4 shadow-2xl">
+                <p className="text-sm font-semibold text-white">{PLANS[plan].name} plan</p>
+                <p className="mt-0.5 text-xs text-slate-500">Token usage this billing period</p>
+                {usage ? (
+                  <UsageMeter usage={usage} className="mt-3" />
+                ) : (
+                  <p className="mt-3 text-xs text-slate-500">Loading usage…</p>
+                )}
+                {canUpgrade && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowUsage(false)
+                      setShowPlans(true)
+                    }}
+                    className="mt-3 w-full rounded-lg bg-gradient-to-r from-violet-500 to-blue-500 px-3 py-2 text-xs font-semibold text-white transition-opacity hover:opacity-90"
+                  >
+                    Upgrade plan
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
           {canUpgrade && (
             <button
               type="button"
-              onClick={() => setShowPlans(true)}
+              onClick={() => {
+                setShowUsage(false)
+                setShowPlans(true)
+              }}
               title="See upgrade options"
               className="group inline-flex rounded-lg bg-gradient-to-r from-violet-500 to-blue-500 p-px transition-opacity hover:opacity-90"
             >
@@ -515,7 +555,12 @@ export default function StartScreen({
       )}
 
       {showPlans && (
-        <PlanDialog currentPlan={plan} usage={usage} onClose={() => setShowPlans(false)} />
+        <PlanDialog
+          currentPlan={plan}
+          usage={usage}
+          planLimits={planLimits}
+          onClose={() => setShowPlans(false)}
+        />
       )}
 
     </div>
@@ -613,13 +658,53 @@ function BranchDialog({
   )
 }
 
+function UsageMeter({ usage, className = '' }: { usage: BillingUsage; className?: string }) {
+  return (
+    <div className={`rounded-xl border border-emerald-500/30 bg-emerald-500/5 p-3 ${className}`}>
+      <div className="flex items-center justify-between text-xs">
+        <span className="font-semibold text-emerald-300">This period</span>
+        <span className="text-slate-400">
+          {formatTokens(usage.tokensUsed)} / {formatTokens(usage.tokenLimit)}
+        </span>
+      </div>
+      <div className="mt-2 h-2 overflow-hidden rounded-full bg-[#0a0f1a]">
+        <div
+          className={`h-full rounded-full transition-all ${
+            usage.tokensRemaining <= 0
+              ? 'bg-red-500'
+              : usage.tokensUsed / usage.tokenLimit >= 0.85
+                ? 'bg-amber-400'
+                : 'bg-emerald-400'
+          }`}
+          style={{
+            width: `${Math.min(100, Math.round((usage.tokensUsed / usage.tokenLimit) * 100))}%`,
+          }}
+        />
+      </div>
+      <p className="mt-2 text-xs text-slate-400">
+        {usage.tokensRemaining <= 0 ? (
+          <span className="text-red-400">Limit reached — upgrade or wait for reset</span>
+        ) : (
+          <>
+            <span className="text-slate-300">{formatTokens(usage.tokensRemaining)}</span> remaining
+            {' · '}
+            ≈ {approxEdits(usage.tokensRemaining).toLocaleString()} edits left
+          </>
+        )}
+      </p>
+    </div>
+  )
+}
+
 function PlanDialog({
   currentPlan,
   usage,
+  planLimits,
   onClose,
 }: {
   currentPlan: PlanId
   usage: BillingUsage | null
+  planLimits: Record<PlanId, number> | null
   onClose: () => void
 }) {
   const [interval, setInterval] = useState<BillingInterval>('monthly')
@@ -702,6 +787,7 @@ function PlanDialog({
         <div className="grid gap-4 px-6 py-6 lg:grid-cols-3">
           {PLAN_ORDER.map(planId => {
             const plan = PLANS[planId]
+            const monthlyTokens = tokensForPlan(planId, planLimits)
             const price = interval === 'yearly' ? plan.yearlyPrice : plan.monthlyPrice
             const priceLabel =
               plan.monthlyPrice === 0
@@ -748,49 +834,15 @@ function PlanDialog({
                 <div className="mt-4 rounded-xl bg-[#0a0f1a] p-3">
                   <div className="flex items-center gap-2">
                     <Zap className="h-4 w-4 text-amber-400" />
-                    <span className="text-lg font-bold text-white">{formatTokens(plan.monthlyTokens)}</span>
+                    <span className="text-lg font-bold text-white">{formatTokens(monthlyTokens)}</span>
                     <span className="text-sm text-slate-400">tokens / mo</span>
                   </div>
                   <p className="mt-1 text-xs text-slate-500">
-                    ≈ {approxEdits(plan.monthlyTokens).toLocaleString()} AI edits
+                    ≈ {approxEdits(monthlyTokens).toLocaleString()} AI edits
                   </p>
                 </div>
 
-                {isCurrent && usage && (
-                  <div className="mt-3 rounded-xl border border-emerald-500/30 bg-emerald-500/5 p-3">
-                    <div className="flex items-center justify-between text-xs">
-                      <span className="font-semibold text-emerald-300">This period</span>
-                      <span className="text-slate-400">
-                        {formatTokens(usage.tokensUsed)} / {formatTokens(usage.tokenLimit)}
-                      </span>
-                    </div>
-                    <div className="mt-2 h-2 overflow-hidden rounded-full bg-[#0a0f1a]">
-                      <div
-                        className={`h-full rounded-full transition-all ${
-                          usage.tokensRemaining <= 0
-                            ? 'bg-red-500'
-                            : usage.tokensUsed / usage.tokenLimit >= 0.85
-                              ? 'bg-amber-400'
-                              : 'bg-emerald-400'
-                        }`}
-                        style={{
-                          width: `${Math.min(100, Math.round((usage.tokensUsed / usage.tokenLimit) * 100))}%`,
-                        }}
-                      />
-                    </div>
-                    <p className="mt-2 text-xs text-slate-400">
-                      {usage.tokensRemaining <= 0 ? (
-                        <span className="text-red-400">Limit reached — upgrade or wait for reset</span>
-                      ) : (
-                        <>
-                          <span className="text-slate-300">{formatTokens(usage.tokensRemaining)}</span> remaining
-                          {' · '}
-                          ≈ {approxEdits(usage.tokensRemaining).toLocaleString()} edits left
-                        </>
-                      )}
-                    </p>
-                  </div>
-                )}
+                {isCurrent && usage && <UsageMeter usage={usage} className="mt-3" />}
 
                 <ul className="mt-4 space-y-2 text-sm">
                   {SHARED_FEATURES.map(feature => (
