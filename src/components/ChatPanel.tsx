@@ -20,6 +20,7 @@ import {
   ChevronDown,
   Square,
   PanelRightClose,
+  Pin,
 } from 'lucide-react'
 import { Change, ClaudeResponse, ClarificationOption, SlideData } from '@/lib/types'
 import { applyChangesToSlides, getDeletedSlideIds } from '@/lib/preview'
@@ -74,6 +75,11 @@ interface Props {
   onOpenProposal?: () => void          // open the full preview overlay
   // Collapse/hide the chat sidebar (toggle lives in the header).
   onCollapse?: () => void
+  // True while the collapsed panel is being hover-previewed (peeking). In this
+  // state the header button pins the panel open instead of closing it.
+  peeking?: boolean
+  // Pin the peeking panel open (keep it docked).
+  onPin?: () => void
 }
 
 const MAX_IMAGES = 6
@@ -134,6 +140,8 @@ export default function ChatPanel({
   onDeclineProposal,
   onOpenProposal,
   onCollapse,
+  peeking,
+  onPin,
 }: Props) {
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -209,16 +217,28 @@ export default function ChatPanel({
       <div className="p-3 border-b border-[#1e3a5f] flex-shrink-0">
         <div className="flex items-center justify-between">
           <p className="text-xs font-semibold text-[#64748b] tracking-widest">AI EDITOR</p>
-          {onCollapse && (
+          {peeking && onPin ? (
             <button
               type="button"
-              onClick={onCollapse}
-              title="Hide chat panel"
-              aria-label="Hide chat panel"
+              onClick={onPin}
+              title="Pin chat panel open"
+              aria-label="Pin chat panel open"
               className="-mr-1 flex h-6 w-6 items-center justify-center rounded text-[#475569] transition-colors hover:bg-[#1e3a5f] hover:text-[#93c5fd]"
             >
-              <PanelRightClose className="h-4 w-4" />
+              <Pin className="h-4 w-4" />
             </button>
+          ) : (
+            onCollapse && (
+              <button
+                type="button"
+                onClick={onCollapse}
+                title="Hide chat panel"
+                aria-label="Hide chat panel"
+                className="-mr-1 flex h-6 w-6 items-center justify-center rounded text-[#475569] transition-colors hover:bg-[#1e3a5f] hover:text-[#93c5fd]"
+              >
+                <PanelRightClose className="h-4 w-4" />
+              </button>
+            )
           )}
         </div>
         {selectedSlideIds.length > 1 && (

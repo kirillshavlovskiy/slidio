@@ -130,10 +130,10 @@ function sampleBackground(ctx: CanvasRenderingContext2D, w: number, h: number): 
 
 async function loadPdfjs() {
   const pdfjs = await import('pdfjs-dist')
-  pdfjs.GlobalWorkerOptions.workerSrc = new URL(
-    'pdfjs-dist/build/pdf.worker.min.mjs',
-    import.meta.url
-  ).toString()
+  // Serve the worker from /public (copied there by scripts/copy-pdf-worker.mjs
+  // in the prebuild step). Using a static path avoids webpack trying to bundle
+  // and minify the worker .mjs, which breaks the production build under Terser.
+  pdfjs.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs'
   return pdfjs
 }
 

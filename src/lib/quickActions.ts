@@ -58,6 +58,35 @@ function elementTag(el: { id: string; type: string; content?: string }): string 
   return preview ? `${el.id} (${el.type}: "${preview}")` : `${el.id} (${el.type})`
 }
 
+/**
+ * Precise, shared rules for laying out a table from rect + text primitives
+ * (there is no native table element type). Used by both "Enhance table" and
+ * "Visualize as table" so the agent produces a strict, readable grid.
+ */
+const TABLE_SPEC =
+  `A table is built ONLY from PRIMITIVES — rect elements for fills/lines and one text element per cell ` +
+  `(there is no native table type). Build a STRICT grid and follow ALL of these rules:\n` +
+  `1. GRID GEOMETRY: Decide the column count and row count. Every cell in the same column MUST share the exact ` +
+  `same left x and the same width; every cell in the same row MUST share the exact same top y and the same height. ` +
+  `Column widths may differ by content, but a column is uniform top-to-bottom; rows are uniform left-to-right. ` +
+  `Cells must tile edge-to-edge with NO gaps and NO overlaps.\n` +
+  `2. ONE CELL = ONE TEXT ELEMENT: Never merge two cells' content into one text box and never split one cell ` +
+  `across two boxes. The number of body text elements must equal rows×columns (minus any intentionally blank cells).\n` +
+  `3. TEXT STAYS INSIDE ITS CELL: Every cell's text must fit fully WITHIN that cell's rectangle with consistent ` +
+  `inner padding (~0.06–0.10in on every side). Text must NEVER cross a column or row boundary, sit between cells, ` +
+  `or overlap a neighbouring cell, separator line, or the header band. If text is too long, shrink the font ` +
+  `(down to ~9pt) or widen that column and re-snap the whole grid — do NOT let it overflow.\n` +
+  `4. ALIGNMENT: Be consistent per column — left-align text/labels, right-align numbers (so digits line up), ` +
+  `and vertically center every cell. Use the same alignment for all cells in a column.\n` +
+  `5. HEADER ROW: Make the header clearly visible — a distinct full-width header band rect (accent or darker fill) ` +
+  `behind bold, high-contrast header text. The header band aligns exactly to the header row's bounds.\n` +
+  `6. DISTINGUISHABLE ROWS: Make rows easy to separate — either zebra striping (alternating subtle row fills) OR ` +
+  `thin horizontal separator lines between rows. All fills/lines are rect elements placed BEHIND the text ` +
+  `(lower z-index than every cell's text) and snapped exactly to the row/column grid lines.\n` +
+  `7. BOUNDS & SPACING: Keep the entire table within the slide bounds, clear of the title, with even outer margins. ` +
+  `Equalize row heights (unless a row genuinely needs more) and keep spacing uniform.\n` +
+  `8. PRESERVE: Keep ALL existing data and the slide's color theme — only adjust geometry, alignment, sizing and styling.`
+
 export const QUICK_ACTIONS: QuickAction[] = [
   {
     id: 'split-slide',
@@ -190,37 +219,34 @@ export const QUICK_ACTIONS: QuickAction[] = [
     },
   },
   {
-    id: 'visualize-table',
-    label: 'Visualize as table',
+    id: 'smart-table',
+    label: 'Smart table',
     icon: 'Table',
-    description: 'Lay out data on this slide (or selected items) as a clean table.',
+    description: 'Build a clean table from data, or fix up an existing one.',
     effort: 'high',
     isAvailable: ctx => ctx.activeSlideIndex >= 0,
     buildInstruction: ctx => {
       const n = ctx.activeSlideIndex + 1
       const sel = selectedElements(ctx)
-      // There is no native table element — build the table from rect + text primitives.
-      const howto =
-        `Build the table from PRIMITIVES (there is no table element type): use rect elements for a ` +
-        `header band and subtle row separators / zebra striping (place these BEHIND the text using a low z-index), ` +
-        `and a text element for EACH cell. Snap cells into a real grid: every column shares the same x and width, ` +
-        `every row shares the same height and top, header text is bold, and cell text is consistently aligned ` +
-        `(left for labels, right for numbers). Keep it inside the slide bounds and clear of the title.`
-      // Element-scoped: tabulate only the selected elements' data.
+      const verify =
+        `After the change, render the slide and visually CHECK the table: every column edge lines up, every row edge ` +
+        `lines up, no text crosses a column/row boundary or overlaps a neighbour, the header stands out, and rows are ` +
+        `clearly distinguishable. If anything is off, fix it and render again.`
+      // One universal action: enhance an existing table, otherwise tabulate data.
       if (sel.length > 0) {
         const tags = sel.map(elementTag).join('; ')
         return (
-          `Using the data in ONLY these selected elements on slide ${n} (id: ${ctx.activeSlideId}): ${tags}, ` +
-          `arrange it as a clean table. ${howto} Remove or trim the now-redundant selected text you tabulated, ` +
-          `and leave all OTHER elements untouched. If the selected elements contain no tabular/structured data, ` +
-          `make NO changes and finish by saying there was nothing to tabulate. Render to verify the grid is aligned.`
+          `On slide ${n} (id: ${ctx.activeSlideId}), improve the table using ONLY these selected elements: ${tags}. ` +
+          `If they already form a table, re-snap and restyle it; if they are loose structured data, arrange them into ` +
+          `a new table and trim the now-redundant selected text. ${TABLE_SPEC} Do NOT touch other elements. ` +
+          `If the selected elements contain no tabular/structured data, make NO changes and say there was nothing to do. ${verify}`
         )
       }
       return (
-        `Look at slide ${n} (id: ${ctx.activeSlideId}). If it contains structured data, comparisons, lists of ` +
-        `metrics or key/value pairs, arrange them as a clean table. ${howto} Trim now-redundant text. ` +
-        `If there is no tabular/structured data, make NO changes and finish by saying there was nothing to tabulate. ` +
-        `Render to verify the grid is aligned.`
+        `Look at slide ${n} (id: ${ctx.activeSlideId}) and improve its table. ` +
+        `If it already has a table, clean it up and restyle it; if it instead has structured data, comparisons, lists ` +
+        `of metrics or key/value pairs, arrange them into a new table and trim now-redundant text. ${TABLE_SPEC} ` +
+        `If there is neither a table nor tabular data, make NO changes and say there was nothing to do. ${verify}`
       )
     },
   },

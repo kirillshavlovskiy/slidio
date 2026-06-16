@@ -491,7 +491,7 @@ export default function CanvasFloatingToolbar({
                   <p className="border-b border-[#16263b] px-3 py-2 text-[10px] font-bold uppercase tracking-widest text-[#7c6bb0]">
                     Smart AI actions
                   </p>
-                  <div className="max-h-[50vh] overflow-y-auto py-1">
+                  <div className="py-1">
                     {quickActions.map(action => {
                       const available = action.isAvailable(quickActionCtx)
                       const Icon = ACTION_ICONS[action.icon] ?? Wand2

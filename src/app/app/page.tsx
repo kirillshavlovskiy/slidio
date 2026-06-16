@@ -4046,20 +4046,6 @@ Return ONE complete "patch" (changes relative to the ORIGINAL slide data provide
             rightCollapsed && !rightPeek ? 'translate-x-full' : 'translate-x-0'
           } ${rightCollapsed && rightPeek ? 'z-40 border-l border-[#1e3a5f] shadow-2xl' : ''}`}
         >
-          {rightCollapsed && rightPeek && (
-            <button
-              type="button"
-              onClick={() => {
-                setRightCollapsed(false)
-                setRightPeek(false)
-              }}
-              title="Keep panel open"
-              aria-label="Keep panel open"
-              className="absolute left-1.5 top-1.5 z-50 flex h-6 w-6 items-center justify-center rounded text-[#475569] transition-colors hover:bg-[#1e3a5f] hover:text-[#93c5fd]"
-            >
-              <Pin className="h-3.5 w-3.5" />
-            </button>
-          )}
           <ChatPanel
             isLoading={isLoading || isAgentRunning}
             isAgentRunning={isAgentRunning}
@@ -4079,6 +4065,11 @@ Return ONE complete "patch" (changes relative to the ORIGINAL slide data provide
             onDeclineProposal={discardChanges}
             onOpenProposal={() => setIsPreviewOpen(true)}
             onCollapse={() => setRightCollapsed(true)}
+            peeking={rightCollapsed && rightPeek}
+            onPin={() => {
+              setRightCollapsed(false)
+              setRightPeek(false)
+            }}
           />
         </div>
       </div>
