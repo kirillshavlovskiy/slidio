@@ -46,6 +46,14 @@ export interface KnowledgeContextOptions {
   recentOnly?: boolean
   /** Total character budget for knowledge layers (default ~6000 ≈ 1.5k tokens). */
   charBudget?: number
+  /**
+   * Per-document character cap for layers uploaded as reference material
+   * (source: 'document'). Defaults to the normal per-layer cap, but the agent
+   * raises it a lot so a business plan's tables/structure survive for deck builds.
+   */
+  documentCharCap?: number
+  /** Total character cap across ALL uploaded documents (default ≈ charBudget). */
+  documentTotalCap?: number
 }
 
 // ── Context assembly ──────────────────────────────────────────────────────────
@@ -67,7 +75,14 @@ export function buildKnowledgeContext(
   // (style/stakeholder), truncate long layers, and respect a total budget. ──
   const PER_LAYER_CHARS = 1200
   const totalBudget = opts.charBudget ?? 6000
+  const DOC_CHARS = opts.documentCharCap ?? PER_LAYER_CHARS
+  const DOC_TOTAL = opts.documentTotalCap ?? Math.max(DOC_CHARS, totalBudget)
   const ALWAYS = new Set<KnowledgeLayerType>(['style', 'stakeholder'])
+  // Files the user uploaded as reference material (business plans, specs, data).
+  // These were attached ON PURPOSE as the source of truth, so they must never be
+  // dropped just because their wording (e.g. a non-English doc) doesn't keyword-
+  // match the instruction. Keyed on source, not type, so it works for any bucket.
+  const isDoc = (l: KnowledgeLayer): boolean => l.source === 'document'
   const query = keywordSet(`${opts.instruction ?? ''} ${opts.slideText ?? ''}`)
 
   const scoreOf = (l: KnowledgeLayer): number => {
@@ -86,12 +101,24 @@ export function buildKnowledgeContext(
 
   const ranked = enabled
     .map(l => ({ l, s: scoreOf(l) }))
-    .filter(x => x.s > 0)
+    // Keep anything with a keyword hit, plus always-include guidance and uploaded
+    // documents (which must reach the model regardless of keyword overlap).
+    .filter(x => x.s > 0 || ALWAYS.has(x.l.type) || isDoc(x.l))
     .sort((a, b) => b.s - a.s)
 
   const selected: KnowledgeLayer[] = []
   let used = 0
+  let docUsed = 0
   ranked.forEach(({ l }) => {
+    if (isDoc(l)) {
+      // Uploaded reference docs use their own (larger) caps and budget so a long
+      // business plan with tables survives instead of being cut to a sentence.
+      const piece = truncate(l.content, DOC_CHARS)
+      if (docUsed + piece.length > DOC_TOTAL) return
+      selected.push({ ...l, content: piece })
+      docUsed += piece.length
+      return
+    }
     const piece = truncate(l.content, PER_LAYER_CHARS)
     // Always-include layers bypass the budget gate; others must fit.
     if (!ALWAYS.has(l.type) && used + piece.length > totalBudget) return

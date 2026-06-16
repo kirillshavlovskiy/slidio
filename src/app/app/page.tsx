@@ -268,6 +268,9 @@ export default function Home() {
   // request's AbortController so a Stop also kills the current network call.
   const agentStopRef = useRef(false)
   const agentAbortRef = useRef<AbortController | null>(null)
+  // In-flight single-shot (/api/edit) request, so the composer Stop button can
+  // abort a one-shot generation the same way it stops an agent run.
+  const singleShotAbortRef = useRef<AbortController | null>(null)
   // Last refine response shown inline in the preview panel (e.g. an AI question).
   const [refineNote, setRefineNote] = useState<string | null>(null)
 
@@ -1165,9 +1168,12 @@ export default function Home() {
       )
       setLastScopeMode(scopeMode)
 
+      const ac = new AbortController()
+      singleShotAbortRef.current = ac
       try {
         const res = await fetch('/api/edit', {
           method: 'POST',
+          signal: ac.signal,
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             messages: newHistory,
@@ -1181,6 +1187,10 @@ export default function Home() {
             knowledgeContext: buildKnowledgeContext(knowledgeLayers, decisions, activeSlideId, {
               instruction: lastUserMessage,
               slideText: activeSlideText(slides, activeSlideId),
+              // Uploaded reference docs are the source of truth — keep a useful
+              // chunk (incl. table structure) rather than cutting to one sentence.
+              documentCharCap: 16000,
+              documentTotalCap: 32000,
             }),
             annotatedImage: annotatedImage || null,
             attachedImages,
@@ -1317,18 +1327,30 @@ export default function Home() {
           }
         }
       } catch (err) {
-        console.error('[edit] request failed:', err)
-        const errMsg: ClaudeResponse = {
-          type: 'clarification',
-          question: 'Something went wrong. Please try again.',
+        // A user-triggered Stop aborts the fetch — that's a clean stop, not an error.
+        const aborted =
+          (err instanceof DOMException && err.name === 'AbortError') ||
+          (err as { name?: string })?.name === 'AbortError'
+        if (aborted) {
+          setDisplay(prev => [
+            ...prev,
+            { role: 'assistant', agentStep: { kind: 'note', label: 'Stopped.' } },
+          ])
+        } else {
+          console.error('[edit] request failed:', err)
+          const errMsg: ClaudeResponse = {
+            type: 'clarification',
+            question: 'Something went wrong. Please try again.',
+          }
+          const assistantMsg: ConversationMessage = {
+            role: 'assistant',
+            content: JSON.stringify(errMsg),
+          }
+          setConversationHistory([...newHistory, assistantMsg])
+          setDisplay(prev => [...prev, { role: 'assistant', response: errMsg }])
         }
-        const assistantMsg: ConversationMessage = {
-          role: 'assistant',
-          content: JSON.stringify(errMsg),
-        }
-        setConversationHistory([...newHistory, assistantMsg])
-        setDisplay(prev => [...prev, { role: 'assistant', response: errMsg }])
       } finally {
+        singleShotAbortRef.current = null
         setIsLoading(false)
       }
     },
@@ -2313,6 +2335,12 @@ export default function Home() {
       const knowledgeContext = buildKnowledgeContext(knowledgeLayers, decisions, activeSlideId, {
         instruction,
         slideText: activeSlideText(slidesRef.current, activeSlideId),
+        // The agent builds decks FROM the uploaded source docs, so feed essentially
+        // the whole document (tables/structure included) — a business plan can run
+        // 100k+ chars and the agent needs all sections, not just the first half.
+        // (Stored text is already capped at 200k in parseDocumentToText.)
+        documentCharCap: 200000,
+        documentTotalCap: 240000,
       })
       const templateKnowledge = mergeTemplatesKnowledge(templates)
       const mediaCtx = buildMediaContext(mediaManifest(collectAllAssets()))
@@ -2765,6 +2793,16 @@ export default function Home() {
     if (!isAgentRunning) return
     agentStopRef.current = true
     agentAbortRef.current?.abort()
+  }, [isAgentRunning])
+
+  // Stop whatever is generating right now — the agent loop OR a single-shot
+  // request — so the composer's Stop button works regardless of the active flow.
+  const stopProcessing = useCallback(() => {
+    if (isAgentRunning) {
+      agentStopRef.current = true
+      agentAbortRef.current?.abort()
+    }
+    singleShotAbortRef.current?.abort()
   }, [isAgentRunning])
 
   // Programmatic stop hook for testing / power users (e.g. preview console):
@@ -4154,7 +4192,7 @@ Return ONE complete "patch" (changes relative to the ORIGINAL slide data provide
             display={display}
             onSend={handleSend}
             onRunAgent={runAgent}
-            onStopAgent={stopAgent}
+            onStopAgent={stopProcessing}
             onPickOption={handlePickOption}
             onSubmitAnswers={handleSubmitAnswers}
             onRevert={revertToMessage}

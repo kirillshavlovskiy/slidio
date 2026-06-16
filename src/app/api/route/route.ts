@@ -20,7 +20,7 @@ const ROUTER_SYSTEM = `You route messages for an AI slide-editing assistant. Rea
 {"mode":"ask"|"single"|"agent","effort":"low"|"medium"|"high"|"xhigh"|"max","scope":"active"|"selected"|"deck"|"ask"}
 
 MODES
-- "ask": the user is asking a QUESTION or wants analysis/explanation/summary/feedback/an opinion — they do NOT want the deck changed. Use this whenever there is no clear instruction to modify the slides.
+- "ask": the user is asking a QUESTION or wants analysis/explanation/summary/feedback/an opinion — they do NOT want the deck changed. Use this whenever there is no clear instruction to modify the slides. This INCLUDES questions ABOUT building or content — "what should this deck include?", "how would you structure it?", "which sections do I need?", "what content goes here?", "should I add X?", "can you tell me…", "what do you recommend?". Wanting your OPINION/PLAN on what to build is "ask", NOT "agent". Only choose single/agent when the message is an IMPERATIVE to actually make the change (build it, add it, fix it, restyle it).
 
 CRITICAL — follow-ups and complaints are EDITS, not questions: A message that reacts to a PREVIOUS edit — e.g. "it's not fixed", "that didn't work", "changes weren't applied", "nothing changed", "still wrong/broken/misaligned", "you didn't do it", "do it again", "redo it", "that's not what I asked", or any frustrated complaint about the result (even if it ends with "?" or contains insults) — is an instruction to FIX/REDO the edit. Route these to "single" (small fix) or "agent" (multi-element/relayout), NEVER to "ask". Only use "ask" for genuine information-seeking questions, not for dissatisfaction with an edit.
 - "single": a small, well-scoped EDIT that can be produced in ONE shot — e.g. change text/color/font/size, move/align/resize a few elements, restyle or add ONE small element on the current slide.
@@ -90,6 +90,19 @@ function isCreateDeckIntent(instruction: string): boolean {
   return CREATE_DECK_INTENT.test(instruction)
 }
 
+/**
+ * Heuristic "this is a question, not a command" guard. Used only to SUPPRESS the
+ * create-deck escalation (so a question that happens to mention building isn't
+ * turned into an edit). It never forces editing — at worst a real command that
+ * looks question-y stays on the model's chosen lane.
+ */
+const QUESTION_LIKE =
+  /(^\s*(what|why|how|which|who|whom|whose|when|where|should|shall|can|could|would|do|does|did|is|are|am|was|were|will|won't|may|might|tell\s+me|explain|describe|recommend|suggest|advise|do\s+you|could\s+you|can\s+you)\b)|\?\s*$/i
+
+function isQuestionLike(instruction: string): boolean {
+  return QUESTION_LIKE.test(instruction.trim())
+}
+
 export async function POST(req: NextRequest) {
   const body = await req.json().catch(() => ({}))
   const instruction: string = typeof body.instruction === 'string' ? body.instruction : ''
@@ -151,7 +164,9 @@ Return the routing JSON now.`
       // Hard floor: a build/populate-a-deck request must run on the AGENT (never the
       // one-shot editor). The cheap router occasionally labels "create slides …" as
       // "single"; force it to the agent at high effort so big builds aren't one-shot.
-      if (mode === 'single' && isCreateDeckIntent(instruction)) {
+      // BUT never escalate a QUESTION (even one that mentions building) — that would
+      // turn "what should I create?" into an unwanted edit.
+      if (mode === 'single' && isCreateDeckIntent(instruction) && !isQuestionLike(instruction)) {
         mode = 'agent'
         if (effort === 'low' || effort === 'medium') effort = 'high'
       }

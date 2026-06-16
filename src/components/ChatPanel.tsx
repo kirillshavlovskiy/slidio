@@ -330,16 +330,6 @@ export default function ChatPanel({
                 <Bot className="w-3 h-3" /> agent working…
               </span>
             )}
-            {isAgentRunning && onStopAgent && (
-              <button
-                onClick={onStopAgent}
-                title="Stop the agent run"
-                className="ml-auto flex items-center gap-1 px-2 py-1 text-xs font-semibold rounded
-                           bg-[#7f1d1d] text-[#fecaca] border border-[#b91c1c] hover:bg-[#991b1b] transition-colors"
-              >
-                <Square className="w-3 h-3 fill-current" /> Stop
-              </button>
-            )}
           </div>
         )}
         <div ref={bottomRef} />
@@ -486,15 +476,26 @@ export default function ChatPanel({
               >
                 <ImagePlus className="w-4 h-4" />
               </button>
-              <button
-                onClick={send}
-                disabled={isLoading || (!text.trim() && images.length === 0)}
-                title="Send (Enter)"
-                className="flex items-center justify-center w-7 h-7 rounded-full bg-[#60a5fa] text-[#0d1b2a]
-                           disabled:opacity-40 disabled:hover:bg-[#60a5fa] hover:bg-[#93c5fd] transition-colors"
-              >
-                <ArrowUp className="w-4 h-4" strokeWidth={2.5} />
-              </button>
+              {isLoading ? (
+                <button
+                  onClick={() => onStopAgent?.()}
+                  title="Stop generating"
+                  className="flex items-center justify-center w-7 h-7 rounded-full bg-[#60a5fa] text-[#0d1b2a]
+                             hover:bg-[#93c5fd] transition-colors"
+                >
+                  <Square className="w-3 h-3 fill-current" />
+                </button>
+              ) : (
+                <button
+                  onClick={send}
+                  disabled={!text.trim() && images.length === 0}
+                  title="Send (Enter)"
+                  className="flex items-center justify-center w-7 h-7 rounded-full bg-[#60a5fa] text-[#0d1b2a]
+                             disabled:opacity-40 disabled:hover:bg-[#60a5fa] hover:bg-[#93c5fd] transition-colors"
+                >
+                  <ArrowUp className="w-4 h-4" strokeWidth={2.5} />
+                </button>
+              )}
             </div>
           </div>
         </div>
