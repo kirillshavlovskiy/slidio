@@ -9,7 +9,35 @@ import {
   QuotaExceededError,
 } from '@/lib/billing/usage'
 
+/** Vercel Pro caps serverless functions at 300s — stay under that per step. */
+export const maxDuration = 300
+
 const client = new Anthropic()
+
+/** Abort a single agent step before the platform kills the whole function. */
+const STEP_TIMEOUT_MS = Number(process.env.AGENT_STEP_TIMEOUT_MS) || 240_000
+
+class StepTimeoutError extends Error {
+  status = 504
+  constructor() {
+    super('Agent step exceeded server time limit')
+    this.name = 'StepTimeoutError'
+  }
+}
+
+async function withStepTimeout<T>(promise: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new StepTimeoutError()), STEP_TIMEOUT_MS)
+      }),
+    ])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
 
 /**
  * Two-tier model selection to control cost. Mechanical / lighter edits run on the
@@ -59,10 +87,13 @@ function budgetFor(effort: Effort): {
       // gets cut off (stop_reason=max_tokens) and nothing is applied.
       return { maxTokens: 20000, thinking: { type: 'enabled', budget_tokens: 5000 } }
     case 'xhigh':
-      return { maxTokens: 28000, thinking: { type: 'adaptive', display: 'summarized' } }
+      // Bounded thinking only — "adaptive" can run 5+ minutes and hit Vercel's
+      // 300s function limit on a single step. The agent loop spreads work across
+      // many shorter turns instead.
+      return { maxTokens: 22000, thinking: { type: 'enabled', budget_tokens: 7000 } }
     case 'max':
     default:
-      return { maxTokens: 32000, thinking: { type: 'adaptive', display: 'summarized' } }
+      return { maxTokens: 24000, thinking: { type: 'enabled', budget_tokens: 9000 } }
   }
 }
 
@@ -470,31 +501,43 @@ export async function POST(req: NextRequest) {
 
   let response: Anthropic.Message
   try {
-    response = await createWithRetry(
-      {
-        model,
-        // Budget (incl. thinking tokens) scales with effort — see budgetFor().
-        max_tokens: maxTokens,
-        // Cache the (large, constant) system prompt so repeat steps in the loop pay
-        // ~10% of the input cost for it instead of full price every turn.
-        system: [
-          { type: 'text', text: AGENT_SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } },
-        ],
-        // Cache the tool definitions too — a breakpoint on the last tool covers them all.
-        tools: cachedTools(),
-        // Nudge the model to act rather than narrate; combined with the prompt
-        // this keeps turns short and tool-driven.
-        tool_choice: { type: 'auto' },
-        messages: trimMessages(messages),
-        // Latency is controlled deterministically via max_tokens + thinking budget
-        // (see budgetFor). We intentionally do NOT also pass output_config.effort:
-        // an adaptive/high effort on top of thinking is what caused multi-minute,
-        // 16k-token turns that never called a tool.
-        thinking,
-      },
-      reqId
+    response = await withStepTimeout(
+      createWithRetry(
+        {
+          model,
+          // Budget (incl. thinking tokens) scales with effort — see budgetFor().
+          max_tokens: maxTokens,
+          // Cache the (large, constant) system prompt so repeat steps in the loop pay
+          // ~10% of the input cost for it instead of full price every turn.
+          system: [
+            { type: 'text', text: AGENT_SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } },
+          ],
+          // Cache the tool definitions too — a breakpoint on the last tool covers them all.
+          tools: cachedTools(),
+          // Nudge the model to act rather than narrate; combined with the prompt
+          // this keeps turns short and tool-driven.
+          tool_choice: { type: 'auto' },
+          messages: trimMessages(messages),
+          // Latency is controlled deterministically via max_tokens + thinking budget
+          // (see budgetFor). We intentionally do NOT also pass output_config.effort:
+          // an adaptive/high effort on top of thinking is what caused multi-minute,
+          // 16k-token turns that never called a tool.
+          thinking,
+        },
+        reqId
+      )
     )
   } catch (err) {
+    if (err instanceof StepTimeoutError) {
+      agentLog(reqId, `step timed out after ${STEP_TIMEOUT_MS}ms`)
+      return NextResponse.json(
+        {
+          error:
+            'This agent step took too long (server limit). Changes from earlier steps are saved — say "continue" to pick up, or narrow the scope (fewer slides).',
+        },
+        { status: 504 }
+      )
+    }
     const status = (err as { status?: number })?.status
     agentLog(reqId, 'MODEL CALL FAILED:', err instanceof Error ? err.message : err)
     if (status === 429) {

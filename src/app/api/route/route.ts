@@ -35,7 +35,7 @@ EFFORT (token/thinking budget) — this ALSO picks the model: "low"/"medium" run
 CREATE = powerful model (use "high", or "xhigh"/"max" for whole decks):
 - Creating a NEW slide, ADDING/INSERTING slide(s), or generating a NEW presentation/deck → ALWAYS at least "high".
 - Generating substantial NEW content (lists, several variants, parameters/structures/examples, tables), charts driven by data, a full redesign, or a design-system conversion → "high".
-- A large, deck-wide build or redesign across many slides → "xhigh" or "max".
+- A large, deck-wide build or redesign across many slides → "high". Reserve "xhigh"/"max" only for a full deck build from scratch (10+ slides of new content) — each agent step must finish within ~4 minutes on the server.
 
 UPDATE existing slide:
 - SIMPLE update to one existing slide — edit/replace text, change color/font/size, move/align/resize, tweak or restyle a single element → "low" (one tiny mechanical tweak) or "medium" (normal single-slide edit). These run on the cheap fast model.
