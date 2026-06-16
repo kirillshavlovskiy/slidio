@@ -1,6 +1,6 @@
 'use client'
 import { useRef, useState } from 'react'
-import { GripVertical, CopyCheck } from 'lucide-react'
+import { GripVertical, CopyCheck, Plus } from 'lucide-react'
 import { SlideData } from '@/lib/types'
 import { SlideSelectModifiers } from '@/lib/slideSelection'
 import SlideCanvas from '@/components/SlideCanvas'
@@ -17,6 +17,8 @@ interface Props {
   onSelectAll?: () => void
   /** Reorder slides: move slide at fromIndex to toIndex. */
   onReorder?: (fromIndex: number, toIndex: number) => void
+  /** Append a new blank slide to the end of the deck. */
+  onAddSlide?: () => void
 }
 
 function slideLabel(slide: SlideData, index: number): string {
@@ -37,6 +39,7 @@ export default function SlidePanel({
   onSelect,
   onSelectAll,
   onReorder,
+  onAddSlide,
 }: Props) {
   const panelRef = useRef<HTMLDivElement>(null)
   const thumbScale = useFitScale(panelRef, { mode: 'width', padding: 36, maxScale: 0.4 })
@@ -211,6 +214,17 @@ export default function SlidePanel({
           </div>
         )
       })}
+      {onAddSlide && (
+        <button
+          type="button"
+          onClick={onAddSlide}
+          title="Add new slide"
+          className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-[#334155] py-3 text-[11px] font-semibold text-[#64748b] transition-colors hover:border-[#60a5fa]/60 hover:bg-[#112236] hover:text-[#93c5fd]"
+        >
+          <Plus className="h-3.5 w-3.5" />
+          Add slide
+        </button>
+      )}
       </div>
     </div>
   )

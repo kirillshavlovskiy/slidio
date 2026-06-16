@@ -13,6 +13,9 @@ import {
   AlignStartHorizontal,
   AlignStartVertical,
   AlignVerticalDistributeCenter,
+  ArrowDownToLine,
+  ArrowUpToLine,
+  FoldVertical,
   BarChart3,
   Bold,
   ClipboardPaste,
@@ -104,6 +107,7 @@ interface Props {
   canMergeSlides: boolean
   onDeleteSlides: () => void
   onDuplicateSlides: () => void
+  onAddSlide: () => void
   onSplitSlide: () => void
   onMergeSlides: () => void
   slideBg: string
@@ -305,6 +309,7 @@ export default function CanvasFloatingToolbar({
   canMergeSlides,
   onDeleteSlides,
   onDuplicateSlides,
+  onAddSlide,
   onSplitSlide,
   onMergeSlides,
   slideBg,
@@ -529,6 +534,9 @@ export default function CanvasFloatingToolbar({
         <>
           <Divider />
           <div className="flex items-center gap-1.5 flex-shrink-0">
+            <ToolBtn title="Add new slide" onClick={onAddSlide}>
+              <Plus className="w-3.5 h-3.5" />
+            </ToolBtn>
             <ToolBtn
               title={
                 selectedSlideCount > 1
@@ -742,6 +750,28 @@ export default function CanvasFloatingToolbar({
             onClick={() => onUpdateElement(single.id, { style: { align: 'right' } })}
           >
             <AlignRight className="w-3.5 h-3.5" />
+          </IconBtn>
+          <Divider />
+          <IconBtn
+            title="Align text top"
+            active={single.style.valign === 'top'}
+            onClick={() => onUpdateElement(single.id, { style: { valign: 'top' } })}
+          >
+            <ArrowUpToLine className="w-3.5 h-3.5" />
+          </IconBtn>
+          <IconBtn
+            title="Align text middle"
+            active={(single.style.valign ?? 'middle') === 'middle'}
+            onClick={() => onUpdateElement(single.id, { style: { valign: 'middle' } })}
+          >
+            <FoldVertical className="w-3.5 h-3.5" />
+          </IconBtn>
+          <IconBtn
+            title="Align text bottom"
+            active={single.style.valign === 'bottom'}
+            onClick={() => onUpdateElement(single.id, { style: { valign: 'bottom' } })}
+          >
+            <ArrowDownToLine className="w-3.5 h-3.5" />
           </IconBtn>
           {single.type === 'text' && (
             <>

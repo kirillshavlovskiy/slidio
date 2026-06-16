@@ -976,6 +976,28 @@ export default function Home() {
     void loadPortfolio()
   }, [loadPortfolio])
 
+  // Create a new, empty knowledge branch (hub) from the start screen, seed its
+  // default knowledge layers, and refresh the portfolio so it shows up.
+  const createBranch = useCallback(
+    async (name: string) => {
+      try {
+        const res = await fetch('/api/branches', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name }),
+        })
+        if (!res.ok) throw new Error('Failed to create branch')
+        const { id } = await res.json()
+        if (id) await seedBranchKnowledge(id)
+        await loadPortfolio()
+      } catch (err) {
+        console.error('Failed to create branch', err)
+        throw err
+      }
+    },
+    [loadPortfolio, seedBranchKnowledge]
+  )
+
   const renameBranch = useCallback((id: string, name: string) => {
     setBranches(prev => prev.map(b => (b.id === id ? { ...b, name } : b)))
     fetch('/api/branches', {
@@ -1787,6 +1809,38 @@ export default function Home() {
   const splitActiveSlide = useCallback(() => {
     applySlideOp(splitSlide(slides, activeSlideId))
   }, [slides, activeSlideId, applySlideOp])
+
+  // Insert a new blank slide. When `afterId` is given it lands right after that
+  // slide (used by the toolbar's "add" tool, relative to the active slide);
+  // otherwise it's appended to the end (the slide-panel "+" button). The new
+  // slide inherits the reference slide's background so it matches the deck.
+  const addSlide = useCallback(
+    (afterId?: string) => {
+      pushHistory()
+      const newSlide: SlideData = {
+        id: `slide-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        bg: 'FFFFFF',
+        elements: [],
+      }
+      setSlides(prev => {
+        const refId = afterId ?? activeSlideId
+        const refSlide = prev.find(s => s.id === refId)
+        if (refSlide) {
+          newSlide.bg = refSlide.bg
+          if (refSlide.bgGradient) newSlide.bgGradient = refSlide.bgGradient
+        }
+        const idx = afterId ? prev.findIndex(s => s.id === afterId) : -1
+        const insertAt = idx >= 0 ? idx + 1 : prev.length
+        return [...prev.slice(0, insertAt), newSlide, ...prev.slice(insertAt)]
+      })
+      setActiveSlideId(newSlide.id)
+      setSelectedSlideIds([newSlide.id])
+      setSelectionAnchorId(newSlide.id)
+      setSelectedElementIds([])
+      setEditingElementId(null)
+    },
+    [activeSlideId, pushHistory]
+  )
 
   const mergeSelectedSlides = useCallback(() => {
     if (selectedSlideIds.length < 2) return
@@ -3425,6 +3479,7 @@ Return ONE complete "patch" (changes relative to the ORIGINAL slide data provide
           loading={portfolioLoading}
           onOpen={openPresentation}
           onCreate={createPresentation}
+          onCreateBranch={createBranch}
           onImportFile={importPresentation}
           importJobs={importJobs}
           onDismissImportJob={dismissImportJob}
@@ -3751,6 +3806,7 @@ Return ONE complete "patch" (changes relative to the ORIGINAL slide data provide
               onSelect={handleSlideSelect}
               onSelectAll={selectAllSlides}
               onReorder={reorderSlides}
+              onAddSlide={() => addSlide()}
             />
           ) : (
             <ElementInspector
@@ -3829,6 +3885,7 @@ Return ONE complete "patch" (changes relative to the ORIGINAL slide data provide
                   canMergeSlides={selectedSlideIds.length > 1}
                   onDeleteSlides={deleteSelectedSlides}
                   onDuplicateSlides={duplicateSelectedSlides}
+                  onAddSlide={() => addSlide(activeSlideId)}
                   onSplitSlide={splitActiveSlide}
                   onMergeSlides={mergeSelectedSlides}
                   slideBg={slides.find(s => s.id === activeSlideId)?.bg ?? 'FFFFFF'}

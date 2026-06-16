@@ -44,6 +44,8 @@ interface Props {
   loading?: boolean
   onOpen: (presentationId: string) => void
   onCreate: (opts: { name: string; branchId?: string; newBranchName?: string }) => void
+  /** Create a brand-new, empty knowledge branch (hub) with its own layers. */
+  onCreateBranch?: (name: string) => Promise<void> | void
   onImportFile?: (file: File, branchId?: string) => Promise<void> | void
   /** In-progress / failed background imports, shown as pending cards. */
   importJobs?: ImportJob[]
@@ -79,6 +81,7 @@ export default function StartScreen({
   loading,
   onOpen,
   onCreate,
+  onCreateBranch,
   onImportFile,
   importJobs,
   onDismissImportJob,
@@ -90,6 +93,7 @@ export default function StartScreen({
   onSignOut,
 }: Props) {
   const [showCreate, setShowCreate] = useState(false)
+  const [showCreateBranch, setShowCreateBranch] = useState(false)
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
   const [importing, setImporting] = useState(false)
@@ -183,10 +187,14 @@ export default function StartScreen({
               type="button"
               onClick={() => setShowPlans(true)}
               title="See upgrade options"
-              className="inline-flex items-center gap-1.5 rounded-lg bg-gradient-to-r from-violet-500 to-blue-500 text-white text-sm font-semibold px-3.5 py-2 transition-opacity hover:opacity-90"
+              className="group inline-flex rounded-lg bg-gradient-to-r from-violet-500 to-blue-500 p-px transition-opacity hover:opacity-90"
             >
-              <Sparkles className="w-4 h-4" />
-              Upgrade
+              <span className="inline-flex items-center gap-1.5 rounded-[7px] bg-[#060d1a] px-3.5 py-2 text-sm font-semibold">
+                <Sparkles className="w-4 h-4 text-violet-400" />
+                <span className="bg-gradient-to-r from-violet-400 to-blue-400 bg-clip-text text-transparent">
+                  Upgrade
+                </span>
+              </span>
             </button>
           )}
           {onImportFile && (
@@ -203,7 +211,7 @@ export default function StartScreen({
             />
           )}
           <button
-            onClick={() => setShowCreate(true)}
+            onClick={() => (onCreateBranch ? setShowCreateBranch(true) : setShowCreate(true))}
             className="flex items-center gap-1.5 bg-violet-600 hover:bg-violet-500 text-white text-sm font-semibold px-3.5 py-2 rounded-lg transition-colors"
           >
             <Plus className="w-4 h-4" /> New knowledge branch
@@ -462,10 +470,112 @@ export default function StartScreen({
         />
       )}
 
+      {showCreateBranch && onCreateBranch && (
+        <BranchDialog
+          existingNames={branches.map(b => b.name)}
+          onClose={() => setShowCreateBranch(false)}
+          onCreate={async name => {
+            await onCreateBranch(name)
+            setShowCreateBranch(false)
+          }}
+        />
+      )}
+
       {showPlans && (
         <PlanDialog currentPlan={plan} onClose={() => setShowPlans(false)} />
       )}
 
+    </div>
+  )
+}
+
+// Dedicated "create a new knowledge branch" view: a single name field plus a
+// short description of what a branch is. Mirrors the "Create a new hub" option
+// from the presentation dialog, but as its own focused flow.
+function BranchDialog({
+  existingNames,
+  onClose,
+  onCreate,
+}: {
+  existingNames: string[]
+  onClose: () => void
+  onCreate: (name: string) => Promise<void> | void
+}) {
+  const [name, setName] = useState('')
+  const [busy, setBusy] = useState(false)
+  const trimmed = name.trim()
+  const duplicate = existingNames.some(n => n.trim().toLowerCase() === trimmed.toLowerCase())
+  const canSubmit = !!trimmed && !duplicate && !busy
+
+  const submit = async () => {
+    if (!canSubmit) return
+    setBusy(true)
+    try {
+      await onCreate(trimmed)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-md rounded-2xl border border-[#1e3a5f] bg-[#0d1b2a] p-5 shadow-2xl"
+        onClick={e => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between mb-1">
+          <h3 className="text-base font-semibold text-white">Create new branch</h3>
+          <button onClick={onClose} className="text-[#64748B] hover:text-white">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+        <p className="text-[12px] text-[#64748B] mb-4">
+          A knowledge branch is a shared workspace with its own knowledge layers and design system.
+          Decks inside it give the AI better context for on-brand edits.
+        </p>
+
+        <label className="block text-xs text-[#94a3b8] mb-1.5">Branch name</label>
+        <div className="mb-2 flex items-center gap-2 rounded-lg border border-[#1e3a5f] bg-[#060d1a] px-3 py-2 focus-within:border-violet-500">
+          <GitBranch className="w-4 h-4 text-violet-400 shrink-0" />
+          <input
+            autoFocus
+            value={name}
+            onChange={e => setName(e.target.value)}
+            onKeyDown={e => {
+              if (e.key === 'Enter') void submit()
+            }}
+            placeholder="e.g. Acme Q3, Sales playbook, Product launch"
+            className="w-full bg-transparent text-sm text-white outline-none placeholder:text-[#475569]"
+          />
+        </div>
+        {duplicate && (
+          <p className="mb-2 text-[11px] text-amber-400">A branch with this name already exists.</p>
+        )}
+
+        <div className="mt-4 flex justify-end gap-2">
+          <button
+            onClick={onClose}
+            className="px-3.5 py-2 rounded-lg text-sm text-[#94a3b8] hover:text-white hover:bg-[#1e3a5f]/40 transition-colors"
+          >
+            Cancel
+          </button>
+          <button
+            disabled={!canSubmit}
+            onClick={() => void submit()}
+            className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-semibold bg-violet-600 hover:bg-violet-500 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+          >
+            {busy ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <Plus className="w-4 h-4" />
+            )}
+            Create branch
+          </button>
+        </div>
+      </div>
     </div>
   )
 }
