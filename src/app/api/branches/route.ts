@@ -1,7 +1,35 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { auth } from '@/lib/auth'
 import { prisma } from '@/lib/prisma'
-import { accessibleHubIds, getHubRole } from '@/lib/hubAccess'
+import { getHubRole } from '@/lib/hubAccess'
+
+const branchInclude = {
+  _count: { select: { presentations: true } },
+  knowledgeLayers: {
+    orderBy: { updatedAt: 'desc' as const },
+    select: { id: true, name: true, type: true, enabled: true, source: true },
+  },
+}
+
+async function fetchBranchesForUser(userId: string) {
+  // Prefer relation-based query (owned + shared). Fall back to owned-only when
+  // collaboration tables haven't been migrated on production yet.
+  try {
+    return await prisma.knowledgeBranch.findMany({
+      where: {
+        OR: [{ userId }, { members: { some: { userId } } }],
+      },
+      orderBy: { updatedAt: 'desc' },
+      include: branchInclude,
+    })
+  } catch {
+    return await prisma.knowledgeBranch.findMany({
+      where: { userId },
+      orderBy: { updatedAt: 'desc' },
+      include: branchInclude,
+    })
+  }
+}
 
 /**
  * Ensure the user has at least one knowledge branch. On first run we create a
@@ -31,18 +59,7 @@ export async function GET() {
 
   await ensureDefaultBranch(session.user.id)
 
-  const ids = await accessibleHubIds(session.user.id)
-  const branches = await prisma.knowledgeBranch.findMany({
-    where: { id: { in: ids } },
-    orderBy: { updatedAt: 'desc' },
-    include: {
-      _count: { select: { presentations: true } },
-      knowledgeLayers: {
-        orderBy: { updatedAt: 'desc' },
-        select: { id: true, name: true, type: true, enabled: true, source: true },
-      },
-    },
-  })
+  const branches = await fetchBranchesForUser(session.user.id)
 
   const withRoles = await Promise.all(
     branches.map(async b => ({

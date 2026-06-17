@@ -21,26 +21,43 @@ const SUPERUSER_EMAILS = new Set(
     .filter(Boolean)
 )
 
+/** True when collaboration tables/columns aren't on the DB yet (pre-migration deploy). */
+function isCollaborationSchemaError(err: unknown): boolean {
+  const msg = String((err as { message?: string })?.message || err)
+  return /no such table: HubMember|no such table: HubInvite|no such column: isSuperuser|no such column: actorId/i.test(
+    msg
+  )
+}
+
 export async function isSuperuser(userId: string): Promise<boolean> {
-  const u = await prisma.user.findUnique({
-    where: { id: userId },
-    select: { isSuperuser: true, email: true },
-  })
-  if (!u) return false
-  if (u.isSuperuser) return true
-  if (u.email && SUPERUSER_EMAILS.has(u.email.toLowerCase())) {
-    await prisma.user.update({ where: { id: userId }, data: { isSuperuser: true } }).catch(() => {})
-    return true
+  try {
+    const u = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { isSuperuser: true, email: true },
+    })
+    if (!u) return false
+    if (u.isSuperuser) return true
+    if (u.email && SUPERUSER_EMAILS.has(u.email.toLowerCase())) {
+      await prisma.user.update({ where: { id: userId }, data: { isSuperuser: true } }).catch(() => {})
+      return true
+    }
+    return false
+  } catch (err) {
+    if (isCollaborationSchemaError(err)) return false
+    throw err
   }
-  return false
 }
 
 async function ensureOwnerMembership(hubId: string, ownerUserId: string): Promise<void> {
-  await prisma.hubMember.upsert({
-    where: { hubId_userId: { hubId, userId: ownerUserId } },
-    update: {},
-    create: { hubId, userId: ownerUserId, role: 'owner' },
-  })
+  try {
+    await prisma.hubMember.upsert({
+      where: { hubId_userId: { hubId, userId: ownerUserId } },
+      update: {},
+      create: { hubId, userId: ownerUserId, role: 'owner' },
+    })
+  } catch (err) {
+    if (!isCollaborationSchemaError(err)) throw err
+  }
 }
 
 export async function getHubRole(userId: string, hubId: string): Promise<HubRole | null> {
@@ -54,10 +71,15 @@ export async function getHubRole(userId: string, hubId: string): Promise<HubRole
     return 'owner'
   }
 
-  const member = await prisma.hubMember.findUnique({
-    where: { hubId_userId: { hubId, userId } },
-  })
-  return (member?.role as HubRole) ?? null
+  try {
+    const member = await prisma.hubMember.findUnique({
+      where: { hubId_userId: { hubId, userId } },
+    })
+    return (member?.role as HubRole) ?? null
+  } catch (err) {
+    if (isCollaborationSchemaError(err)) return null
+    throw err
+  }
 }
 
 export async function acceptHubInvite(
@@ -98,16 +120,29 @@ export async function declineHubInvite(
   return { ok: true, hubId: invite.hubId }
 }
 
+/** Hub ids the user owns or is a member of. Always includes owned hubs even pre-migration. */
 export async function accessibleHubIds(userId: string): Promise<string[]> {
-  if (await isSuperuser(userId)) {
-    const all = await prisma.knowledgeBranch.findMany({ select: { id: true } })
-    return all.map(b => b.id)
+  const owned = await prisma.knowledgeBranch.findMany({
+    where: { userId },
+    select: { id: true },
+  })
+  const ids = new Set(owned.map(b => b.id))
+
+  try {
+    if (await isSuperuser(userId)) {
+      const all = await prisma.knowledgeBranch.findMany({ select: { id: true } })
+      return all.map(b => b.id)
+    }
+    const memberships = await prisma.hubMember.findMany({
+      where: { userId },
+      select: { hubId: true },
+    })
+    for (const m of memberships) ids.add(m.hubId)
+  } catch (err) {
+    if (!isCollaborationSchemaError(err)) throw err
   }
-  const [owned, memberships] = await Promise.all([
-    prisma.knowledgeBranch.findMany({ where: { userId }, select: { id: true } }),
-    prisma.hubMember.findMany({ where: { userId }, select: { hubId: true } }),
-  ])
-  return Array.from(new Set([...owned.map(b => b.id), ...memberships.map(m => m.hubId)]))
+
+  return Array.from(ids)
 }
 
 export async function canAccessPresentation(

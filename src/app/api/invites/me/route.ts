@@ -9,13 +9,19 @@ export async function GET() {
   const email = session.user.email?.trim().toLowerCase()
   if (!email) return NextResponse.json([])
 
-  const invites = await prisma.hubInvite.findMany({
-    where: { email, status: 'pending' },
-    include: {
-      hub: { select: { id: true, name: true } },
-    },
-    orderBy: { createdAt: 'desc' },
-  })
+  let invites
+  try {
+    invites = await prisma.hubInvite.findMany({
+      where: { email, status: 'pending' },
+      include: {
+        hub: { select: { id: true, name: true } },
+      },
+      orderBy: { createdAt: 'desc' },
+    })
+  } catch {
+    // HubInvite table not migrated yet — treat as no pending invites.
+    return NextResponse.json([])
+  }
 
   const inviterIds = [...new Set(invites.map(i => i.invitedById))]
   const inviters = inviterIds.length

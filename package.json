@@ -9,6 +9,7 @@
     "start": "next start",
     "db:push": "NODE_OPTIONS=--experimental-require-module prisma db push",
     "db:push:turso": "node scripts/push-turso.mjs",
+    "db:migrate:collaboration": "node scripts/migrate-collaboration.mjs",
     "users": "node scripts/list-users.mjs"
   },
   "engines": {

@@ -1,23 +1,53 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { auth } from '@/lib/auth'
 import { prisma } from '@/lib/prisma'
-import { accessibleHubIds, canAccessPresentation, getHubRole } from '@/lib/hubAccess'
+import { canAccessPresentation, getHubRole } from '@/lib/hubAccess'
+
+async function listPresentations(userId: string, branchId?: string) {
+  const select = {
+    id: true,
+    name: true,
+    branchId: true,
+    updatedAt: true,
+    createdAt: true,
+  } as const
+
+  if (branchId) {
+    return prisma.presentation.findMany({
+      where: { branchId },
+      orderBy: { updatedAt: 'desc' },
+      select,
+    })
+  }
+
+  // Always include decks the user created. Also include decks on hubs they can access.
+  try {
+    return await prisma.presentation.findMany({
+      where: {
+        OR: [
+          { userId },
+          { branch: { OR: [{ userId }, { members: { some: { userId } } }] } },
+        ],
+      },
+      orderBy: { updatedAt: 'desc' },
+      select,
+    })
+  } catch {
+    // Pre-migration: user-owned decks only (legacy behavior).
+    return prisma.presentation.findMany({
+      where: { userId },
+      orderBy: { updatedAt: 'desc' },
+      select,
+    })
+  }
+}
 
 export async function GET(req: NextRequest) {
   const session = await auth()
   if (!session?.user?.id) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   const branchId = req.nextUrl.searchParams.get('branchId') || undefined
 
-  const hubIds = await accessibleHubIds(session.user.id)
-  const presentations = await prisma.presentation.findMany({
-    where: branchId
-      ? { branchId }
-      : {
-          OR: [{ userId: session.user.id }, { branchId: { in: hubIds } }],
-        },
-    orderBy: { updatedAt: 'desc' },
-    select: { id: true, name: true, branchId: true, updatedAt: true, createdAt: true },
-  })
+  const presentations = await listPresentations(session.user.id, branchId)
 
   if (branchId && !(await getHubRole(session.user.id, branchId))) {
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 })

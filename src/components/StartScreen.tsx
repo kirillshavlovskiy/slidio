@@ -232,6 +232,18 @@ export default function StartScreen({
   }, [presentations])
 
   const orphans = byBranch.get('__none__') || []
+  const branchIds = useMemo(() => new Set(branches.map(b => b.id)), [branches])
+  /** Decks tied to a hub id that didn't come back from /api/branches (still show them). */
+  const strandedByHub = useMemo(() => {
+    const map = new Map<string, PresentationSummary[]>()
+    for (const p of presentations) {
+      if (!p.branchId || branchIds.has(p.branchId)) continue
+      const list = map.get(p.branchId) || []
+      list.push(p)
+      map.set(p.branchId, list)
+    }
+    return map
+  }, [presentations, branchIds])
 
   return (
     <div className="h-screen overflow-auto bg-[#060d1a] text-white">
@@ -617,6 +629,34 @@ export default function StartScreen({
               )
             })}
 
+            {strandedByHub.size > 0 &&
+              [...strandedByHub.entries()].map(([hubId, decks]) => (
+                <section
+                  key={hubId}
+                  className="rounded-2xl border border-amber-500/30 bg-[#0a1525] overflow-hidden"
+                >
+                  <div className="flex items-center gap-2.5 px-5 py-3.5 border-b border-amber-500/20 bg-amber-500/5">
+                    <GitBranch className="w-4 h-4 text-amber-400 shrink-0" />
+                    <h3 className="text-sm font-semibold truncate">Knowledge Hub</h3>
+                    <span className="text-[11px] text-[#64748B] shrink-0">
+                      {decks.length} deck{decks.length !== 1 ? 's' : ''}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 p-4">
+                    {decks.map(deck => (
+                      <DeckCard
+                        key={deck.id}
+                        deck={deck}
+                        withIcon
+                        onOpen={onOpen}
+                        onDelete={onDeletePresentation}
+                        onRename={onRenamePresentation}
+                      />
+                    ))}
+                  </div>
+                </section>
+              ))}
+
             {orphans.length > 0 && (
               <section className="rounded-2xl border border-[#13243a] bg-[#0a1525] p-4">
                 <h3 className="text-sm font-semibold mb-3 px-1">Unassigned presentations</h3>
@@ -634,7 +674,7 @@ export default function StartScreen({
               </section>
             )}
 
-            {branches.length === 0 && orphans.length === 0 && (
+            {branches.length === 0 && orphans.length === 0 && strandedByHub.size === 0 && (
               <div className="rounded-2xl border border-dashed border-[#1e3a5f] py-16 text-center">
                 <p className="text-sm text-[#64748B]">No presentations yet.</p>
                 <button
