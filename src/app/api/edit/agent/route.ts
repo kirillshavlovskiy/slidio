@@ -8,6 +8,11 @@ import {
   usageTokens,
   QuotaExceededError,
 } from '@/lib/billing/usage'
+import {
+  compressAgentIntro,
+  PRESENTATION_SCOPE_LIMITS,
+  MAX_DECK_SLIDES,
+} from '@/lib/presentationScope'
 
 /** Vercel Pro caps serverless functions at 300s — stay under that per step. */
 export const maxDuration = 300
@@ -195,10 +200,11 @@ When it applies, your FIRST tool call's preceding sentence (still ≤2 short sen
 
 ## Building a NEW deck / many new slides — go INCREMENTALLY (avoid truncation)
 When creating new content from scratch (a new deck, or several new slides), do NOT try to emit the WHOLE deck in one giant apply_changes — an oversized tool call can be cut off by the token limit and then NOTHING is applied. Instead build in small batches:
-- Add 1–2 slides (with all their elements) per apply_changes call, then continue with the next batch on the following turn. Keep going until every planned slide exists.
+- Respect the user's presentation_depth cap (Light/Medium/In-depth) — never exceed their slide limit.
+- Add 1–2 slides (with all their elements) per apply_changes call, then continue with the next batch on the following turn. Keep going until every planned slide exists OR you hit the scope slide cap.
 - After the first slide or two, render_slide once to confirm the system looks right, then continue adding the rest.
-- If an apply_changes result says it was "cut off / too large", immediately RESEND that batch split into smaller pieces (one slide, or fewer elements, at a time).
-(For EDITING existing elements, still batch normally — this incremental rule is only for generating large amounts of NEW content.)
+- If an apply_changes result says it was "cut off / too large" or "exceeds the slide limit", immediately RESEND a smaller batch (one slide, or fewer elements, at a time).
+(For EDITING existing elements on slides that already exist, still batch normally — this incremental rule is only for generating large amounts of NEW content.)
 
 ## Heed the LAYOUT CHECK
 apply_changes returns an automatic LAYOUT CHECK measuring out-of-bounds (outside 10×7.5in) and content-hiding overlaps that THIS edit introduced. If it reports issues, fix them with another apply_changes BEFORE you finish — do not rely on the screenshot alone to catch geometry problems. Only finish once the LAYOUT CHECK is clean (or any remaining overlap is clearly intentional, e.g. a band deliberately behind text).
@@ -220,25 +226,25 @@ Before each tool call, write at most ONE short sentence (≤25 words) on what yo
 - ZEBRA ROWS / TABLES: row backgrounds must span the SAME x and w as their container (full width, no side gaps — inset the TEXT via padLeft, not the box), be vertically contiguous, and use TWO CLEARLY DISTINCT shades (obvious lightness step, both distinct from the background). Near-identical shades like 1E3A5F vs 162C44 are WRONG. To match an existing striped panel, read its band colors with get_slide and reuse the exact hexes.
 - When matching one side to another, replicate the geometry and the EXACT colors of the reference side.
 
+## NEW presentation / deck build — ask depth FIRST, then build within the cap
+(Applies when the user asks to CREATE/BUILD/GENERATE/POPULATE a new presentation or multi-slide deck from source material — NOT for small edits to existing slides.)
+1. BEFORE adding slides or populating blank slides, call ask_user with question id "presentation_depth" and these options:
+   - Light — quick overview, at most ${PRESENTATION_SCOPE_LIMITS.light} slides (cover + 2–3 key sections + closing)
+   - Medium — standard pitch, at most ${PRESENTATION_SCOPE_LIMITS.medium} slides
+   - In-depth — comprehensive, at most ${PRESENTATION_SCOPE_LIMITS.indepth} slides
+   Skip this ONLY if the user already chose light/medium/in-depth in their message.
+2. After they answer, build incrementally (1–2 slides per apply_changes). NEVER exceed their chosen slide cap (${PRESENTATION_SCOPE_LIMITS.light}/${PRESENTATION_SCOPE_LIMITS.medium}/${PRESENTATION_SCOPE_LIMITS.indepth}) or the absolute deck maximum (${MAX_DECK_SLIDES} slides).
+3. Prioritize the most important sections for the chosen depth — a Light deck should NOT try to cover every subsection of a long source doc.
+4. Use knowledge base / uploaded documents as source of truth; placeholder unverified figures per the "*" rule above.
+
 ## When to BUILD vs ASK (default: BUILD — do not pester)
 (Applies ONLY after STEP 0 decided the message is a genuine CHANGE request. If it was a QUESTION, ignore this section and just answer via finish.)
-You are an autonomous builder. When the user asks you to "create slides", "build the deck",
-"populate the slides", "fill it in from the context / knowledge base", or similar, DEFAULT TO
-BUILDING A COMPLETE, MULTI-SLIDE DECK that covers the source material — do NOT stop to ask
-whether you should build the whole deck vs one slide. Just build it:
-- If only one blank/placeholder slide exists, POPULATE it AND ADD the remaining slides (add slide
-  ops) so the full narrative is covered. Use the knowledge base, uploaded documents and template
-  styling already in context as your source of truth for structure, text and styling.
-- Cover the natural sections of the source (e.g. cover, problem, solution, market, business model,
-  product, traction, team, ask) — build a coherent deck, not a single slide.
-- For missing real-world figures, use clearly-marked PLACEHOLDERS (the "*" rule above) instead of
-  asking — only ask if a figure is BOTH essential AND impossible to placeholder.
-ONLY call ask_user when you are genuinely blocked on a decision that materially changes the output
-and that you cannot reasonably infer (e.g. two equally-valid directions the user hinted at). When
-you do ask, use the ask_user TOOL with structured questions — never bury questions in prose or in a
-finish summary. Asking to confirm work you were already told to do is NOT allowed.
+For routine edits (move, recolor, fix overlap, update text on existing slides): just build — do NOT ask permission.
+For missing real-world figures on an existing slide, use PLACEHOLDERS unless a figure is essential AND impossible to placeholder.
+ONLY call ask_user when genuinely blocked OR for presentation_depth on new deck builds (see above).
+Never bury questions in prose or a finish summary — use the ask_user tool.
 
-Keep going through the loop autonomously; build first, ask (via ask_user) only when truly blocked.`
+Keep going through the loop autonomously; build first, ask only when required.`
 
 const TOOLS: Anthropic.Tool[] = [
   {
@@ -319,7 +325,7 @@ const TOOLS: Anthropic.Tool[] = [
     // decision the user must make — never to ask permission to do the obvious work.
     name: 'ask_user',
     description:
-      'Pause and ask the user one or more clarifying questions, shown as clickable options. Use ONLY when genuinely blocked on a decision the user must make. Do NOT use it to ask whether to do work you can already infer from the request and context — in that case just do it.',
+      'Pause and ask the user structured questions (clickable options). REQUIRED as the FIRST step when building a new presentation/deck: ask id "presentation_depth" with Light/Medium/In-depth options. Also use when genuinely blocked on a decision only the user can make.',
     input_schema: {
       type: 'object',
       properties: {
@@ -397,6 +403,18 @@ function trimMessages(messages: Anthropic.MessageParam[]): Anthropic.MessagePara
   })
 
   return messages.map((m, i) => {
+    // Compress the heavy intro blob after the first turn — knowledge/docs must not
+    // be re-sent on every step (dominant token cost on deck builds).
+    if (
+      i === 0 &&
+      m.role === 'user' &&
+      typeof m.content === 'string' &&
+      m.content.length > 6000
+    ) {
+      const instrMatch = m.content.match(/^User instruction: "((?:[^"\\]|\\.)*)"/)
+      const instruction = instrMatch?.[1]?.replace(/\\"/g, '"') ?? ''
+      return { ...m, content: compressAgentIntro(m.content, instruction) }
+    }
     if (!Array.isArray(m.content)) return m
     // Drop stale thinking blocks from older assistant turns to save input tokens.
     if (m.role === 'assistant' && i !== lastAssistantIdx) {

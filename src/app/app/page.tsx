@@ -83,6 +83,16 @@ import {
   applyChangesToSlides,
   getDeletedSlideIds,
 } from '@/lib/preview'
+import {
+  changesAddSlides,
+  compressAgentIntro,
+  effectiveSlideLimit,
+  formatPresentationScopeNote,
+  formatScopeGateNote,
+  isNewDeckBuildRequest,
+  parsePresentationScope,
+  projectDeckSlideCount,
+} from '@/lib/presentationScope'
 import { analyzeChanges, formatChangeReport } from '@/lib/changeDiagnostics'
 import { installGlobalErrorReporting, reportClientError } from '@/lib/clientLog'
 import { formatLayoutIssues, reviewLayoutChange, SLIDE_W_IN, SLIDE_H_IN } from '@/lib/layout'
@@ -2391,12 +2401,24 @@ export default function Home() {
           : '') +
         (mediaCtx ? `\n${mediaCtx}\n` : '') +
         (templateKnowledge ? `\nReference template styling:\n${templateKnowledge}\n` : '') +
+        (isNewDeckBuildRequest(instruction) && !parsePresentationScope(instruction)
+          ? `\n${formatScopeGateNote()}\n`
+          : '') +
+        ((() => {
+          const scope = parsePresentationScope(instruction)
+          return scope ? `\n${formatPresentationScopeNote(scope)}\n` : ''
+        })()) +
         `\nIf the instruction covers MULTIPLE slides (e.g. "all slides", "slides 2–5", the selection, ` +
         `the whole deck), read them all with get_slides (omit slideIds for the whole deck), then apply ONE ` +
         `combined apply_changes covering every target slide, render 1–2 to verify, then finish. ` +
         `For a single slide use get_slide → apply_changes → verify → finish.`
 
       const messages: AgentMessage[] = [{ role: 'user', content: intro }]
+
+      const deckBuild = isNewDeckBuildRequest(instruction)
+      let presentationScope = parsePresentationScope(instruction)
+      let scopeConfirmed = !!presentationScope
+      let introCompressed = false
 
       const addStep = (step: NonNullable<DisplayMessage['agentStep']>) =>
         setDisplay(prev => [...prev, { role: 'assistant', agentStep: step }])
@@ -2589,6 +2611,41 @@ export default function Home() {
                 rawChanges as Change[],
                 collectAllAssets()
               )
+
+              if (deckBuild && changesAddSlides(changes) && !scopeConfirmed) {
+                addStep({
+                  kind: 'note',
+                  label: 'Blocked slide creation — choose Light / Medium / In-depth first.',
+                })
+                toolResults.push({
+                  type: 'tool_result',
+                  tool_use_id: id,
+                  content:
+                    'You must call ask_user FIRST with question id "presentation_depth" (Light ≤5 / Medium ≤10 / In-depth ≤15 slides) before adding slides. Nothing was applied.',
+                  is_error: true,
+                })
+                continue
+              }
+
+              const slideLimit = effectiveSlideLimit(presentationScope)
+              const projected = projectDeckSlideCount(slidesRef.current, changes)
+              if (projected > slideLimit) {
+                addStep({
+                  kind: 'note',
+                  label: `Blocked — would exceed the ${slideLimit}-slide limit (${projected} total).`,
+                })
+                toolResults.push({
+                  type: 'tool_result',
+                  tool_use_id: id,
+                  content:
+                    `This patch would bring the deck to ${projected} slides, exceeding the limit of ${slideLimit}` +
+                    (presentationScope ? ` (${presentationScope} scope)` : '') +
+                    `. Nothing was applied. Add at most ${Math.max(0, slideLimit - slidesRef.current.length)} more slide(s), or finish.`,
+                  is_error: true,
+                })
+                continue
+              }
+
               // Cost ceiling + oscillation guard: count edits and detect an
               // identical patch being re-applied (a sign the agent is looping).
               applyCount++
@@ -2715,6 +2772,25 @@ export default function Home() {
           }
 
           messages.push({ role: 'user', content: toolResults })
+
+          // Drop heavy knowledge/template/media from the intro after step 1 — they
+          // were available on the first turn and must not be re-sent every step.
+          if (!introCompressed && step === 0) {
+            introCompressed = true
+            const parsedScope = parsePresentationScope(instruction)
+            if (parsedScope) presentationScope = parsedScope
+            const first = messages[0]
+            if (first?.role === 'user' && typeof first.content === 'string') {
+              messages[0] = {
+                role: 'user',
+                content: compressAgentIntro(first.content, instruction, {
+                  scopeNote: presentationScope
+                    ? formatPresentationScopeNote(presentationScope)
+                    : undefined,
+                }),
+              }
+            }
+          }
 
           if (step === AGENT_MAX_STEPS - 1) {
             hitStepLimit = true
@@ -2971,8 +3047,10 @@ export default function Home() {
         const orig = pendingAgentInstruction
         setPendingAgentInstruction(null)
         setDisplay(prev => [...prev, { role: 'user', text }])
+        const scope = parsePresentationScope(text)
+        const scopeHint = scope ? `\n${formatPresentationScopeNote(scope)}\n` : ''
         runAgentRef.current?.(
-          `${orig}\n\n[Earlier you paused to ask me clarifying questions. My answers:]\n${text}\n\nNow proceed and build exactly that — do not ask again.`,
+          `${orig}\n\n[Earlier you paused to ask me clarifying questions. My answers:]\n${text}${scopeHint}\n\nNow proceed and build exactly that — do not ask again.`,
           { skipUserEcho: true }
         )
         return
