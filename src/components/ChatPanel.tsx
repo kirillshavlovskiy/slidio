@@ -21,6 +21,7 @@ import {
   Square,
   PanelRightClose,
   Pin,
+  Eye,
 } from 'lucide-react'
 import {
   Change,
@@ -58,6 +59,7 @@ export interface DisplayMessage {
 interface Props {
   isLoading: boolean
   isAgentRunning?: boolean
+  canEdit?: boolean
   selectedSlideIds: string[]
   selectedElementIds: string[]
   display: DisplayMessage[]
@@ -132,6 +134,7 @@ function readFilesAsDataUrls(files: File[]): Promise<string[]> {
 export default function ChatPanel({
   isLoading,
   isAgentRunning,
+  canEdit = true,
   selectedSlideIds,
   selectedElementIds,
   display,
@@ -212,7 +215,7 @@ export default function ChatPanel({
 
   const send = () => {
     const val = text.trim()
-    if ((!val && images.length === 0) || isLoading) return
+    if ((!val && images.length === 0) || isLoading || !canEdit) return
     // When the agent flow isn't wired up, always use single-shot.
     onSend(val, images, onRunAgent ? mode : 'single')
     setText('')
@@ -225,7 +228,14 @@ export default function ChatPanel({
       {/* Header */}
       <div className="p-3 border-b border-[#1e3a5f] flex-shrink-0">
         <div className="flex items-center justify-between">
-          <p className="text-xs font-semibold text-[#64748b] tracking-widest">AI EDITOR</p>
+          <div className="flex items-center gap-2 min-w-0">
+            <p className="text-xs font-semibold text-[#64748b] tracking-widest">AI EDITOR</p>
+            {!canEdit && (
+              <span className="flex items-center gap-1 text-[10px] font-bold text-amber-400 border border-amber-500/40 bg-amber-500/10 rounded px-1.5 py-0.5 shrink-0">
+                <Eye className="w-3 h-3" /> VIEW-ONLY
+              </span>
+            )}
+          </div>
           {peeking && onPin ? (
             <button
               type="button"
@@ -250,6 +260,11 @@ export default function ChatPanel({
             )
           )}
         </div>
+        {!canEdit && (
+          <p className="text-[10px] text-amber-300/80 mt-1">
+            You&apos;re a viewer on this hub — editing is disabled. Ask an owner for editor access.
+          </p>
+        )}
         {selectedSlideIds.length > 1 && (
           <p className="text-xs text-[#2dd4bf] mt-1">
             ◈ {selectedSlideIds.length} slides in scope
@@ -397,13 +412,15 @@ export default function ChatPanel({
               }
             }}
             placeholder={
-              mode === 'agent'
-                ? 'Agent: describe the goal — it will inspect, edit & verify…'
-                : mode === 'single'
-                  ? 'Single-shot: describe a scoped edit…'
-                  : 'Plan, build & verify slides… (Shift+Enter for newline)'
+              !canEdit
+                ? 'View-only — you cannot edit this hub'
+                : mode === 'agent'
+                  ? 'Agent: describe the goal — it will inspect, edit & verify…'
+                  : mode === 'single'
+                    ? 'Single-shot: describe a scoped edit…'
+                    : 'Plan, build & verify slides… (Shift+Enter for newline)'
             }
-            disabled={isLoading}
+            disabled={isLoading || !canEdit}
             className="w-full resize-none bg-transparent border-0 px-1 py-1 text-sm
                        text-white placeholder-[#475569] outline-none focus:ring-0
                        disabled:opacity-50 leading-snug max-h-40"
@@ -417,7 +434,7 @@ export default function ChatPanel({
                   <button
                     type="button"
                     onClick={() => setModeMenuOpen(o => !o)}
-                    disabled={isLoading}
+                    disabled={isLoading || !canEdit}
                     title="Select how the AI handles your request"
                     className="flex items-center gap-1 pl-1.5 pr-1 py-1 rounded-md text-xs text-[#cbd5e1]
                                hover:bg-[#1e3a5f] disabled:opacity-40 transition-colors"
@@ -469,7 +486,7 @@ export default function ChatPanel({
             <div className="flex items-center gap-1 flex-shrink-0">
               <button
                 onClick={() => fileInputRef.current?.click()}
-                disabled={isLoading || images.length >= MAX_IMAGES}
+                disabled={isLoading || !canEdit || images.length >= MAX_IMAGES}
                 title={images.length >= MAX_IMAGES ? `Up to ${MAX_IMAGES} images` : 'Attach images'}
                 className="p-1.5 rounded-md text-[#94a3b8] hover:text-white hover:bg-[#1e3a5f]
                            disabled:opacity-40 transition-colors"
@@ -488,7 +505,7 @@ export default function ChatPanel({
               ) : (
                 <button
                   onClick={send}
-                  disabled={!text.trim() && images.length === 0}
+                  disabled={(!text.trim() && images.length === 0) || !canEdit}
                   title="Send (Enter)"
                   className="flex items-center justify-center w-7 h-7 rounded-full bg-[#60a5fa] text-[#0d1b2a]
                              disabled:opacity-40 disabled:hover:bg-[#60a5fa] hover:bg-[#93c5fd] transition-colors"

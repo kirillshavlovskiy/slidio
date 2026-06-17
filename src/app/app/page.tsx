@@ -76,6 +76,7 @@ import {
   VersionBranch,
   ElementStyle,
   ChartSpec,
+  HubRole,
 } from '@/lib/types'
 import { buildKnowledgeContext, activeSlideText, defaultKnowledgeLayers, diffSlideIds } from '@/lib/knowledge'
 import { summarizeDeckChanges } from '@/lib/versionDiff'
@@ -412,6 +413,8 @@ export default function Home() {
 
   // ── DB persistence state ─────────────────────────────────────────────────────
   const [presentationId, setPresentationId] = useState<string | null>(null)
+  const [currentRole, setCurrentRole] = useState<HubRole | null>(null)
+  const canEdit = currentRole !== 'viewer'
   const dbInitialized = useRef(false)
 
   // ── Portfolio / knowledge branches ───────────────────────────────────────────
@@ -756,6 +759,7 @@ export default function Home() {
         setSelectedSlideIds([restoredActiveId])
         setSelectionAnchorId(restoredActiveId)
         setPresentationId(id)
+        setCurrentRole((detail.myRole as HubRole) ?? null)
         setActiveBranchId(detail.branchId ?? null)
 
         const history = normalizeConversationHistory(detail.conversationHistory)
@@ -1002,6 +1006,7 @@ export default function Home() {
   const goHome = useCallback(() => {
     setShowStartScreen(true)
     setPresentationId(null)
+    setCurrentRole(null)
     setInitialLoadDone(false)
     void loadPortfolio()
   }, [loadPortfolio])
@@ -1974,7 +1979,7 @@ export default function Home() {
   // Cursor-style checkpoint so the action can be reverted/edited like any message.
   const runQuickAction = useCallback(
     (action: QuickAction) => {
-      if (isLoading || isAgentRunning) return
+      if (isLoading || isAgentRunning || !canEdit) return
       const ctx: QuickActionContext = {
         slides,
         activeSlideId,
@@ -2001,11 +2006,26 @@ export default function Home() {
       selectedSlideIds,
       selectedElementIds,
       conversationHistory,
+      canEdit,
     ]
   )
 
   const handleSend = useCallback(
     async (text: string, images: string[] = [], uiMode: UiMode = 'auto') => {
+     if (!canEdit) {
+       setDisplay(prev => [
+         ...prev,
+         {
+           role: 'assistant',
+           response: {
+             type: 'clarification',
+             question:
+               'You have view-only access to this hub. Ask an owner to make you an editor to make changes.',
+           },
+         },
+       ])
+       return
+     }
      try {
       // A fresh free-form message supersedes any unanswered agent clarification.
       setPendingAgentInstruction(null)
@@ -2187,7 +2207,7 @@ export default function Home() {
        ])
      }
     },
-    [conversationHistory, callApi, strokes, slides, selectedElementIds, selectedSlideIds, isAgentRunning]
+    [conversationHistory, callApi, strokes, slides, selectedElementIds, selectedSlideIds, isAgentRunning, canEdit]
   )
 
   // ── Agentic editor: render one slide off-screen to a PNG so the model can see it ──
@@ -2295,6 +2315,7 @@ export default function Home() {
       // every agent-routed message silently bail: the bubble never rendered and
       // nothing hit the server. isLoading is the single-shot/router indicator.
       if (isAgentRunning || !instruction.trim()) return
+      if (!canEdit) return
       const effort: Effort = opts?.effort ?? 'medium'
       agentStopRef.current = false // reset cancellation flag for this run
       setIsAgentRunning(true)
@@ -2862,6 +2883,7 @@ export default function Home() {
       collectAllAssets,
       recordAgentRun,
       conversationHistory,
+      canEdit,
     ]
   )
 
@@ -3063,6 +3085,7 @@ export default function Home() {
   // ── Apply patch to slides ────────────────────────────────────────────────────
   const applyChanges = useCallback(() => {
     if (!pendingChanges) return
+    if (!canEdit) return
     const newSlides = applyChangesToSlides(slides, pendingChanges)
     const changedIds = diffSlideIds(slides, newSlides)
 
@@ -3153,7 +3176,7 @@ export default function Home() {
       { role: 'user', text: confirmMsg.content },
       { role: 'assistant', response: doneResponse },
     ])
-  }, [pendingChanges, pendingSummary, pendingDecisionId, slides, presentationId, activeSlideId, makeBranchMeta, closeManualSession])
+  }, [pendingChanges, pendingSummary, pendingDecisionId, slides, presentationId, activeSlideId, makeBranchMeta, closeManualSession, canEdit])
 
   // ── Discard patch ─────────────────────────────────────────────────────────────
   const discardChanges = useCallback((reason?: string) => {
@@ -4148,7 +4171,7 @@ Return ONE complete "patch" (changes relative to the ORIGINAL slide data provide
                     selectedElementIds={selectedElementIds}
                     editingElementId={editingElementId}
                     scale={canvasScale}
-                    interactive={!annotationMode && !isAgentRunning}
+                    interactive={!annotationMode && !isAgentRunning && canEdit}
                     onElementClick={id =>
                       setSelectedElementIds(prev =>
                         prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]
@@ -4326,6 +4349,7 @@ Return ONE complete "patch" (changes relative to the ORIGINAL slide data provide
           <ChatPanel
             isLoading={isLoading || isAgentRunning}
             isAgentRunning={isAgentRunning}
+            canEdit={canEdit}
             selectedSlideIds={selectedSlideIds}
             selectedElementIds={selectedElementIds}
             display={display}

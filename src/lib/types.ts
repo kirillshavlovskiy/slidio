@@ -223,6 +223,24 @@ export interface KnowledgeLayer {
 }
 
 // ── Knowledge Branches ────────────────────────────────────────────────────────
+export type HubRole = 'owner' | 'editor' | 'viewer'
+
+export interface HubMemberInfo {
+  id: string
+  userId: string
+  email: string | null
+  name: string | null
+  image?: string | null
+  role: HubRole
+  isMe?: boolean
+}
+
+export interface HubInviteInfo {
+  id: string
+  email: string
+  role: HubRole
+}
+
 // A branch groups presentations that share the same knowledge layers + design
 // system. A new presentation either starts a new branch or joins an existing one.
 // Compact knowledge/design layer reference shown on the portfolio/hub view.
@@ -240,6 +258,9 @@ export interface KnowledgeBranch {
   presentationCount: number
   /** Knowledge + design layers shared across the hub (style = design system). */
   knowledgeLayers?: KnowledgeLayerSummary[]
+  /** Caller's role on this hub (owner/editor/viewer). */
+  role?: HubRole | null
+  isOwner?: boolean
   createdAt: number
   updatedAt: number
 }

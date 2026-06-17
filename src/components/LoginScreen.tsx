@@ -1,7 +1,13 @@
 'use client'
+import { useState } from 'react'
 import { signIn } from 'next-auth/react'
 
 export default function LoginScreen() {
+  const [devEmail, setDevEmail] = useState('')
+
+  const devSignIn = (email: string) =>
+    signIn('dev', { email, callbackUrl: '/app' })
+
   return (
     <div className="flex h-screen items-center justify-center bg-[#060d1a]">
       <div className="w-80 text-center space-y-6">
@@ -41,13 +47,34 @@ export default function LoginScreen() {
         </button>
 
         {process.env.NODE_ENV !== 'production' && (
-          <button
-            onClick={() => signIn('dev', { callbackUrl: '/app' })}
-            className="w-full flex items-center justify-center gap-2 bg-[#1e3a5f] text-[#cbd5e1] font-medium text-xs py-2.5 rounded-xl hover:bg-[#2a4a6f] hover:text-white transition-colors border border-[#334155]"
-          >
-            <span className="text-[#fbbf24]">⚡</span>
-            Continue as Dev User (localhost)
-          </button>
+          <div className="space-y-2">
+            <input
+              value={devEmail}
+              onChange={e => setDevEmail(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter' && devEmail.trim()) devSignIn(devEmail.trim()) }}
+              placeholder="dev email (e.g. alice@local.test)"
+              className="w-full bg-[#0d1b2a] border border-[#334155] rounded-xl px-3 py-2 text-xs text-[#e2e8f0] placeholder:text-[#475569] outline-none focus:border-violet-500"
+            />
+            <button
+              onClick={() => devSignIn(devEmail.trim() || 'dev@local.test')}
+              className="w-full flex items-center justify-center gap-2 bg-[#1e3a5f] text-[#cbd5e1] font-medium text-xs py-2.5 rounded-xl hover:bg-[#2a4a6f] hover:text-white transition-colors border border-[#334155]"
+            >
+              <span className="text-[#fbbf24]">⚡</span>
+              {devEmail.trim() ? `Sign in as ${devEmail.trim()}` : 'Continue as Dev User (localhost)'}
+            </button>
+            <div className="flex gap-2">
+              {['alice@local.test', 'bob@local.test'].map(e => (
+                <button
+                  key={e}
+                  type="button"
+                  onClick={() => devSignIn(e)}
+                  className="flex-1 text-[10px] py-1.5 rounded-lg bg-[#0d1b2a] border border-[#334155] text-[#94a3b8] hover:text-white hover:border-[#60a5fa] transition-colors"
+                >
+                  {e.split('@')[0]}
+                </button>
+              ))}
+            </div>
+          </div>
         )}
 
         <p className="text-[10px] text-[#334155]">Your data is private and tied to your account.</p>

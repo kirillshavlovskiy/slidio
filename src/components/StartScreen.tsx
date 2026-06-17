@@ -16,8 +16,10 @@ import {
   Sparkles,
   Zap,
   Loader2,
+  Users,
 } from 'lucide-react'
 import { KnowledgeBranch, PresentationSummary } from '@/lib/types'
+import ShareHubDialog from '@/components/ShareHubDialog'
 import { IMPORT_ACCEPT } from '@/lib/importDeck'
 import {
   PLANS,
@@ -107,6 +109,7 @@ export default function StartScreen({
   const [showCreateBranch, setShowCreateBranch] = useState(false)
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
+  const [sharingHub, setSharingHub] = useState<{ id: string; name: string } | null>(null)
   const [importing, setImporting] = useState(false)
   const [importError, setImportError] = useState<string | null>(null)
   const importInputRef = useRef<HTMLInputElement>(null)
@@ -363,6 +366,8 @@ export default function StartScreen({
           <div className="space-y-6">
             {branches.map(branch => {
               const decks = byBranch.get(branch.id) || []
+              const isOwner = branch.isOwner || branch.role === 'owner'
+              const canWriteHub = branch.role !== 'viewer'
               return (
                 <section
                   key={branch.id}
@@ -403,20 +408,34 @@ export default function StartScreen({
                           <span className="text-[11px] text-[#64748B] shrink-0">
                             {decks.length} deck{decks.length !== 1 ? 's' : ''}
                           </span>
-                          <button
-                            onClick={() => {
-                              setRenamingId(branch.id)
-                              setRenameValue(branch.name)
-                            }}
-                            className="text-[#475569] hover:text-white transition-colors"
-                            title="Rename hub"
-                          >
-                            <Pencil className="w-3.5 h-3.5" />
-                          </button>
+                          {isOwner && (
+                            <button
+                              onClick={() => {
+                                setRenamingId(branch.id)
+                                setRenameValue(branch.name)
+                              }}
+                              className="text-[#475569] hover:text-white transition-colors"
+                              title="Rename hub"
+                            >
+                              <Pencil className="w-3.5 h-3.5" />
+                            </button>
+                          )}
                         </>
                       )}
                     </div>
                     <div className="flex items-center gap-1.5 shrink-0">
+                      {branch.role && branch.role !== 'owner' && (
+                        <span className="text-[10px] text-[#64748B] border border-[#1e3a5f] rounded px-1.5 py-0.5 capitalize">
+                          {branch.role}
+                        </span>
+                      )}
+                      <button
+                        onClick={() => setSharingHub({ id: branch.id, name: branch.name })}
+                        className="flex items-center gap-1 text-xs text-[#94a3b8] hover:text-white hover:bg-[#1e3a5f]/50 px-2 py-1 rounded transition-colors"
+                        title="Share hub"
+                      >
+                        <Users className="w-3.5 h-3.5" /> Share
+                      </button>
                       {onOpenDesign && (
                         <button
                           onClick={() => onOpenDesign(branch.id)}
@@ -442,7 +461,7 @@ export default function StartScreen({
                         </button>
                       )}
                       <div className="w-px h-5 bg-[#1e3a5f] mx-0.5" />
-                      {onImportFile && (
+                      {onImportFile && canWriteHub && (
                         <button
                           onClick={() => {
                             importBranchRef.current = branch.id
@@ -460,13 +479,15 @@ export default function StartScreen({
                           Import
                         </button>
                       )}
-                      <button
-                        onClick={() => onCreate({ name: '', branchId: branch.id })}
-                        className="flex items-center gap-1 text-xs text-violet-300 hover:text-white hover:bg-[#1e3a5f]/50 px-2 py-1 rounded transition-colors"
-                      >
-                        <Plus className="w-3.5 h-3.5" /> New deck
-                      </button>
-                      {decks.length === 0 && (
+                      {canWriteHub && (
+                        <button
+                          onClick={() => onCreate({ name: '', branchId: branch.id })}
+                          className="flex items-center gap-1 text-xs text-violet-300 hover:text-white hover:bg-[#1e3a5f]/50 px-2 py-1 rounded transition-colors"
+                        >
+                          <Plus className="w-3.5 h-3.5" /> New deck
+                        </button>
+                      )}
+                      {decks.length === 0 && isOwner && (
                         <button
                           onClick={() => onDeleteBranch(branch.id)}
                           className="text-[#475569] hover:text-red-400 px-1.5 py-1 rounded transition-colors"
@@ -560,6 +581,14 @@ export default function StartScreen({
           usage={usage}
           planLimits={planLimits}
           onClose={() => setShowPlans(false)}
+        />
+      )}
+
+      {sharingHub && (
+        <ShareHubDialog
+          hubId={sharingHub.id}
+          hubName={sharingHub.name}
+          onClose={() => setSharingHub(null)}
         />
       )}
 

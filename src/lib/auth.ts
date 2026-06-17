@@ -32,13 +32,16 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
           Credentials({
             id: 'dev',
             name: 'Dev Login',
-            credentials: {},
-            async authorize() {
-              const email = 'dev@local.test'
+            credentials: {
+              email: { label: 'Email', type: 'text' },
+            },
+            async authorize(credentials) {
+              const email =
+                (credentials?.email as string)?.trim().toLowerCase() || 'dev@local.test'
               const user = await prisma.user.upsert({
                 where: { email },
                 update: {},
-                create: { email, name: 'Dev User' },
+                create: { email, name: email.split('@')[0] || 'Dev User' },
               })
               return { id: user.id, email: user.email, name: user.name }
             },

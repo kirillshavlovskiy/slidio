@@ -39,11 +39,13 @@ model User {
   email           String?           @unique
   emailVerified   DateTime?
   image           String?
+  isSuperuser     Boolean           @default(false)
   accounts        Account[]
   sessions        Session[]
   presentations   Presentation[]
   knowledgeLayers KnowledgeLayer[]
   branches        KnowledgeBranch[]
+  hubMemberships  HubMember[]
   // Billing (Stripe)
   plan               String    @default("free")
   stripeCustomerId   String?   @unique
@@ -68,6 +70,35 @@ model KnowledgeBranch {
   updatedAt       DateTime         @updatedAt
   presentations   Presentation[]
   knowledgeLayers KnowledgeLayer[]
+  members         HubMember[]
+  invites         HubInvite[]
+}
+
+// Collaboration: who can access a Knowledge Hub and at what level.
+model HubMember {
+  id        String          @id @default(cuid())
+  hubId     String
+  hub       KnowledgeBranch @relation(fields: [hubId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role      String          @default("editor")
+  createdAt DateTime        @default(now())
+
+  @@unique([hubId, userId])
+}
+
+model HubInvite {
+  id          String          @id @default(cuid())
+  hubId       String
+  hub         KnowledgeBranch @relation(fields: [hubId], references: [id], onDelete: Cascade)
+  email       String
+  role        String          @default("editor")
+  token       String          @unique
+  invitedById String
+  status      String          @default("pending")
+  createdAt   DateTime        @default(now())
+
+  @@unique([hubId, email])
 }
 
 model VerificationToken {
@@ -109,6 +140,7 @@ model SlideVersion {
   decisionId     String?
   slideCount     Int
   changedSlideIds String // JSON string (array)
+  actorId        String? // which user made this commit (audit trail)
   createdAt      DateTime     @default(now())
 }
 
@@ -153,5 +185,6 @@ model DecisionRecord {
   slideIds           String // JSON string
   selectedElementIds String // JSON string
   snapshotBefore     String? // JSON string
+  actorId            String? // which user made this decision (audit trail)
   createdAt          DateTime     @default(now())
 }

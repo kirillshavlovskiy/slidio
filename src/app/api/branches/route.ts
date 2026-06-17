@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { auth } from '@/lib/auth'
 import { prisma } from '@/lib/prisma'
+import { accessibleHubIds, acceptPendingInvites, getHubRole } from '@/lib/hubAccess'
 
 /**
  * Ensure the user has at least one knowledge branch. On first run we create a
@@ -29,9 +30,11 @@ export async function GET() {
   if (!session?.user?.id) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
   await ensureDefaultBranch(session.user.id)
+  await acceptPendingInvites(session.user.id, session.user.email)
 
+  const ids = await accessibleHubIds(session.user.id)
   const branches = await prisma.knowledgeBranch.findMany({
-    where: { userId: session.user.id },
+    where: { id: { in: ids } },
     orderBy: { updatedAt: 'desc' },
     include: {
       _count: { select: { presentations: true } },
@@ -42,8 +45,8 @@ export async function GET() {
     },
   })
 
-  return NextResponse.json(
-    branches.map(b => ({
+  const withRoles = await Promise.all(
+    branches.map(async b => ({
       id: b.id,
       name: b.name,
       presentationCount: b._count.presentations,
@@ -54,10 +57,13 @@ export async function GET() {
         enabled: l.enabled,
         source: l.source,
       })),
+      role: await getHubRole(session.user!.id, b.id),
+      isOwner: b.userId === session.user!.id,
       createdAt: new Date(b.createdAt).getTime(),
       updatedAt: new Date(b.updatedAt).getTime(),
     }))
   )
+  return NextResponse.json(withRoles)
 }
 
 export async function POST(req: NextRequest) {
@@ -76,9 +82,11 @@ export async function PATCH(req: NextRequest) {
   if (!session?.user?.id) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
   const { id, name } = await req.json()
-  const existing = await prisma.knowledgeBranch.findFirst({
-    where: { id, userId: session.user.id },
-  })
+  if ((await getHubRole(session.user.id, id)) !== 'owner') {
+    return NextResponse.json({ error: 'Not found' }, { status: 404 })
+  }
+
+  const existing = await prisma.knowledgeBranch.findUnique({ where: { id } })
   if (!existing) return NextResponse.json({ error: 'Not found' }, { status: 404 })
 
   const branch = await prisma.knowledgeBranch.update({
@@ -93,19 +101,19 @@ export async function DELETE(req: NextRequest) {
   if (!session?.user?.id) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
   const { id } = await req.json()
-  const existing = await prisma.knowledgeBranch.findFirst({
-    where: { id, userId: session.user.id },
+  if ((await getHubRole(session.user.id, id)) !== 'owner') {
+    return NextResponse.json({ error: 'Not found' }, { status: 404 })
+  }
+
+  const existing = await prisma.knowledgeBranch.findUnique({
+    where: { id },
     include: { _count: { select: { presentations: true } } },
   })
   if (!existing) return NextResponse.json({ error: 'Not found' }, { status: 404 })
   if (existing._count.presentations > 0) {
-    return NextResponse.json(
-      { error: 'Branch still has presentations' },
-      { status: 409 }
-    )
+    return NextResponse.json({ error: 'Branch still has presentations' }, { status: 409 })
   }
 
-  // Knowledge layers cascade-delete with the branch (schema onDelete: Cascade).
   await prisma.knowledgeBranch.delete({ where: { id } })
   return NextResponse.json({ ok: true })
 }
