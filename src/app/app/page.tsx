@@ -3781,6 +3781,7 @@ Return ONE complete "patch" (changes relative to the ORIGINAL slide data provide
           onOpenKnowledge={openHubKnowledge}
           onOpenDesign={openHubDesign}
           onSignOut={() => signOut()}
+          onPortfolioRefresh={loadPortfolio}
         />
         {knowledgeAndDesignModals}
       </>

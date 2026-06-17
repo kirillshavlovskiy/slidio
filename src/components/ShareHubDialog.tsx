@@ -68,7 +68,7 @@ export default function ShareHubDialog({ hubId, hubName, onClose }: Props) {
         setError(data.error || 'Invite failed')
         return
       }
-      setNotice(data.added ? `Added ${e}` : `Invited ${e} — they'll join on first sign-in`)
+      setNotice('Invite sent — they\'ll see it when they sign in to Slidio')
       setEmail('')
       await load()
     } finally {

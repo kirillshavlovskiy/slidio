@@ -172,7 +172,7 @@ export function buildPdf(slides: SlideData[]): jsPDF {
       drawBox(doc, el, !!fillRgb, hasBorder)
       doc.setLineDashPattern([], 0)
 
-      if (el.type !== 'bar' && el.type !== 'chart' && el.type !== 'image') drawText(doc, el)
+      if (el.type !== 'bar' && el.type !== 'chart') drawText(doc, el)
 
       resetOpacity(doc)
     }

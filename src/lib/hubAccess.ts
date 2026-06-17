@@ -60,22 +60,42 @@ export async function getHubRole(userId: string, hubId: string): Promise<HubRole
   return (member?.role as HubRole) ?? null
 }
 
-export async function acceptPendingInvites(
+export async function acceptHubInvite(
   userId: string,
-  email: string | null | undefined
-): Promise<void> {
-  if (!email) return
-  const invites = await prisma.hubInvite.findMany({
-    where: { email: email.toLowerCase(), status: 'pending' },
-  })
-  for (const inv of invites) {
-    await prisma.hubMember.upsert({
-      where: { hubId_userId: { hubId: inv.hubId, userId } },
-      update: {},
-      create: { hubId: inv.hubId, userId, role: inv.role },
-    })
-    await prisma.hubInvite.update({ where: { id: inv.id }, data: { status: 'accepted' } })
+  email: string,
+  inviteId: string
+): Promise<{ ok: true; hubId: string } | { ok: false; error: string; status: number }> {
+  const invite = await prisma.hubInvite.findUnique({ where: { id: inviteId } })
+  if (!invite || invite.status !== 'pending') {
+    return { ok: false, error: 'Invite not found', status: 404 }
   }
+  if (invite.email !== email.toLowerCase()) {
+    return { ok: false, error: 'Invite not found', status: 404 }
+  }
+
+  await prisma.hubMember.upsert({
+    where: { hubId_userId: { hubId: invite.hubId, userId } },
+    update: { role: invite.role },
+    create: { hubId: invite.hubId, userId, role: invite.role },
+  })
+  await prisma.hubInvite.update({ where: { id: inviteId }, data: { status: 'accepted' } })
+  return { ok: true, hubId: invite.hubId }
+}
+
+export async function declineHubInvite(
+  email: string,
+  inviteId: string
+): Promise<{ ok: true; hubId: string } | { ok: false; error: string; status: number }> {
+  const invite = await prisma.hubInvite.findUnique({ where: { id: inviteId } })
+  if (!invite || invite.status !== 'pending') {
+    return { ok: false, error: 'Invite not found', status: 404 }
+  }
+  if (invite.email !== email.toLowerCase()) {
+    return { ok: false, error: 'Invite not found', status: 404 }
+  }
+
+  await prisma.hubInvite.update({ where: { id: inviteId }, data: { status: 'declined' } })
+  return { ok: true, hubId: invite.hubId }
 }
 
 export async function accessibleHubIds(userId: string): Promise<string[]> {

@@ -1,5 +1,5 @@
 'use client'
-import { useEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, useCallback, type MouseEvent } from 'react'
 import {
   Plus,
   FileText,
@@ -17,8 +17,9 @@ import {
   Zap,
   Loader2,
   Users,
+  Mail,
 } from 'lucide-react'
-import { KnowledgeBranch, PresentationSummary } from '@/lib/types'
+import { KnowledgeBranch, MyHubInvite, PresentationSummary } from '@/lib/types'
 import ShareHubDialog from '@/components/ShareHubDialog'
 import { IMPORT_ACCEPT } from '@/lib/importDeck'
 import {
@@ -70,6 +71,8 @@ interface Props {
   /** Open the shared Design System panel scoped to a hub. */
   onOpenDesign?: (branchId: string) => void
   onSignOut: () => void
+  /** Refresh hubs/decks after the user accepts a hub invite. */
+  onPortfolioRefresh?: () => void | Promise<void>
 }
 
 function timeAgo(iso: string): string {
@@ -104,6 +107,7 @@ export default function StartScreen({
   onOpenKnowledge,
   onOpenDesign,
   onSignOut,
+  onPortfolioRefresh,
 }: Props) {
   const [showCreate, setShowCreate] = useState(false)
   const [showCreateBranch, setShowCreateBranch] = useState(false)
@@ -113,6 +117,43 @@ export default function StartScreen({
   const [importing, setImporting] = useState(false)
   const [importError, setImportError] = useState<string | null>(null)
   const importInputRef = useRef<HTMLInputElement>(null)
+
+  const [myInvites, setMyInvites] = useState<MyHubInvite[]>([])
+  const [invitesLoading, setInvitesLoading] = useState(true)
+  const [inviteBusyId, setInviteBusyId] = useState<string | null>(null)
+
+  const refreshInvites = useCallback(() => {
+    setInvitesLoading(true)
+    return fetch('/api/invites/me')
+      .then(r => (r.ok ? r.json() : []))
+      .then(data => setMyInvites(Array.isArray(data) ? data : []))
+      .catch(() => setMyInvites([]))
+      .finally(() => setInvitesLoading(false))
+  }, [])
+
+  useEffect(() => {
+    void refreshInvites()
+  }, [refreshInvites])
+
+  const respondToInvite = async (inviteId: string, action: 'accept' | 'decline') => {
+    setInviteBusyId(inviteId)
+    try {
+      const res = await fetch(`/api/invites/${inviteId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action }),
+      })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        setImportError(data.error || 'Could not update invite')
+        return
+      }
+      await refreshInvites()
+      if (action === 'accept') await onPortfolioRefresh?.()
+    } finally {
+      setInviteBusyId(null)
+    }
+  }
 
   // Current tariff (plan) for the header badge + upgrade/manage button.
   const [plan, setPlan] = useState<PlanId>('free')
@@ -348,6 +389,61 @@ export default function StartScreen({
               </div>
             ))}
           </div>
+        )}
+        {(invitesLoading || myInvites.length > 0) && (
+          <section className="mb-6 rounded-2xl border border-violet-500/30 bg-violet-500/5 overflow-hidden">
+            <div className="flex items-center gap-2 px-5 py-3 border-b border-violet-500/20 bg-violet-500/10">
+              <Mail className="w-4 h-4 text-violet-300" />
+              <h2 className="text-sm font-semibold text-violet-100">Hub invitations</h2>
+              {!invitesLoading && myInvites.length > 0 && (
+                <span className="text-[10px] font-bold text-violet-300 bg-violet-500/20 border border-violet-500/30 rounded-full px-2 py-0.5">
+                  {myInvites.length}
+                </span>
+              )}
+            </div>
+            {invitesLoading ? (
+              <div className="flex items-center gap-2 px-5 py-4 text-xs text-[#64748B]">
+                <Loader2 className="w-4 h-4 animate-spin" /> Checking for invites…
+              </div>
+            ) : (
+              <div className="divide-y divide-violet-500/10">
+                {myInvites.map(inv => (
+                  <div key={inv.id} className="flex flex-col sm:flex-row sm:items-center gap-3 px-5 py-4">
+                    <div className="min-w-0 flex-1">
+                      <p className="text-sm font-semibold text-white truncate">{inv.hubName}</p>
+                      <p className="text-xs text-[#94a3b8] mt-0.5">
+                        <span className="text-[#CBD5E1]">{inv.invitedByName}</span> invited you as{' '}
+                        <span className="capitalize text-violet-300">{inv.role}</span>
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <button
+                        type="button"
+                        disabled={inviteBusyId === inv.id}
+                        onClick={() => respondToInvite(inv.id, 'decline')}
+                        className="text-xs px-3 py-1.5 rounded-lg border border-[#334155] text-[#94a3b8] hover:text-white hover:border-[#475569] transition-colors disabled:opacity-50"
+                      >
+                        Decline
+                      </button>
+                      <button
+                        type="button"
+                        disabled={inviteBusyId === inv.id}
+                        onClick={() => respondToInvite(inv.id, 'accept')}
+                        className="flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-lg bg-violet-600 hover:bg-violet-500 text-white transition-colors disabled:opacity-50"
+                      >
+                        {inviteBusyId === inv.id ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <Check className="w-3.5 h-3.5" />
+                        )}
+                        Accept
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
         )}
         <div className="mb-6">
           <h2 className="text-lg font-semibold">Knowledge Hub</h2>

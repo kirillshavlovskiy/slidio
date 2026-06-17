@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { auth } from '@/lib/auth'
 import { prisma } from '@/lib/prisma'
-import { accessibleHubIds, acceptPendingInvites, getHubRole } from '@/lib/hubAccess'
+import { accessibleHubIds, getHubRole } from '@/lib/hubAccess'
 
 /**
  * Ensure the user has at least one knowledge branch. On first run we create a
@@ -30,7 +30,6 @@ export async function GET() {
   if (!session?.user?.id) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
   await ensureDefaultBranch(session.user.id)
-  await acceptPendingInvites(session.user.id, session.user.email)
 
   const ids = await accessibleHubIds(session.user.id)
   const branches = await prisma.knowledgeBranch.findMany({

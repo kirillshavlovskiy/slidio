@@ -55,14 +55,19 @@ export async function POST(req: NextRequest, { params }: Ctx) {
   const role = coerceRole(body.role)
   if (!email) return NextResponse.json({ error: 'Email required' }, { status: 400 })
 
-  const user = await prisma.user.findUnique({ where: { email } })
-  if (user) {
-    await prisma.hubMember.upsert({
-      where: { hubId_userId: { hubId: params.id, userId: user.id } },
-      update: { role },
-      create: { hubId: params.id, userId: user.id, role },
+  const selfEmail = session.user.email?.trim().toLowerCase()
+  if (selfEmail && email === selfEmail) {
+    return NextResponse.json({ error: 'You cannot invite yourself' }, { status: 400 })
+  }
+
+  const existingUser = await prisma.user.findUnique({ where: { email } })
+  if (existingUser) {
+    const already = await prisma.hubMember.findUnique({
+      where: { hubId_userId: { hubId: params.id, userId: existingUser.id } },
     })
-    return NextResponse.json({ added: true, userId: user.id })
+    if (already) {
+      return NextResponse.json({ error: 'Already a member of this hub' }, { status: 409 })
+    }
   }
 
   await prisma.hubInvite.upsert({

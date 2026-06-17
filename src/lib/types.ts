@@ -241,6 +241,16 @@ export interface HubInviteInfo {
   role: HubRole
 }
 
+/** Hub invite shown to the invitee on the start screen (in-app only). */
+export interface MyHubInvite {
+  id: string
+  hubId: string
+  hubName: string
+  role: HubRole
+  invitedByName: string
+  createdAt: number
+}
+
 // A branch groups presentations that share the same knowledge layers + design
 // system. A new presentation either starts a new branch or joins an existing one.
 // Compact knowledge/design layer reference shown on the portfolio/hub view.
