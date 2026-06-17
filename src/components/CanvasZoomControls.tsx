@@ -26,7 +26,8 @@ export default function CanvasZoomControls({
   const reset = () => onZoomChange(1)
 
   return (
-    <div className="absolute bottom-3 right-3 z-20 flex items-center gap-0.5 rounded-lg border border-[#1e3a5f] bg-[#0d1b2a]/95 px-1 py-1 shadow-lg backdrop-blur-sm">
+    <div className="pointer-events-none absolute inset-0 z-30">
+      <div className="pointer-events-auto absolute bottom-3 right-3 flex items-center gap-0.5 rounded-lg border border-[#1e3a5f] bg-[#0d1b2a]/95 px-1 py-1 shadow-lg backdrop-blur-sm">
       <button
         type="button"
         onClick={zoomOut}
@@ -62,6 +63,7 @@ export default function CanvasZoomControls({
       >
         <RotateCcw className="w-3 h-3" />
       </button>
+      </div>
     </div>
   )
 }

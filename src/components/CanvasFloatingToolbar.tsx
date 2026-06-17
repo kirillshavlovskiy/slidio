@@ -324,6 +324,7 @@ export default function CanvasFloatingToolbar({
   const toolbarRef = useRef<HTMLDivElement>(null)
   const [aiOpen, setAiOpen] = useState(false)
   const [pos, setPos] = useState({ x: 12, y: 12 })
+  const [toolbarMaxW, setToolbarMaxW] = useState<number>()
   const dragState = useRef<{ startX: number; startY: number; origX: number; origY: number } | null>(
     null
   )
@@ -359,12 +360,15 @@ export default function CanvasFloatingToolbar({
   useEffect(() => {
     const container = containerRef.current
     if (!container) return
-    const ro = new ResizeObserver(() => {
+    const sync = () => {
       setPos(p => clampPosition(p.x, p.y))
-    })
+      setToolbarMaxW(Math.max(160, container.clientWidth - pos.x - 12))
+    }
+    sync()
+    const ro = new ResizeObserver(sync)
     ro.observe(container)
     return () => ro.disconnect()
-  }, [containerRef, clampPosition])
+  }, [containerRef, clampPosition, pos.x])
 
   const onDragStart = (e: React.MouseEvent) => {
     e.preventDefault()
@@ -424,10 +428,11 @@ export default function CanvasFloatingToolbar({
   return (
     <div
       ref={toolbarRef}
-      className="absolute z-40 flex flex-wrap items-center gap-y-1.5 gap-x-1.5 rounded-xl border border-[#1e3a5f]/80 bg-[#0d1b2a]/95 backdrop-blur-md px-1.5 py-1.5 shadow-2xl pointer-events-auto max-w-[calc(100vw-2rem)]"
-      style={{ left: pos.x, top: pos.y }}
+      className="absolute z-40 overflow-x-auto overflow-y-hidden overscroll-x-contain rounded-xl border border-[#1e3a5f]/80 bg-[#0d1b2a]/95 backdrop-blur-md shadow-2xl pointer-events-auto"
+      style={{ left: pos.x, top: pos.y, maxWidth: toolbarMaxW }}
       onClick={e => e.stopPropagation()}
     >
+      <div className="flex w-max flex-nowrap items-center gap-x-1.5 px-1.5 py-1.5">
       <button
         type="button"
         title="Drag toolbar"
@@ -997,6 +1002,7 @@ export default function CanvasFloatingToolbar({
           </ColorPopover>
         </>
       )}
+      </div>
     </div>
   )
 }

@@ -3,20 +3,21 @@ import { SlideData, SlideElement, ElementStyle } from './types'
 import { elementFillHex, elementTextHex } from './elementStyle'
 
 /**
- * Vector PDF export. Mirrors the native PPTX export (api/render): each slide
- * element is drawn as a real PDF shape/text run so the type stays crisp and
- * selectable, rather than rasterising slides to images. The page is the same
- * 10 × 7.5 in canvas the editor uses.
+ * PDF export. The primary path rasterises each slide from the same canvas DOM
+ * the editor uses (via html-to-image in the app shell) so fonts, gradients,
+ * charts and layout match what you see. {@link buildPdfFromImages} assembles those
+ * PNGs into a multi-page PDF.
  *
- * Known substitutions: PDF uses the Helvetica core font in place of proprietary
- * design-system faces (e.g. Bagoss), and image `objectFit`/`invert` are not
- * reproduced (images are placed to fill their box).
+ * {@link buildPdf} is kept as a lightweight vector fallback (Helvetica-only, no
+ * charts/gradients) for cases where raster capture isn't available.
  */
 
 const SLIDE_W_IN = 10
 const SLIDE_H_IN = 7.5
 const PX_PER_IN = 96
 const PT_PER_IN = 72
+/** SlideCanvas renders stored pt sizes at ×1.2 px — mirror that in vector export. */
+const CANVAS_FONT_SCALE = 1.2
 
 /** Convert a hex color (with or without leading #) to an [r,g,b] triple. */
 function hexToRgb(hex?: string): [number, number, number] | null {
@@ -35,6 +36,21 @@ function fontStyleOf(st: ElementStyle): 'normal' | 'bold' | 'italic' | 'boldital
   if (bold) return 'bold'
   if (st.italic) return 'italic'
   return 'normal'
+}
+
+/** Map design-system / web font names to jsPDF's built-in families. */
+function pdfFontFamily(fontFace?: string): 'helvetica' | 'times' | 'courier' {
+  const face = (fontFace || '').toLowerCase()
+  if (face.includes('courier') || face.includes('mono')) return 'courier'
+  if (
+    face.includes('georgia') ||
+    face.includes('times') ||
+    face.includes('palatino') ||
+    face.includes('garamond')
+  ) {
+    return 'times'
+  }
+  return 'helvetica'
 }
 
 function setOpacity(doc: jsPDF, st: ElementStyle) {
@@ -70,12 +86,12 @@ function drawBox(doc: jsPDF, el: SlideElement, hasFill: boolean, hasBorder: bool
 }
 
 function drawText(doc: jsPDF, el: SlideElement) {
-  if (!el.content) return
+  if (!el.content?.trim()) return
   const st = el.style
   const rgb = hexToRgb(elementTextHex(el)) || [255, 255, 255]
-  const sizePt = st.fontSize || (el.type === 'text' ? 12 : 10)
+  const sizePt = (st.fontSize || (el.type === 'text' ? 12 : 10)) * CANVAS_FONT_SCALE
 
-  doc.setFont('helvetica', fontStyleOf(st))
+  doc.setFont(pdfFontFamily(st.fontFace), fontStyleOf(st))
   doc.setFontSize(sizePt)
   doc.setTextColor(rgb[0], rgb[1], rgb[2])
   if (typeof st.charSpacing === 'number') doc.setCharSpace(st.charSpacing / PT_PER_IN)
@@ -90,7 +106,14 @@ function drawText(doc: jsPDF, el: SlideElement) {
   const innerW = Math.max(0.01, el.w - padL - padR)
   const innerH = Math.max(0.01, el.h - padT - padB)
 
-  const lines = doc.splitTextToSize(el.content, innerW) as string[]
+  // Honour explicit newlines (lists, multi-line titles) then wrap each paragraph.
+  const paragraphs = el.content.split('\n')
+  const lines: string[] = []
+  for (const para of paragraphs) {
+    const wrapped = doc.splitTextToSize(para, innerW) as string[]
+    if (wrapped.length === 0) lines.push('')
+    else lines.push(...wrapped)
+  }
   const lineH = (sizePt / PT_PER_IN) * (st.lineHeight || 1.25)
   const blockH = lines.length * lineH
 
@@ -103,6 +126,7 @@ function drawText(doc: jsPDF, el: SlideElement) {
   if (cursorY < innerY) cursorY = innerY
 
   for (const line of lines) {
+    if (cursorY > innerY + innerH + lineH * 0.25) break
     doc.text(line, textX, cursorY, { align, baseline: 'top', maxWidth: innerW })
     cursorY += lineH
   }
@@ -148,13 +172,32 @@ export function buildPdf(slides: SlideData[]): jsPDF {
       drawBox(doc, el, !!fillRgb, hasBorder)
       doc.setLineDashPattern([], 0)
 
-      if (el.type !== 'bar') drawText(doc, el)
+      if (el.type !== 'bar' && el.type !== 'chart' && el.type !== 'image') drawText(doc, el)
 
       resetOpacity(doc)
     }
   })
 
   return doc
+}
+
+/** Assemble raster slide PNGs (from canvas capture) into a multi-page PDF. */
+export function buildPdfFromImages(images: string[]): jsPDF {
+  const doc = new jsPDF({ orientation: 'landscape', unit: 'in', format: [SLIDE_W_IN, SLIDE_H_IN] })
+  images.forEach((src, idx) => {
+    if (idx > 0) doc.addPage([SLIDE_W_IN, SLIDE_H_IN], 'landscape')
+    if (!src) return
+    try {
+      doc.addImage(src, 'PNG', 0, 0, SLIDE_W_IN, SLIDE_H_IN, undefined, 'FAST')
+    } catch {
+      /* skip a bad page rather than abort the whole export */
+    }
+  })
+  return doc
+}
+
+export function downloadPdfFromImages(images: string[], filename = 'presentation.pdf') {
+  buildPdfFromImages(images).save(filename)
 }
 
 export function downloadPdf(slides: SlideData[], filename = 'presentation.pdf') {

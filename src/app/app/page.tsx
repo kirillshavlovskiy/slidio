@@ -3,7 +3,7 @@
 import { useState, useCallback, useEffect, useRef, useMemo } from 'react'
 import { useSession, signOut } from 'next-auth/react'
 import { toPng } from 'html-to-image'
-import { Brain, History, Undo2, Download, FileDown, LogOut, Palette, Image as ImageIcon, Home as HomeIcon, BarChart3, Sparkles, Type, Square, Table, Upload, PanelLeftOpen, PanelRightOpen, Pin } from 'lucide-react'
+import { Brain, History, Undo2, Download, FileDown, LogOut, Palette, Image as ImageIcon, Home as HomeIcon, BarChart3, Sparkles, Type, Square, Table, Upload, PanelLeftOpen, PanelRightOpen, Pin, Loader2 } from 'lucide-react'
 import { IMPORT_ACCEPT } from '@/lib/importDeck'
 import SlidePanel from '@/components/SlidePanel'
 import ElementInspector from '@/components/ElementInspector'
@@ -89,7 +89,7 @@ import { formatLayoutIssues, reviewLayoutChange, SLIDE_W_IN, SLIDE_H_IN } from '
 import { slidesForScope, ScopeMode, RouterScope } from '@/lib/scope'
 import { computeSlideSelection } from '@/lib/slideSelection'
 import { duplicateSlides, mergeSlides, splitSlide, SlideOpResult } from '@/lib/slideOps'
-import { downloadPdf as exportSlidesToPdf } from '@/lib/pdfExport'
+import { downloadPdfFromImages } from '@/lib/pdfExport'
 import { rasterizeIconsInSlides } from '@/lib/iconRaster'
 
 const LEFT_PANEL_MIN = 160
@@ -109,6 +109,8 @@ const HISTORY_LIMIT = 100
 // stay well under those limits (a previous value of 72 produced a 69,120px image
 // that 400'd every turn after a render).
 const AGENT_RENDER_SCALE = 0.75
+/** Full-size capture for PDF export (matches the on-screen slide at 96 px/in). */
+const PDF_EXPORT_SCALE = 1
 // Enough headroom for multi-slide edits (read all → apply once → a couple of
 // verify renders), while the prompt keeps the agent batching to stay efficient.
 // Larger builds (e.g. many rows added incrementally) need room to finish in one run.
@@ -263,6 +265,7 @@ export default function Home() {
   // Agentic tool-loop editor (inspect → edit → render → verify, like Claude in PPT).
   const [isAgentRunning, setIsAgentRunning] = useState(false)
   const [captureSlide, setCaptureSlide] = useState<SlideData | null>(null)
+  const [captureScale, setCaptureScale] = useState(AGENT_RENDER_SCALE)
   const agentCaptureRef = useRef<HTMLDivElement>(null)
   // Cancellation: a flag the agent loop checks each step, plus the in-flight
   // request's AbortController so a Stop also kills the current network call.
@@ -293,6 +296,8 @@ export default function Home() {
   const imageInputRef = useRef<HTMLInputElement>(null)
   const importInputRef = useRef<HTMLInputElement>(null)
   const [importingDeck, setImportingDeck] = useState(false)
+  const [exportingPdf, setExportingPdf] = useState(false)
+  const exportingPdfRef = useRef(false)
   // Background deck imports (PPTX/PDF). They run async at the app root so the
   // user can navigate away and return to find the finished deck in the portfolio.
   const [importJobs, setImportJobs] = useState<ImportJob[]>([])
@@ -391,6 +396,7 @@ export default function Home() {
   // the user answers the structured questions we resume the agent with their answers.
   const [pendingAgentInstruction, setPendingAgentInstruction] = useState<string | null>(null)
   const canvasCaptureRef = useRef<HTMLDivElement>(null)
+  const canvasOverlayRef = useRef<HTMLDivElement>(null)
   const canvasViewportRef = useRef<HTMLDivElement>(null)
   const [canvasZoom, setCanvasZoom] = useState(1)
 
@@ -2176,6 +2182,7 @@ export default function Home() {
 
   // ── Agentic editor: render one slide off-screen to a PNG so the model can see it ──
   const renderSlideToPng = useCallback(async (slide: SlideData): Promise<string | null> => {
+    setCaptureScale(AGENT_RENDER_SCALE)
     setCaptureSlide(slide)
     // Wait for the off-screen canvas to mount and paint before snapshotting.
     await new Promise<void>(resolve =>
@@ -3587,11 +3594,57 @@ Return ONE complete "patch" (changes relative to the ORIGINAL slide data provide
     URL.revokeObjectURL(url)
   }, [slides])
 
-  // ── Download PDF (vector text, crisp for sharing) ─────────────────────────────
+  // ── Download PDF — snapshot each workspace slide from SlideCanvas (WYSIWYG) ─
   const downloadPdf = useCallback(async () => {
+    if (exportingPdfRef.current || slides.length === 0) return
+    exportingPdfRef.current = true
+    setExportingPdf(true)
     const exportSlides = await rasterizeIconsInSlides(slides)
-    exportSlidesToPdf(exportSlides)
-  }, [slides])
+    const images: string[] = []
+    setCaptureScale(PDF_EXPORT_SCALE)
+    try {
+      if (typeof document !== 'undefined' && document.fonts?.ready) {
+        await document.fonts.ready
+      }
+      for (const slide of exportSlides) {
+        setCaptureSlide(slide)
+        await new Promise<void>(resolve =>
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+        )
+        // Extra beat so @font-face / layout settle before the snapshot.
+        await new Promise<void>(resolve => setTimeout(resolve, 120))
+        const node = agentCaptureRef.current
+        if (!node) {
+          images.push('')
+          continue
+        }
+        try {
+          const bg = slide.bg?.replace('#', '') || '0D1B2A'
+          const png = await toPng(node, {
+            pixelRatio: 2,
+            cacheBust: true,
+            backgroundColor: `#${bg}`,
+            fontEmbedCSS: fontFaceCssRef.current || undefined,
+          })
+          images.push(png)
+        } catch (err) {
+          console.error('[pdf export] slide capture failed', err)
+          images.push('')
+        }
+      }
+      const base =
+        presentationSummaries.find(p => p.id === presentationId)?.name
+          ?.replace(/[^\w\s-]/g, '')
+          .trim()
+          .replace(/\s+/g, '-') || 'presentation'
+      downloadPdfFromImages(images, `${base}.pdf`)
+    } finally {
+      setCaptureSlide(null)
+      setCaptureScale(AGENT_RENDER_SCALE)
+      exportingPdfRef.current = false
+      setExportingPdf(false)
+    }
+  }, [slides, presentationId, presentationSummaries])
 
   // ── Auth states ───────────────────────────────────────────────────────────────
   if (status === 'loading') {
@@ -3837,10 +3890,15 @@ Return ONE complete "patch" (changes relative to the ORIGINAL slide data provide
           </button>
           <button
             onClick={downloadPdf}
-            title="Download PDF (crisp vector text; Helvetica substitutes proprietary fonts)"
-            className="p-1.5 text-[#94a3b8] rounded hover:bg-[#1e3a5f] hover:text-white transition-colors"
+            disabled={exportingPdf || slides.length === 0}
+            title="Download PDF — exports your slides exactly as shown in the editor"
+            className="p-1.5 text-[#94a3b8] rounded hover:bg-[#1e3a5f] hover:text-white transition-colors disabled:opacity-50"
           >
-            <FileDown className="w-4 h-4" />
+            {exportingPdf ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <FileDown className="w-4 h-4" />
+            )}
           </button>
           <div className="flex items-center gap-1.5 pl-2 border-l border-[#1e3a5f]">
             {session?.user?.image && (
@@ -3974,14 +4032,8 @@ Return ONE complete "patch" (changes relative to the ORIGINAL slide data provide
         <div className="flex-1 flex flex-col bg-[#060d1a] min-h-0 overflow-hidden">
           {(
             <>
-              <div ref={canvasViewportRef} className="relative flex-1 min-h-0 overflow-auto">
-                <CanvasZoomControls
-                  zoom={canvasZoom}
-                  onZoomChange={z => setCanvasZoom(clamp(z, CANVAS_ZOOM_MIN, CANVAS_ZOOM_MAX))}
-                  min={CANVAS_ZOOM_MIN}
-                  max={CANVAS_ZOOM_MAX}
-                  step={CANVAS_ZOOM_STEP}
-                />
+              <div ref={canvasOverlayRef} className="relative flex-1 min-h-0 overflow-hidden">
+                <div ref={canvasViewportRef} className="absolute inset-0 overflow-auto">
                 <div
                   className="flex min-h-full min-w-full items-center justify-center p-6"
                   onClick={e => {
@@ -3991,56 +4043,6 @@ Return ONE complete "patch" (changes relative to the ORIGINAL slide data provide
                     }
                   }}
                 >
-                <CanvasFloatingToolbar
-                  containerRef={canvasViewportRef}
-                  annotationMode={annotationMode}
-                  onAnnotationModeChange={setAnnotationMode}
-                  annotationColor={annotationColor}
-                  onAnnotationColorChange={c => {
-                    setAnnotationColor(c)
-                    setAnnotationMode(true)
-                  }}
-                  strokesCount={strokes.length}
-                  onUndoStroke={() => setStrokes(s => s.slice(0, -1))}
-                  onClearStrokes={() => setStrokes([])}
-                  selectedElements={selectedElements}
-                  onUpdateElement={updateElementWithHistory}
-                  onDeleteElements={deleteSelectedElements}
-                  onCopyElements={copySelectedElements}
-                  onPasteElements={pasteElements}
-                  clipboardCount={clipboardElements.length}
-                  onAlignElements={alignElements}
-                  onStartEditing={id => {
-                    setEditingElementId(id)
-                    setSelectedElementIds([id])
-                  }}
-                  editingElementId={editingElementId}
-                  selectedSlideCount={selectedSlideIds.length}
-                  canDeleteSlides={
-                    selectedSlideIds.length > 0 &&
-                    slides.length - selectedSlideIds.length >= 1
-                  }
-                  canMergeSlides={selectedSlideIds.length > 1}
-                  onDeleteSlides={deleteSelectedSlides}
-                  onDuplicateSlides={duplicateSelectedSlides}
-                  onAddSlide={() => addSlide(activeSlideId)}
-                  onSplitSlide={splitActiveSlide}
-                  onMergeSlides={mergeSelectedSlides}
-                  slideBg={slides.find(s => s.id === activeSlideId)?.bg ?? 'FFFFFF'}
-                  onUpdateSlideBg={updateSlideBg}
-                  slideGradient={slides.find(s => s.id === activeSlideId)?.bgGradient ?? null}
-                  onUpdateSlideGradient={updateSlideGradient}
-                  quickActions={QUICK_ACTIONS}
-                  quickActionCtx={{
-                    slides,
-                    activeSlideId,
-                    activeSlideIndex: slides.findIndex(s => s.id === activeSlideId),
-                    selectedSlideIds,
-                    selectedElementIds,
-                  }}
-                  onRunQuickAction={runQuickAction}
-                  quickActionsDisabled={isLoading || isAgentRunning}
-                />
                 {/* Canvas + drawing overlay (captured to PNG on send) */}
                 <div
                   ref={canvasCaptureRef}
@@ -4119,6 +4121,64 @@ Return ONE complete "patch" (changes relative to the ORIGINAL slide data provide
                   </div>
                 </div>
                 </div>
+                </div>
+                <CanvasZoomControls
+                  zoom={canvasZoom}
+                  onZoomChange={z => setCanvasZoom(clamp(z, CANVAS_ZOOM_MIN, CANVAS_ZOOM_MAX))}
+                  min={CANVAS_ZOOM_MIN}
+                  max={CANVAS_ZOOM_MAX}
+                  step={CANVAS_ZOOM_STEP}
+                />
+                <CanvasFloatingToolbar
+                  containerRef={canvasOverlayRef}
+                  annotationMode={annotationMode}
+                  onAnnotationModeChange={setAnnotationMode}
+                  annotationColor={annotationColor}
+                  onAnnotationColorChange={c => {
+                    setAnnotationColor(c)
+                    setAnnotationMode(true)
+                  }}
+                  strokesCount={strokes.length}
+                  onUndoStroke={() => setStrokes(s => s.slice(0, -1))}
+                  onClearStrokes={() => setStrokes([])}
+                  selectedElements={selectedElements}
+                  onUpdateElement={updateElementWithHistory}
+                  onDeleteElements={deleteSelectedElements}
+                  onCopyElements={copySelectedElements}
+                  onPasteElements={pasteElements}
+                  clipboardCount={clipboardElements.length}
+                  onAlignElements={alignElements}
+                  onStartEditing={id => {
+                    setEditingElementId(id)
+                    setSelectedElementIds([id])
+                  }}
+                  editingElementId={editingElementId}
+                  selectedSlideCount={selectedSlideIds.length}
+                  canDeleteSlides={
+                    selectedSlideIds.length > 0 &&
+                    slides.length - selectedSlideIds.length >= 1
+                  }
+                  canMergeSlides={selectedSlideIds.length > 1}
+                  onDeleteSlides={deleteSelectedSlides}
+                  onDuplicateSlides={duplicateSelectedSlides}
+                  onAddSlide={() => addSlide(activeSlideId)}
+                  onSplitSlide={splitActiveSlide}
+                  onMergeSlides={mergeSelectedSlides}
+                  slideBg={slides.find(s => s.id === activeSlideId)?.bg ?? 'FFFFFF'}
+                  onUpdateSlideBg={updateSlideBg}
+                  slideGradient={slides.find(s => s.id === activeSlideId)?.bgGradient ?? null}
+                  onUpdateSlideGradient={updateSlideGradient}
+                  quickActions={QUICK_ACTIONS}
+                  quickActionCtx={{
+                    slides,
+                    activeSlideId,
+                    activeSlideIndex: slides.findIndex(s => s.id === activeSlideId),
+                    selectedSlideIds,
+                    selectedElementIds,
+                  }}
+                  onRunQuickAction={runQuickAction}
+                  quickActionsDisabled={isLoading || isAgentRunning}
+                />
               </div>
             </>
           )}
@@ -4147,8 +4207,9 @@ Return ONE complete "patch" (changes relative to the ORIGINAL slide data provide
         }}
       >
         <div ref={agentCaptureRef}>
+          {fontFaceCss ? <style dangerouslySetInnerHTML={{ __html: fontFaceCss }} /> : null}
           {captureSlide && (
-            <SlideCanvas slide={captureSlide} scale={AGENT_RENDER_SCALE} interactive={false} />
+            <SlideCanvas slide={captureSlide} scale={captureScale} interactive={false} />
           )}
         </div>
       </div>

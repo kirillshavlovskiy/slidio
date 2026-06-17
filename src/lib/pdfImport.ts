@@ -43,6 +43,8 @@ interface Frag {
   yTop: number // top, inches
   w: number // inches
   fontPt: number // font size in pt (already scaled to editor)
+  /** pdf.js marks end-of-line — start a new text row after this fragment. */
+  lineBreakAfter?: boolean
 }
 
 /** Group fragments that sit on the same baseline into single-line text elements. */
@@ -56,7 +58,11 @@ function fragsToElements(frags: Frag[], color: string): SlideElement[] {
     const last = lines[lines.length - 1]
     const lastFrag = last?.[last.length - 1]
     const threshold = Math.max(0.04, (f.fontPt / PT_PER_IN) * 0.6)
-    if (lastFrag && Math.abs(lastFrag.yTop - f.yTop) <= threshold) {
+    const sameLine =
+      lastFrag &&
+      !lastFrag.lineBreakAfter &&
+      Math.abs(lastFrag.yTop - f.yTop) <= threshold
+    if (sameLine) {
       last.push(f)
     } else {
       lines.push([f])
@@ -86,6 +92,7 @@ function fragsToElements(frags: Frag[], color: string): SlideElement[] {
     const maxRight = Math.max(...line.map(f => f.x + f.w))
     const fontPt = Math.round(line.reduce((s, f) => s + f.fontPt, 0) / line.length)
     const lineH = round2(Math.max(0.18, (fontPt / PT_PER_IN) * 1.35))
+    const maxLineBottom = Math.max(...line.map(f => f.yTop + lineH))
 
     elements.push({
       id: uid('txt'),
@@ -94,7 +101,7 @@ function fragsToElements(frags: Frag[], color: string): SlideElement[] {
       x: round2(Math.max(0, minX)),
       y: round2(Math.max(0, minY)),
       w: round2(Math.max(0.3, maxRight - minX + 0.12)),
-      h: lineH,
+      h: round2(Math.max(lineH, maxLineBottom - minY + 0.04)),
       style: { fontSize: Math.max(6, fontPt), color, valign: 'top' } as ElementStyle,
     })
   }
@@ -242,6 +249,7 @@ export async function importPdf(file: File): Promise<ImportResult> {
           yTop: transform.offY + (topPt / PT_PER_IN) * fit,
           w: ((item.width || str.length * fontHeightPt * 0.5) / PT_PER_IN) * fit,
           fontPt: fontHeightPt * fit,
+          lineBreakAfter: 'hasEOL' in item && Boolean((item as { hasEOL?: boolean }).hasEOL),
         })
       }
     } catch {
