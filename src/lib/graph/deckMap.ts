@@ -9,6 +9,26 @@ import { snapshotGraphVersion } from './version'
 import { MIN_CONFIDENCE } from './schema'
 import { validateEdgeCreation } from './validate'
 
+export type DeckMapPrepareResult = {
+  totalSlides: number
+  elementCount: number
+  knowledgeCount: number
+}
+
+export type DeckMapBatchResult = {
+  slideIndex: number
+  totalSlides: number
+  mappingsAdded: number
+  mappingCount: number
+  done: boolean
+}
+
+export type DeckMapFinalizeResult = {
+  mappingCount: number
+  slideCount: number
+  elementCount: number
+}
+
 export type MapPresentationResult = {
   presentationId: string
   branchId: string
@@ -96,6 +116,141 @@ async function applyMappings(input: {
   }
 
   return count
+}
+
+async function loadProjectedMaps(
+  presentationId: string,
+  branchId: string
+): Promise<Pick<ProjectDeckResult, 'slideNodeIds' | 'elementNodeIds'>> {
+  const nodes = await graphNodesForPresentation(presentationId, branchId)
+  const slideNodeIds = new Map<string, string>()
+  const elementNodeIds = new Map<string, string>()
+
+  for (const n of nodes) {
+    try {
+      const props = JSON.parse(n.properties || '{}') as {
+        slideId?: string
+        elementId?: string
+      }
+      if (n.type === 'Slide' && props.slideId) {
+        slideNodeIds.set(props.slideId, n.id)
+      }
+      if (n.type === 'SlideElement' && props.slideId && props.elementId) {
+        elementNodeIds.set(`${props.slideId}:${props.elementId}`, n.id)
+      }
+    } catch {
+      /* skip */
+    }
+  }
+
+  return { slideNodeIds, elementNodeIds }
+}
+
+/** Step 1: clear old deck graph and project slide/element structure (no LLM). */
+export async function prepareDeckMapping(input: {
+  branchId: string
+  presentationId: string
+  presentationName: string
+  slides: SlideData[]
+}): Promise<DeckMapPrepareResult> {
+  const { branchId, presentationId, presentationName, slides } = input
+
+  await deleteDeckGraph(presentationId, branchId)
+  const projected = await projectDeckGraph({
+    branchId,
+    presentationId,
+    presentationName,
+    slides,
+  })
+  const knowledge = await loadKnowledgeCatalog(branchId)
+
+  return {
+    totalSlides: projected.slideCount,
+    elementCount: projected.elementCount,
+    knowledgeCount: knowledge.length,
+  }
+}
+
+/** Step 2: LLM-map a single slide to KB nodes (one serverless invocation). */
+export async function mapDeckSlideBatch(input: {
+  branchId: string
+  presentationId: string
+  slides: SlideData[]
+  slideIndex: number
+}): Promise<DeckMapBatchResult> {
+  const { branchId, presentationId, slides, slideIndex } = input
+  const totalSlides = slides.length
+
+  if (slideIndex < 0 || slideIndex >= totalSlides) {
+    const summary = await getDeckMappingSummary(presentationId, branchId)
+    return {
+      slideIndex,
+      totalSlides,
+      mappingsAdded: 0,
+      mappingCount: summary?.mappingCount ?? 0,
+      done: true,
+    }
+  }
+
+  const knowledge = await loadKnowledgeCatalog(branchId)
+  let mappingsAdded = 0
+
+  if (knowledge.length) {
+    const projectedMaps = await loadProjectedMaps(presentationId, branchId)
+    const result = await mapSlideToKnowledge({
+      slide: slides[slideIndex],
+      slideIndex,
+      presentationId,
+      knowledge,
+    })
+
+    const projected: ProjectDeckResult = {
+      presentationNodeId: '',
+      slideCount: totalSlides,
+      elementCount: projectedMaps.elementNodeIds.size,
+      slideNodeIds: projectedMaps.slideNodeIds,
+      elementNodeIds: projectedMaps.elementNodeIds,
+    }
+
+    mappingsAdded = await applyMappings({
+      branchId,
+      projected,
+      elementMappings: result.elementMappings,
+      slideTopics: result.slideTopics,
+    })
+  }
+
+  const summary = await getDeckMappingSummary(presentationId, branchId)
+
+  return {
+    slideIndex,
+    totalSlides,
+    mappingsAdded,
+    mappingCount: summary?.mappingCount ?? 0,
+    done: slideIndex >= totalSlides - 1,
+  }
+}
+
+/** Step 3: snapshot graph version after all batches complete. */
+export async function finalizeDeckMapping(input: {
+  branchId: string
+  presentationId: string
+  presentationName: string
+}): Promise<DeckMapFinalizeResult> {
+  const { branchId, presentationId, presentationName } = input
+  const summary = await getDeckMappingSummary(presentationId, branchId)
+
+  await snapshotGraphVersion({
+    branchId,
+    presentationId,
+    summary: `Mapped deck "${presentationName}" — ${summary?.slideCount ?? 0} slides, ${summary?.mappingCount ?? 0} knowledge links`,
+  })
+
+  return {
+    mappingCount: summary?.mappingCount ?? 0,
+    slideCount: summary?.slideCount ?? 0,
+    elementCount: summary?.elementCount ?? 0,
+  }
 }
 
 /** Full deck map: re-project structure + LLM map to KB nodes. */

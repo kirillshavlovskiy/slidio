@@ -5,6 +5,16 @@ import { elementDisplayText, slideTitle } from './project'
 const client = new Anthropic()
 const MODEL = process.env.ANTHROPIC_CHEAP_MODEL || 'claude-haiku-4-5'
 const MAX_OUTPUT_TOKENS = 2048
+const API_TIMEOUT_MS = 55_000
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) =>
+      setTimeout(() => reject(new Error(`${label} timed out after ${Math.round(ms / 1000)}s`)), ms)
+    ),
+  ])
+}
 
 export type KnowledgeRef = {
   id: string
@@ -140,13 +150,17 @@ ${catalog}
 
 Map elements and/or slide theme to catalog entries. JSON only.`
 
-  const response = await client.messages.create({
-    model: MODEL,
-    max_tokens: MAX_OUTPUT_TOKENS,
-    thinking: { type: 'disabled' },
-    system: SYSTEM,
-    messages: [{ role: 'user', content: user }],
-  })
+  const response = await withTimeout(
+    client.messages.create({
+      model: MODEL,
+      max_tokens: MAX_OUTPUT_TOKENS,
+      thinking: { type: 'disabled' },
+      system: SYSTEM,
+      messages: [{ role: 'user', content: user }],
+    }),
+    API_TIMEOUT_MS,
+    'Deck slide mapping'
+  )
 
   const textBlock = response.content.find(b => b.type === 'text')
   if (!textBlock || textBlock.type !== 'text') {

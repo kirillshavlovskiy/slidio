@@ -31,6 +31,9 @@ async function readJsonResponse<T extends Record<string, unknown>>(
         'File is too large to upload as a raw document. Use a smaller file or export as .txt/.md.'
       )
     }
+    if (res.status === 504 || /FUNCTION_INVOCATION_TIMEOUT|timed out/i.test(text)) {
+      throw new Error('Mapping timed out — try again; large decks map one slide at a time.')
+    }
     throw new Error(text.slice(0, 240) || `Request failed (HTTP ${res.status})`)
   }
 }
@@ -204,6 +207,11 @@ export default function KnowledgePanel({
   const [deckMapping, setDeckMapping] = useState<DeckMappingSummary | null>(null)
   const [deckMappingLoading, setDeckMappingLoading] = useState(false)
   const [deckMappingRunning, setDeckMappingRunning] = useState(false)
+  const [deckMapProgress, setDeckMapProgress] = useState<{
+    slide: number
+    total: number
+    mappingCount: number
+  } | null>(null)
 
   const loadSources = useCallback(async () => {
     if (!branchId) return
@@ -249,17 +257,57 @@ export default function KnowledgePanel({
     if (!presentationId || readOnly) return
     setDeckMappingRunning(true)
     setUploadError(null)
-    try {
-      const res = await fetch(`/api/graph/map/deck/${presentationId}`, { method: 'POST' })
-      const data = await readJsonResponse<{ error?: string }>(res)
+    setDeckMapProgress(null)
+    const MAP_SLIDE_PAUSE_MS = 1500
+
+    const postMap = async (payload: Record<string, unknown>) => {
+      const res = await fetch(`/api/graph/map/deck/${presentationId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+      const data = await readJsonResponse<{ error?: string } & Record<string, unknown>>(res)
       if (!res.ok) throw new Error(data.error || 'Deck mapping failed')
+      return data
+    }
+
+    try {
+      const prep = await postMap({ phase: 'prepare' })
+      const totalSlides = Number(prep.totalSlides ?? 0)
+      if (totalSlides < 1) throw new Error('Deck has no slides to map')
+      if (Number(prep.knowledgeCount ?? 0) < 1) {
+        throw new Error('No extracted knowledge in this hub — run Extract on documents first.')
+      }
+
+      setDeckMapProgress({ slide: 0, total: totalSlides, mappingCount: 0 })
+      await loadGraph()
+      setActiveTab('graph')
+
+      for (let i = 0; i < totalSlides; i++) {
+        if (i > 0) {
+          setDeckMapProgress(prev => (prev ? { ...prev, slide: i } : prev))
+          await new Promise(r => setTimeout(r, MAP_SLIDE_PAUSE_MS))
+        }
+        const batch = await postMap({ phase: 'batch', slideIndex: i })
+        setDeckMapProgress({
+          slide: i + 1,
+          total: totalSlides,
+          mappingCount: Number(batch.mappingCount ?? 0),
+        })
+        await loadGraph()
+      }
+
+      await postMap({ phase: 'finalize' })
       await loadDeckMapping()
       await loadGraph()
       setActiveTab('graph')
     } catch (err) {
       setUploadError(err instanceof Error ? err.message : 'Deck mapping failed')
+      await loadDeckMapping()
+      await loadGraph()
     } finally {
       setDeckMappingRunning(false)
+      setDeckMapProgress(null)
     }
   }
 
@@ -519,6 +567,24 @@ export default function KnowledgePanel({
           </button>{' '}
           tab → Extract).
         </p>
+      )}
+      {deckMapProgress && (
+        <div className="space-y-1.5">
+          <div className="h-1.5 rounded-full bg-[#1e293b] overflow-hidden">
+            <div
+              className="h-full bg-cyan-500 transition-all duration-300"
+              style={{
+                width: `${deckMapProgress.total ? (deckMapProgress.slide / deckMapProgress.total) * 100 : 0}%`,
+              }}
+            />
+          </div>
+          <p className="text-[10px] text-cyan-300/80 tabular-nums">
+            Mapping slide {deckMapProgress.slide}/{deckMapProgress.total}
+            {deckMapProgress.mappingCount > 0
+              ? ` · ${deckMapProgress.mappingCount} link${deckMapProgress.mappingCount === 1 ? '' : 's'} so far`
+              : ''}
+          </p>
+        </div>
       )}
       {presentationId && deckMappingLoading ? (
         <p className="text-[10px] text-[#64748B] flex items-center gap-1">

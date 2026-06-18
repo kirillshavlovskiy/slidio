@@ -2,11 +2,18 @@ import { NextRequest, NextResponse } from 'next/server'
 import { auth } from '@/lib/auth'
 import { prisma } from '@/lib/prisma'
 import { canAccessPresentation, roleAtLeast } from '@/lib/hubAccess'
-import { mapPresentationDeck, getDeckMappingSummary, syncDeckProjection } from '@/lib/graph/deckMap'
+import {
+  mapPresentationDeck,
+  getDeckMappingSummary,
+  syncDeckProjection,
+  prepareDeckMapping,
+  mapDeckSlideBatch,
+  finalizeDeckMapping,
+} from '@/lib/graph/deckMap'
 import type { SlideData } from '@/lib/types'
 
 export const runtime = 'nodejs'
-export const maxDuration = 120
+export const maxDuration = 300
 
 function isGraphSchemaError(err: unknown): boolean {
   const msg = String((err as { message?: string })?.message || err)
@@ -60,7 +67,7 @@ export async function POST(
     return NextResponse.json({ error: 'Read-only: you are a viewer on this hub' }, { status: 403 })
   }
 
-  let body: { projectOnly?: boolean } = {}
+  let body: { projectOnly?: boolean; phase?: string; slideIndex?: number } = {}
   try {
     body = await req.json()
   } catch {
@@ -77,8 +84,9 @@ export async function POST(
     }
 
     const slides = JSON.parse(pres.slides || '[]') as SlideData[]
+    const phase = body.phase || (body.projectOnly ? 'projectOnly' : 'full')
 
-    if (body.projectOnly) {
+    if (phase === 'projectOnly') {
       const projected = await syncDeckProjection({
         branchId: pres.branchId,
         presentationId: pres.id,
@@ -91,6 +99,47 @@ export async function POST(
         slideCount: projected.slideCount,
         elementCount: projected.elementCount,
       })
+    }
+
+    if (phase === 'prepare') {
+      const result = await prepareDeckMapping({
+        branchId: pres.branchId,
+        presentationId: pres.id,
+        presentationName: pres.name,
+        slides,
+      })
+      return NextResponse.json({ ok: true, phase: 'prepare', ...result })
+    }
+
+    if (phase === 'batch') {
+      const slideIndex = typeof body.slideIndex === 'number' ? body.slideIndex : 0
+      const result = await mapDeckSlideBatch({
+        branchId: pres.branchId,
+        presentationId: pres.id,
+        slides,
+        slideIndex,
+      })
+      return NextResponse.json({ ok: true, phase: 'batch', ...result })
+    }
+
+    if (phase === 'finalize') {
+      const result = await finalizeDeckMapping({
+        branchId: pres.branchId,
+        presentationId: pres.id,
+        presentationName: pres.name,
+      })
+      return NextResponse.json({ ok: true, phase: 'finalize', ...result })
+    }
+
+    // Legacy single-shot — only for tiny decks; batched flow is used by the UI.
+    if (slides.length > 5) {
+      return NextResponse.json(
+        {
+          error:
+            'Deck has too many slides for a single mapping request. The UI maps one slide per request automatically — refresh and try again.',
+        },
+        { status: 400 }
+      )
     }
 
     const result = await mapPresentationDeck({
@@ -117,6 +166,7 @@ export async function POST(
     }
     console.error('deck map error:', err)
     const message = err instanceof Error ? err.message : 'Deck mapping failed'
-    return NextResponse.json({ error: message }, { status: 500 })
+    const status = /timed out/i.test(message) ? 504 : 500
+    return NextResponse.json({ error: message }, { status })
   }
 }
