@@ -11,6 +11,7 @@
     "db:push:turso": "node scripts/push-turso.mjs",
     "db:migrate:collaboration": "node scripts/migrate-collaboration.mjs",
     "db:migrate:graph": "node scripts/migrate-graph.mjs",
+    "db:migrate:graph:local": "DATABASE_URL=\"file:./prisma/dev.db\" DATABASE_AUTH_TOKEN= node scripts/migrate-graph.mjs",
     "users": "node scripts/list-users.mjs"
   },
   "engines": {

@@ -11,7 +11,10 @@ const MAX_SOURCE_TEXT_CHARS = 200_000
 
 function isGraphSchemaError(err: unknown): boolean {
   const msg = String((err as { message?: string })?.message || err)
-  return /no such table: SourceDocument|no such table: GraphNode/i.test(msg)
+  return (
+    /no such table: SourceDocument|no such table: GraphNode/i.test(msg) ||
+    /no such column:.*extractedText/i.test(msg)
+  )
 }
 
 export async function GET(req: NextRequest) {
@@ -182,7 +185,7 @@ export async function POST(req: NextRequest) {
   } catch (err) {
     if (isGraphSchemaError(err)) {
       return NextResponse.json(
-        { error: 'Knowledge graph schema not migrated. Run npm run db:migrate:graph.' },
+        { error: 'Knowledge graph schema not migrated. Run npm run db:migrate:graph:local (dev) or npm run db:migrate:graph (Turso).' },
         { status: 503 }
       )
     }
@@ -213,7 +216,7 @@ export async function DELETE(req: NextRequest) {
   } catch (err) {
     if (isGraphSchemaError(err)) {
       return NextResponse.json(
-        { error: 'Knowledge graph schema not migrated. Run npm run db:migrate:graph.' },
+        { error: 'Knowledge graph schema not migrated. Run npm run db:migrate:graph:local (dev) or npm run db:migrate:graph (Turso).' },
         { status: 503 }
       )
     }
