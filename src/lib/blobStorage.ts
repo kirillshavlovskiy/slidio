@@ -2,7 +2,20 @@ import { put } from '@vercel/blob'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 
-const STORAGE_ROOT = path.resolve(process.env.STORAGE_PATH || './storage')
+const INLINE_TEXT_PREFIX = 'inline://'
+
+/** Vercel serverless has a read-only filesystem — never write to ./storage there. */
+export function isServerlessEnv(): boolean {
+  return process.env.VERCEL === '1'
+}
+
+function storageRoot(): string {
+  if (isServerlessEnv()) {
+    return path.join('/tmp', 'deck-editor-storage')
+  }
+  return path.resolve(process.env.STORAGE_PATH || './storage')
+}
+
 const LOCAL_FILES_PREFIX = '/api/graph/files/'
 
 function hasBlobToken(): boolean {
@@ -24,8 +37,25 @@ function localBlobUrl(relPath: string): string {
   return `${LOCAL_FILES_PREFIX}${normalized}`
 }
 
+export function inlineTextUrl(sourceId: string): string {
+  return `${INLINE_TEXT_PREFIX}${sourceId}`
+}
+
+export function isInlineTextUrl(url: string): boolean {
+  return url.startsWith(INLINE_TEXT_PREFIX)
+}
+
+export function inlineTextSourceId(url: string): string | null {
+  if (!isInlineTextUrl(url)) return null
+  return url.slice(INLINE_TEXT_PREFIX.length) || null
+}
+
 async function putLocal(relPath: string, data: Buffer | string): Promise<string> {
-  const abs = path.resolve(STORAGE_ROOT, relPath)
+  const root = storageRoot()
+  const abs = path.resolve(root, relPath)
+  if (!abs.startsWith(root + path.sep)) {
+    throw new Error('Invalid storage path')
+  }
   await fs.mkdir(path.dirname(abs), { recursive: true })
   await fs.writeFile(abs, data)
   return localBlobUrl(relPath)
@@ -44,11 +74,15 @@ export function localPathFromUrl(url: string): string | null {
 export async function readStoredBlob(url: string): Promise<Buffer> {
   const trimmed = url?.trim()
   if (!trimmed) throw new Error('Source file is missing — remove this source and upload again')
+  if (isInlineTextUrl(trimmed)) {
+    throw new Error('Inline text must be read from the database, not blob storage')
+  }
 
   const rel = localPathFromUrl(trimmed)
   if (rel) {
-    const abs = path.resolve(STORAGE_ROOT, rel)
-    if (!abs.startsWith(STORAGE_ROOT + path.sep)) {
+    const root = storageRoot()
+    const abs = path.resolve(root, rel)
+    if (!abs.startsWith(root + path.sep)) {
       throw new Error('Invalid blob path')
     }
     try {
@@ -84,32 +118,46 @@ export async function putSourceFile(
 ): Promise<string> {
   const buffer = Buffer.isBuffer(data) ? data : Buffer.from(await data.arrayBuffer())
 
-  if (!hasBlobToken()) {
-    return putLocal(sourceRelPath(branchId, sourceId, filename), buffer)
+  if (hasBlobToken()) {
+    const pathname = sourceRelPath(branchId, sourceId, filename).split(path.sep).join('/')
+    const blob = await put(pathname, buffer, { access: 'public', token: token() })
+    return blob.url
   }
 
-  const pathname = sourceRelPath(branchId, sourceId, filename).split(path.sep).join('/')
-  const blob = await put(pathname, buffer, { access: 'public', token: token() })
-  return blob.url
+  if (isServerlessEnv()) {
+    throw new Error(
+      'Raw file storage is not configured. Connect Vercel Blob (BLOB_READ_WRITE_TOKEN) or upload via the Documents tab (text is stored in the database).'
+    )
+  }
+
+  return putLocal(sourceRelPath(branchId, sourceId, filename), buffer)
 }
 
-/** Store extracted plain text artifact for a source document. */
+/**
+ * Store extracted plain text. Returns a Vercel Blob URL, a local file URL, or
+ * `inline://<sourceId>` when on serverless without Blob — caller must save text
+ * on SourceDocument.extractedText in that case.
+ */
 export async function putExtractedText(
   branchId: string,
   sourceId: string,
   text: string
 ): Promise<string> {
-  if (!hasBlobToken()) {
-    return putLocal(sourceRelPath(branchId, sourceId, 'extracted.txt'), text)
+  if (hasBlobToken()) {
+    const pathname = sourceRelPath(branchId, sourceId, 'extracted.txt').split(path.sep).join('/')
+    const blob = await put(pathname, text, {
+      access: 'public',
+      token: token(),
+      contentType: 'text/plain; charset=utf-8',
+    })
+    return blob.url
   }
 
-  const pathname = sourceRelPath(branchId, sourceId, 'extracted.txt').split(path.sep).join('/')
-  const blob = await put(pathname, text, {
-    access: 'public',
-    token: token(),
-    contentType: 'text/plain; charset=utf-8',
-  })
-  return blob.url
+  if (isServerlessEnv()) {
+    return inlineTextUrl(sourceId)
+  }
+
+  return putLocal(sourceRelPath(branchId, sourceId, 'extracted.txt'), text)
 }
 
 /** Blob URLs are public when stored with access: 'public'. */
@@ -117,4 +165,4 @@ export function getPublicOrSignedUrl(url: string): string {
   return url
 }
 
-export { STORAGE_ROOT, LOCAL_FILES_PREFIX }
+export { storageRoot as STORAGE_ROOT, LOCAL_FILES_PREFIX }

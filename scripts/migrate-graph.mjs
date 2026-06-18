@@ -87,6 +87,7 @@ const statements = [
   `ALTER TABLE "GraphNode" ADD COLUMN "presentationId" TEXT`,
   `CREATE INDEX IF NOT EXISTS "GraphNode_presentationId_idx" ON "GraphNode"("presentationId")`,
   `ALTER TABLE "GraphVersion" ADD COLUMN "presentationId" TEXT`,
+  `ALTER TABLE "SourceDocument" ADD COLUMN "extractedText" TEXT`,
 ]
 
 function resolveUrl(raw) {

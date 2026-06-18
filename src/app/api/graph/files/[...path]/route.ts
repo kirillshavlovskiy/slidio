@@ -22,10 +22,11 @@ export async function GET(
 ) {
   const { path: segments } = await params
   const rel = segments.join('/')
-  const abs = path.resolve(STORAGE_ROOT, rel)
-  const rootWithSep = STORAGE_ROOT + path.sep
+  const root = STORAGE_ROOT()
+  const abs = path.resolve(root, rel)
+  const rootWithSep = root + path.sep
 
-  if (!abs.startsWith(rootWithSep) && abs !== STORAGE_ROOT) {
+  if (!abs.startsWith(rootWithSep) && abs !== root) {
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
   }
 

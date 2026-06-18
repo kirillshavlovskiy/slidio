@@ -201,6 +201,8 @@ model SourceDocument {
   uploadedById         String
   blobUrl              String
   extractedTextBlobUrl String?
+  /** Inline fallback when Vercel Blob is unavailable (serverless). */
+  extractedText        String?
   status               String           @default("registered") // registered | parsed | extracted | failed
   error                String?
   createdAt            DateTime         @default(now())

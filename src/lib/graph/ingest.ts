@@ -1,5 +1,5 @@
 import { prisma } from '@/lib/prisma'
-import { putExtractedText, readStoredBlob, readStoredText } from '@/lib/blobStorage'
+import { putExtractedText, readStoredBlob, readStoredText, isInlineTextUrl } from '@/lib/blobStorage'
 import { parseBufferToText, fileTypeFromName } from '@/lib/parseDocumentServer'
 import { segmentDocumentText } from './segment'
 import { extractFromChunkBatch, BATCH_SIZE } from './extract'
@@ -39,6 +39,7 @@ export async function parseSourceDocument(sourceId: string): Promise<void> {
       where: { id: sourceId },
       data: {
         extractedTextBlobUrl: extractedUrl,
+        extractedText: isInlineTextUrl(extractedUrl) ? text : null,
         status: 'parsed',
         error: null,
         updatedAt: new Date(),
@@ -54,8 +55,16 @@ export async function parseSourceDocument(sourceId: string): Promise<void> {
   }
 }
 
-async function loadExtractedText(source: { extractedTextBlobUrl: string | null }): Promise<string> {
+async function loadExtractedText(source: {
+  id: string
+  extractedTextBlobUrl: string | null
+  extractedText?: string | null
+}): Promise<string> {
+  if (source.extractedText?.trim()) return source.extractedText
   if (!source.extractedTextBlobUrl) throw new Error('Source has no extracted text')
+  if (isInlineTextUrl(source.extractedTextBlobUrl)) {
+    throw new Error('Extracted text missing from database — re-upload this document')
+  }
   return readStoredText(source.extractedTextBlobUrl)
 }
 

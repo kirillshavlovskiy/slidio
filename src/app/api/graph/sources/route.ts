@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { auth } from '@/lib/auth'
 import { prisma } from '@/lib/prisma'
 import { canAccessGraph, roleAtLeast } from '@/lib/hubAccess'
-import { putSourceFile, putExtractedText } from '@/lib/blobStorage'
+import { putSourceFile, putExtractedText, isInlineTextUrl } from '@/lib/blobStorage'
 import { fileTypeFromName, parseSourceDocument, deleteSourceDocument } from '@/lib/graph/ingest'
 
 export const runtime = 'nodejs'
@@ -105,6 +105,7 @@ export async function POST(req: NextRequest) {
           data: {
             blobUrl: extractedUrl,
             extractedTextBlobUrl: extractedUrl,
+            extractedText: isInlineTextUrl(extractedUrl) ? text : null,
             status: 'parsed',
             error: null,
           },
