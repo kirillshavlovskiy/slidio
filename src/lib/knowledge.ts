@@ -12,6 +12,10 @@ export const TEXT_LAYER_MAX_CHARS = 1200
 /** Layer types for short indirect context (audience, terms, period, org facts). */
 export const KB_TEXT_LAYER_TYPES: KnowledgeLayerType[] = ['terminology', 'stakeholder', 'custom']
 
+export function isKbTextLayerType(type: string): type is KnowledgeLayerType {
+  return (KB_TEXT_LAYER_TYPES as readonly string[]).includes(type)
+}
+
 export function clampTextLayerContent(content: string): string {
   if (content.length <= TEXT_LAYER_MAX_CHARS) return content
   return content.slice(0, TEXT_LAYER_MAX_CHARS)

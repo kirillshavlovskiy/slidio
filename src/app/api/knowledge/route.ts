@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { auth } from '@/lib/auth'
 import { prisma } from '@/lib/prisma'
 import { accessibleHubIds, canAccessKnowledgeLayer, getHubRole, roleAtLeast } from '@/lib/hubAccess'
-import { clampTextLayerContent, KB_TEXT_LAYER_TYPES, TEXT_LAYER_MAX_CHARS } from '@/lib/knowledge'
+import { clampTextLayerContent, isKbTextLayerType, TEXT_LAYER_MAX_CHARS } from '@/lib/knowledge'
 
 export async function GET(req: NextRequest) {
   const session = await auth()
@@ -57,7 +57,7 @@ export async function POST(req: NextRequest) {
   if (
     layerSource === 'manual' &&
     typeof type === 'string' &&
-    KB_TEXT_LAYER_TYPES.includes(type) &&
+    isKbTextLayerType(type) &&
     typeof content === 'string' &&
     content.length > TEXT_LAYER_MAX_CHARS
   ) {
@@ -104,7 +104,7 @@ export async function PATCH(req: NextRequest) {
   const nextContent = content !== undefined ? content : existing.content
   if (
     nextSource !== 'document' &&
-    KB_TEXT_LAYER_TYPES.includes(nextType as typeof KB_TEXT_LAYER_TYPES[number]) &&
+    isKbTextLayerType(String(nextType)) &&
     typeof nextContent === 'string' &&
     nextContent.length > TEXT_LAYER_MAX_CHARS
   ) {
