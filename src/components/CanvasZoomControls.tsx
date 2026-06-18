@@ -1,6 +1,6 @@
 'use client'
 
-import { Minus, Plus, RotateCcw } from 'lucide-react'
+import { ChevronLeft, ChevronRight, Minus, Plus, RotateCcw } from 'lucide-react'
 
 interface Props {
   zoom: number
@@ -8,6 +8,11 @@ interface Props {
   min?: number
   max?: number
   step?: number
+  /** 0-based index of the active slide. Omit to hide slide navigation. */
+  slideIndex?: number
+  slideCount?: number
+  onPrevSlide?: () => void
+  onNextSlide?: () => void
 }
 
 function clamp(value: number, min: number, max: number) {
@@ -20,14 +25,56 @@ export default function CanvasZoomControls({
   min = 0.25,
   max = 3,
   step = 0.1,
+  slideIndex,
+  slideCount = 0,
+  onPrevSlide,
+  onNextSlide,
 }: Props) {
   const zoomIn = () => onZoomChange(clamp(Number((zoom + step).toFixed(2)), min, max))
   const zoomOut = () => onZoomChange(clamp(Number((zoom - step).toFixed(2)), min, max))
   const reset = () => onZoomChange(1)
 
+  const showSlideNav =
+    slideCount > 1 &&
+    typeof slideIndex === 'number' &&
+    slideIndex >= 0 &&
+    onPrevSlide &&
+    onNextSlide
+  const atFirst = !showSlideNav || slideIndex <= 0
+  const atLast = !showSlideNav || slideIndex >= slideCount - 1
+
   return (
     <div className="pointer-events-none absolute inset-0 z-30">
       <div className="pointer-events-auto absolute bottom-3 right-3 flex items-center gap-0.5 rounded-lg border border-[#1e3a5f] bg-[#0d1b2a]/95 px-1 py-1 shadow-lg backdrop-blur-sm">
+      {showSlideNav && (
+        <>
+          <button
+            type="button"
+            onClick={onPrevSlide}
+            disabled={atFirst}
+            title="Previous slide"
+            className="p-1.5 rounded text-[#94a3b8] hover:text-white hover:bg-[#1e3a5f] disabled:opacity-30 transition-colors"
+          >
+            <ChevronLeft className="w-3.5 h-3.5" />
+          </button>
+          <span
+            className="min-w-[2.75rem] px-1 text-center text-[10px] font-semibold tabular-nums text-[#cbd5e1]"
+            title="Current slide"
+          >
+            {slideIndex + 1}/{slideCount}
+          </span>
+          <button
+            type="button"
+            onClick={onNextSlide}
+            disabled={atLast}
+            title="Next slide"
+            className="p-1.5 rounded text-[#94a3b8] hover:text-white hover:bg-[#1e3a5f] disabled:opacity-30 transition-colors"
+          >
+            <ChevronRight className="w-3.5 h-3.5" />
+          </button>
+          <div className="w-px h-5 bg-[#1e3a5f] mx-0.5" aria-hidden />
+        </>
+      )}
       <button
         type="button"
         onClick={zoomOut}

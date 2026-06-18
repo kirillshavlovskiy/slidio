@@ -14,8 +14,26 @@ import { cn } from '@/lib/utils'
 import ExtractionProgressBar, { parseBatchProgress } from '@/components/knowledge/ExtractionProgressBar'
 import KnowledgeGraphViz from '@/components/knowledge/KnowledgeGraphViz'
 import { KB_TEXT_LAYER_TYPES, TEXT_LAYER_MAX_CHARS } from '@/lib/knowledge'
+import { fileTypeFromName, parseDocumentToText } from '@/lib/parseDocumentClient'
 
 type PanelTab = 'layers' | 'sources' | 'graph'
+
+async function readJsonResponse<T extends Record<string, unknown>>(
+  res: Response
+): Promise<T> {
+  const text = await res.text()
+  if (!text) return {} as T
+  try {
+    return JSON.parse(text) as T
+  } catch {
+    if (res.status === 413 || /^Request Entity/i.test(text)) {
+      throw new Error(
+        'File is too large to upload as a raw document. Use a smaller file or export as .txt/.md.'
+      )
+    }
+    throw new Error(text.slice(0, 240) || `Request failed (HTTP ${res.status})`)
+  }
+}
 
 type SourceDocument = {
   id: string
@@ -233,7 +251,7 @@ export default function KnowledgePanel({
     setUploadError(null)
     try {
       const res = await fetch(`/api/graph/map/deck/${presentationId}`, { method: 'POST' })
-      const data = await res.json()
+      const data = await readJsonResponse<{ error?: string }>(res)
       if (!res.ok) throw new Error(data.error || 'Deck mapping failed')
       await loadDeckMapping()
       await loadGraph()
@@ -271,11 +289,25 @@ export default function KnowledgePanel({
     setSourceUploading(true)
     setUploadError(null)
     try {
-      const fd = new FormData()
-      fd.append('file', file)
-      fd.append('branchId', branchId)
-      const res = await fetch('/api/graph/sources', { method: 'POST', body: fd })
-      const data = await res.json()
+      const parsed = await parseDocumentToText(file)
+      const fileType = fileTypeFromName(file.name)
+      if (fileType === 'unknown') {
+        throw new Error(
+          'Unsupported file type. Use PDF, DOCX, TXT, MD, CSV, JSON, YAML, HTML or XML.'
+        )
+      }
+      const res = await fetch('/api/graph/sources', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          branchId,
+          title: parsed.name,
+          fileType,
+          text: parsed.text,
+          originalFilename: file.name,
+        }),
+      })
+      const data = await readJsonResponse<SourceDocument & { error?: string }>(res)
       if (!res.ok) throw new Error(data.error || 'Upload failed')
       setSources(prev => [data, ...prev])
       setActiveTab('sources')
@@ -300,20 +332,22 @@ export default function KnowledgePanel({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ phase: 'prepare' }),
       })
-      const prep = await prepRes.json()
+      const prep = await readJsonResponse<{ error?: string; totalBatches?: number; structureNodeCount?: number }>(prepRes)
       if (!prepRes.ok) throw new Error(prep.error || 'Prepare failed')
+      const totalBatches = prep.totalBatches ?? 0
+      if (totalBatches < 1) throw new Error('Prepare returned no extraction batches')
 
       setBatchInFlight(false)
       setIngestProgress({
         batch: 0,
-        total: prep.totalBatches,
+        total: totalBatches,
         knowledgeNodes: 0,
         structureNodes: prep.structureNodeCount ?? 0,
       })
       await loadGraph()
       setActiveTab('graph')
 
-      for (let i = 0; i < prep.totalBatches; i++) {
+      for (let i = 0; i < totalBatches; i++) {
         if (i > 0) {
           setIngestProgress(prev => prev ? { ...prev, batch: i } : prev)
           await new Promise(r => setTimeout(r, BATCH_PAUSE_MS))
@@ -325,13 +359,18 @@ export default function KnowledgePanel({
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ phase: 'batch', batchIndex: i }),
         })
-        const batch = await batchRes.json()
+        const batch = await readJsonResponse<{
+          error?: string
+          totalBatches?: number
+          knowledgeNodeCount?: number
+          done?: boolean
+        }>(batchRes)
         if (!batchRes.ok) throw new Error(batch.error || 'Extraction failed')
 
         setBatchInFlight(false)
         setIngestProgress({
           batch: i + 1,
-          total: batch.totalBatches,
+          total: batch.totalBatches ?? totalBatches,
           knowledgeNodes: batch.knowledgeNodeCount ?? 0,
           structureNodes: prep.structureNodeCount ?? 0,
         })
@@ -357,7 +396,7 @@ export default function KnowledgePanel({
     setUploadError(null)
     try {
       const res = await fetch(`/api/graph/sources?sourceId=${sourceId}`, { method: 'DELETE' })
-      const data = await res.json()
+      const data = await readJsonResponse<{ error?: string }>(res)
       if (!res.ok) throw new Error(data.error || 'Delete failed')
       setSources(prev => prev.filter(s => s.id !== sourceId))
     } catch (err) {

@@ -1413,6 +1413,22 @@ export default function Home() {
     [slides, selectedSlideIds, selectionAnchorId]
   )
 
+  const goToAdjacentSlide = useCallback(
+    (delta: -1 | 1) => {
+      const idx = slides.findIndex(s => s.id === activeSlideId)
+      if (idx < 0) return
+      const nextIdx = idx + delta
+      if (nextIdx < 0 || nextIdx >= slides.length) return
+      const id = slides[nextIdx].id
+      setActiveSlideId(id)
+      setSelectedSlideIds([id])
+      setSelectionAnchorId(id)
+      setSelectedElementIds([])
+      setEditingElementId(null)
+    },
+    [slides, activeSlideId]
+  )
+
   const deleteSelectedSlides = useCallback(() => {
     const idsToDelete = Array.from(new Set(selectedSlideIds))
     if (idsToDelete.length === 0) return
@@ -4297,6 +4313,10 @@ Return ONE complete "patch" (changes relative to the ORIGINAL slide data provide
                   min={CANVAS_ZOOM_MIN}
                   max={CANVAS_ZOOM_MAX}
                   step={CANVAS_ZOOM_STEP}
+                  slideIndex={slides.findIndex(s => s.id === activeSlideId)}
+                  slideCount={slides.length}
+                  onPrevSlide={() => goToAdjacentSlide(-1)}
+                  onNextSlide={() => goToAdjacentSlide(1)}
                 />
                 <CanvasFloatingToolbar
                   containerRef={canvasOverlayRef}

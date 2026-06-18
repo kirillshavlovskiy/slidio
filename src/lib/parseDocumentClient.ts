@@ -16,6 +16,16 @@ export interface ParsedDocument {
   truncated: boolean
 }
 
+export function fileTypeFromName(filename: string): string {
+  const lower = filename.toLowerCase()
+  if (lower.endsWith('.pdf')) return 'pdf'
+  if (lower.endsWith('.docx')) return 'docx'
+  for (const ext of TEXT_EXTENSIONS) {
+    if (lower.endsWith(ext)) return ext.slice(1)
+  }
+  return 'unknown'
+}
+
 function decodeEntities(s: string): string {
   return s
     .replace(/&lt;/g, '<')

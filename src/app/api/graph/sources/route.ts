@@ -2,10 +2,12 @@ import { NextRequest, NextResponse } from 'next/server'
 import { auth } from '@/lib/auth'
 import { prisma } from '@/lib/prisma'
 import { canAccessGraph, roleAtLeast } from '@/lib/hubAccess'
-import { putSourceFile } from '@/lib/blobStorage'
+import { putSourceFile, putExtractedText } from '@/lib/blobStorage'
 import { fileTypeFromName, parseSourceDocument, deleteSourceDocument } from '@/lib/graph/ingest'
 
 export const runtime = 'nodejs'
+
+const MAX_SOURCE_TEXT_CHARS = 200_000
 
 function isGraphSchemaError(err: unknown): boolean {
   const msg = String((err as { message?: string })?.message || err)
@@ -47,6 +49,79 @@ export async function POST(req: NextRequest) {
   if (!session?.user?.id) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
   try {
+    const contentType = req.headers.get('content-type') || ''
+
+    // Client parses PDF/DOCX in the browser and sends extracted text as JSON so
+    // large binaries never hit the ~4.5MB serverless request body limit (HTTP 413).
+    if (contentType.includes('application/json')) {
+      const body = (await req.json()) as {
+        branchId?: string
+        title?: string
+        fileType?: string
+        text?: string
+        originalFilename?: string
+      }
+
+      const branchId = body.branchId?.trim()
+      const title = body.title?.trim()
+      const fileType = body.fileType?.trim()
+      const text = body.text?.trim()
+
+      if (!branchId) return NextResponse.json({ error: 'branchId required' }, { status: 400 })
+      if (!title) return NextResponse.json({ error: 'title required' }, { status: 400 })
+      if (!fileType || fileType === 'unknown') {
+        return NextResponse.json({ error: 'Unsupported file type' }, { status: 400 })
+      }
+      if (!text) {
+        return NextResponse.json({ error: 'No readable text in document' }, { status: 400 })
+      }
+      if (text.length > MAX_SOURCE_TEXT_CHARS) {
+        return NextResponse.json(
+          { error: `Document text exceeds ${MAX_SOURCE_TEXT_CHARS.toLocaleString()} characters` },
+          { status: 400 }
+        )
+      }
+
+      const access = await canAccessGraph(session.user.id, branchId, 'editor')
+      if (!access.ok || !roleAtLeast(access.role, 'editor')) {
+        return NextResponse.json({ error: 'Read-only: you are a viewer on this hub' }, { status: 403 })
+      }
+
+      const source = await prisma.sourceDocument.create({
+        data: {
+          branchId,
+          title,
+          fileType,
+          uploadedById: session.user.id,
+          blobUrl: '',
+          status: 'registered',
+        },
+      })
+
+      try {
+        const extractedUrl = await putExtractedText(branchId, source.id, text)
+        await prisma.sourceDocument.update({
+          where: { id: source.id },
+          data: {
+            blobUrl: extractedUrl,
+            extractedTextBlobUrl: extractedUrl,
+            status: 'parsed',
+            error: null,
+          },
+        })
+      } catch (uploadErr) {
+        await deleteSourceDocument(source.id).catch(() => {})
+        throw uploadErr
+      }
+
+      const updated = await prisma.sourceDocument.findUnique({ where: { id: source.id } })
+      return NextResponse.json({
+        ...updated,
+        createdAt: new Date(updated!.createdAt).getTime(),
+        updatedAt: new Date(updated!.updatedAt).getTime(),
+      })
+    }
+
     const formData = await req.formData()
     const file = formData.get('file') as File | null
     const branchId = formData.get('branchId') as string | null
