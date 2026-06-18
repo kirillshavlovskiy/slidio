@@ -78,7 +78,14 @@ import {
   ChartSpec,
   HubRole,
 } from '@/lib/types'
-import { buildKnowledgeContext, activeSlideText, defaultKnowledgeLayers, diffSlideIds } from '@/lib/knowledge'
+import {
+  buildKnowledgeContext,
+  activeSlideText,
+  defaultKnowledgeLayers,
+  diffSlideIds,
+  mergeKnowledgeContexts,
+  fetchGraphKnowledgeContext,
+} from '@/lib/knowledge'
 import { summarizeDeckChanges } from '@/lib/versionDiff'
 import {
   applyChangesToSlides,
@@ -1192,6 +1199,24 @@ export default function Home() {
       const ac = new AbortController()
       singleShotAbortRef.current = ac
       try {
+        const branchId =
+          activeBranchIdRef.current ??
+          presentationSummaries.find(p => p.id === presentationId)?.branchId ??
+          null
+        const layerCtx = buildKnowledgeContext(knowledgeLayers, decisions, activeSlideId, {
+          instruction: lastUserMessage,
+          slideText: activeSlideText(slides, activeSlideId),
+          // Uploaded reference docs are the source of truth — keep a useful
+          // chunk (incl. table structure) rather than cutting to one sentence.
+          documentCharCap: 16000,
+          documentTotalCap: 32000,
+        })
+        const graphCtx = await fetchGraphKnowledgeContext({
+          branchId,
+          presentationId,
+          instruction: lastUserMessage,
+          charBudget: 8000,
+        })
         const res = await fetch('/api/edit', {
           method: 'POST',
           signal: ac.signal,
@@ -1205,14 +1230,7 @@ export default function Home() {
             allSlides: slides,
             intent: answerOnly ? 'ask' : 'edit',
             templateKnowledge: mergeTemplatesKnowledge(templates) || null,
-            knowledgeContext: buildKnowledgeContext(knowledgeLayers, decisions, activeSlideId, {
-              instruction: lastUserMessage,
-              slideText: activeSlideText(slides, activeSlideId),
-              // Uploaded reference docs are the source of truth — keep a useful
-              // chunk (incl. table structure) rather than cutting to one sentence.
-              documentCharCap: 16000,
-              documentTotalCap: 32000,
-            }),
+            knowledgeContext: mergeKnowledgeContexts(layerCtx, graphCtx),
             annotatedImage: annotatedImage || null,
             attachedImages,
             mediaManifest: mediaManifest(collectAllAssets()),
@@ -1375,7 +1393,7 @@ export default function Home() {
         setIsLoading(false)
       }
     },
-    [slides, activeSlideId, selectedSlideIds, selectedElementIds, knowledgeLayers, decisions, templates, presentationId, designSystem, collectAllAssets]
+    [slides, activeSlideId, selectedSlideIds, selectedElementIds, knowledgeLayers, decisions, templates, presentationId, presentationSummaries, designSystem, collectAllAssets]
   )
 
   const handleSlideSelect = useCallback(
@@ -2370,7 +2388,11 @@ export default function Home() {
             `or otherwise omits explicit slide numbers, target EXACTLY these slide IDs — nothing else.\n`
           : `Active slide: ${describeId(activeSlideId)} (no multi-selection).\n`
 
-      const knowledgeContext = buildKnowledgeContext(knowledgeLayers, decisions, activeSlideId, {
+      const agentBranchId =
+        activeBranchIdRef.current ??
+        presentationSummaries.find(p => p.id === presentationId)?.branchId ??
+        null
+      const layerCtx = buildKnowledgeContext(knowledgeLayers, decisions, activeSlideId, {
         instruction,
         slideText: activeSlideText(slidesRef.current, activeSlideId),
         // The agent builds decks FROM the uploaded source docs, so feed essentially
@@ -2380,6 +2402,13 @@ export default function Home() {
         documentCharCap: 200000,
         documentTotalCap: 240000,
       })
+      const graphCtx = await fetchGraphKnowledgeContext({
+        branchId: agentBranchId,
+        presentationId,
+        instruction,
+        charBudget: 16000,
+      })
+      const knowledgeContext = mergeKnowledgeContexts(layerCtx, graphCtx)
       const templateKnowledge = mergeTemplatesKnowledge(templates)
       const mediaCtx = buildMediaContext(mediaManifest(collectAllAssets()))
 
@@ -2884,6 +2913,8 @@ export default function Home() {
       recordAgentRun,
       conversationHistory,
       canEdit,
+      presentationId,
+      presentationSummaries,
     ]
   )
 
@@ -3334,6 +3365,20 @@ Return ONE complete "patch" (changes relative to the ORIGINAL slide data provide
         const cleanText = `Adjust preview: ${text}`
         setDisplay(prev => [...prev, { role: 'user', text: cleanText }])
 
+        const refineBranchId =
+          activeBranchIdRef.current ??
+          presentationSummaries.find(p => p.id === presentationId)?.branchId ??
+          null
+        const refineLayerCtx = buildKnowledgeContext(knowledgeLayers, decisions, activeSlideId, {
+          instruction: text,
+          slideText: activeSlideText(slides, activeSlideId),
+        })
+        const refineGraphCtx = await fetchGraphKnowledgeContext({
+          branchId: refineBranchId,
+          presentationId,
+          instruction: text,
+          charBudget: 6000,
+        })
         const res = await fetch('/api/edit', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -3345,10 +3390,7 @@ Return ONE complete "patch" (changes relative to the ORIGINAL slide data provide
             scopeMode: refineScopeMode,
             allSlides: slides,
             templateKnowledge: mergeTemplatesKnowledge(templates) || null,
-            knowledgeContext: buildKnowledgeContext(knowledgeLayers, decisions, activeSlideId, {
-              instruction: text,
-              slideText: activeSlideText(slides, activeSlideId),
-            }),
+            knowledgeContext: mergeKnowledgeContexts(refineLayerCtx, refineGraphCtx),
             annotatedImage: null,
             attachedImages: [],
             mediaManifest: mediaManifest(collectAllAssets()),
@@ -3452,6 +3494,8 @@ Return ONE complete "patch" (changes relative to the ORIGINAL slide data provide
       activeSlideId,
       designSystem,
       collectAllAssets,
+      presentationId,
+      presentationSummaries,
     ]
   )
 
@@ -3619,6 +3663,23 @@ Return ONE complete "patch" (changes relative to the ORIGINAL slide data provide
     [loadBranchKnowledge, dsId]
   )
 
+  const knowledgeBranchId =
+    activeBranchId ??
+    presentationSummaries.find(p => p.id === presentationId)?.branchId ??
+    null
+
+  const knowledgeHubName =
+    branches.find(b => b.id === knowledgeBranchId)?.name ?? null
+
+  const openKnowledgePanel = useCallback(async () => {
+    const bid =
+      activeBranchIdRef.current ??
+      presentationSummaries.find(p => p.id === presentationId)?.branchId ??
+      null
+    if (bid) await loadBranchKnowledge(bid)
+    setShowKnowledge(true)
+  }, [loadBranchKnowledge, presentationSummaries, presentationId])
+
   // Knowledge + Design System modals are shared between the portfolio (Knowledge
   // Hub) view and the deck editor, so they can be opened from either place.
   const knowledgeAndDesignModals = (
@@ -3628,6 +3689,12 @@ Return ONE complete "patch" (changes relative to the ORIGINAL slide data provide
           layers={knowledgeLayers}
           onChange={handleKnowledgeChange}
           onClose={() => setShowKnowledge(false)}
+          branchId={knowledgeBranchId}
+          hubName={knowledgeHubName}
+          presentationId={presentationId}
+          presentationName={presentationSummaries.find(p => p.id === presentationId)?.name ?? null}
+          readOnly={!canEdit}
+          initialTab={presentationId ? 'graph' : 'sources'}
         />
       )}
       {showDesignSystem && (
@@ -3943,8 +4010,8 @@ Return ONE complete "patch" (changes relative to the ORIGINAL slide data provide
             <span className="text-[10px] font-mono text-[#64748B]">{dsFiles.length}</span>
           </button>
           <button
-            onClick={() => setShowKnowledge(true)}
-            title={`Knowledge layers: ${knowledgeLayers.filter(l => l.enabled).length} active`}
+            onClick={() => void openKnowledgePanel()}
+            title={`Knowledge hub: documents, graph, and ${knowledgeLayers.filter(l => l.enabled).length} text layers`}
             className="flex items-center gap-1 p-1.5 text-[#94a3b8] rounded hover:bg-[#1e3a5f] hover:text-white transition-colors"
           >
             <Brain className="w-4 h-4" />

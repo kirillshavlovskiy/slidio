@@ -1,12 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { auth } from '@/lib/auth'
 import { prisma } from '@/lib/prisma'
-import {
-  accessibleHubIds,
-  canAccessKnowledgeLayer,
-  getHubRole,
-  roleAtLeast,
-} from '@/lib/hubAccess'
+import { accessibleHubIds, canAccessKnowledgeLayer, getHubRole, roleAtLeast } from '@/lib/hubAccess'
+import { clampTextLayerContent, KB_TEXT_LAYER_TYPES, TEXT_LAYER_MAX_CHARS } from '@/lib/knowledge'
 
 export async function GET(req: NextRequest) {
   const session = await auth()
@@ -57,15 +53,29 @@ export async function POST(req: NextRequest) {
     }
   }
 
+  const layerSource = source || 'manual'
+  if (
+    layerSource === 'manual' &&
+    typeof type === 'string' &&
+    KB_TEXT_LAYER_TYPES.includes(type) &&
+    typeof content === 'string' &&
+    content.length > TEXT_LAYER_MAX_CHARS
+  ) {
+    return NextResponse.json(
+      { error: `KB text layers are limited to ${TEXT_LAYER_MAX_CHARS} characters (~300 tokens). Use Documents for full files.` },
+      { status: 400 }
+    )
+  }
+
   const layer = await prisma.knowledgeLayer.create({
     data: {
       userId: session.user.id,
       branchId: (branchId as string) ?? null,
       type,
       name,
-      content,
+      content: layerSource === 'document' ? content : clampTextLayerContent(String(content ?? '')),
       enabled: enabled ?? true,
-      source: source || 'manual',
+      source: layerSource,
     },
   })
   return NextResponse.json({
@@ -89,12 +99,34 @@ export async function PATCH(req: NextRequest) {
     return NextResponse.json({ error: 'Read-only: you are a viewer on this hub' }, { status: 403 })
   }
 
+  const nextType = type !== undefined ? type : existing.type
+  const nextSource = source !== undefined ? source : existing.source
+  const nextContent = content !== undefined ? content : existing.content
+  if (
+    nextSource !== 'document' &&
+    KB_TEXT_LAYER_TYPES.includes(nextType as typeof KB_TEXT_LAYER_TYPES[number]) &&
+    typeof nextContent === 'string' &&
+    nextContent.length > TEXT_LAYER_MAX_CHARS
+  ) {
+    return NextResponse.json(
+      { error: `KB text layers are limited to ${TEXT_LAYER_MAX_CHARS} characters (~300 tokens).` },
+      { status: 400 }
+    )
+  }
+
   const layer = await prisma.knowledgeLayer.update({
     where: { id },
     data: {
       ...(type !== undefined ? { type } : {}),
       ...(name !== undefined ? { name } : {}),
-      ...(content !== undefined ? { content } : {}),
+      ...(content !== undefined
+        ? {
+            content:
+              (source !== undefined ? source : existing.source) === 'document'
+                ? content
+                : clampTextLayerContent(String(content)),
+          }
+        : {}),
       ...(enabled !== undefined ? { enabled } : {}),
       ...(source !== undefined ? { source } : {}),
       updatedAt: new Date(),

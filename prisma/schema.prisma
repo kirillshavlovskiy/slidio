@@ -72,6 +72,7 @@ model KnowledgeBranch {
   knowledgeLayers KnowledgeLayer[]
   members         HubMember[]
   invites         HubInvite[]
+  sourceDocuments SourceDocument[]
 }
 
 // Collaboration: who can access a Knowledge Hub and at what level.
@@ -187,4 +188,94 @@ model DecisionRecord {
   snapshotBefore     String? // JSON string
   actorId            String? // which user made this decision (audit trail)
   createdAt          DateTime     @default(now())
+}
+
+// ── Knowledge graph (Phase 0–1) ───────────────────────────────────────────────
+
+model SourceDocument {
+  id                   String           @id @default(cuid())
+  branchId             String
+  branch               KnowledgeBranch  @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  title                String
+  fileType             String
+  uploadedById         String
+  blobUrl              String
+  extractedTextBlobUrl String?
+  status               String           @default("registered") // registered | parsed | extracted | failed
+  error                String?
+  createdAt            DateTime         @default(now())
+  updatedAt            DateTime         @updatedAt
+  chunks               DocumentChunk[]
+  graphNodes           GraphNode[]
+  graphVersions        GraphVersion[]
+
+  @@index([branchId])
+}
+
+model DocumentChunk {
+  id               String         @id @default(cuid())
+  sourceDocumentId String
+  sourceDocument   SourceDocument @relation(fields: [sourceDocumentId], references: [id], onDelete: Cascade)
+  sectionTitle     String?
+  text             String
+  page             Int?
+  charStart        Int?
+  charEnd          Int?
+  ordinal          Int
+
+  @@index([sourceDocumentId])
+}
+
+model GraphNode {
+  id               String          @id @default(cuid())
+  branchId         String
+  type             String // SourceDocument | DocumentChunk | Topic | Claim | Metric
+  name             String
+  description      String?
+  status           String          @default("candidate") // candidate | approved | rejected
+  confidence       Float           @default(0.5)
+  properties       String          @default("{}") // JSON
+  createdBy        String          @default("ai_agent") // ai_agent | user
+  sourceDocumentId String?
+  sourceDocument   SourceDocument? @relation(fields: [sourceDocumentId], references: [id], onDelete: Cascade)
+  presentationId   String?
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
+  edgesFrom        GraphEdge[]     @relation("EdgeFrom")
+  edgesTo          GraphEdge[]     @relation("EdgeTo")
+
+  @@index([branchId, type, status])
+  @@index([sourceDocumentId])
+  @@index([presentationId])
+}
+
+model GraphEdge {
+  id           String    @id @default(cuid())
+  branchId     String
+  fromNodeId   String
+  fromNode     GraphNode @relation("EdgeFrom", fields: [fromNodeId], references: [id], onDelete: Cascade)
+  toNodeId     String
+  toNode       GraphNode @relation("EdgeTo", fields: [toNodeId], references: [id], onDelete: Cascade)
+  type         String // SUPPORTED_BY | ABOUT | PART_OF
+  confidence   Float     @default(0.5)
+  evidenceText String?
+  properties   String    @default("{}") // JSON
+  createdAt    DateTime  @default(now())
+
+  @@index([branchId])
+  @@index([fromNodeId, toNodeId, type])
+}
+
+model GraphVersion {
+  id               String          @id @default(cuid())
+  branchId         String
+  sourceDocumentId String?
+  sourceDocument   SourceDocument? @relation(fields: [sourceDocumentId], references: [id], onDelete: SetNull)
+  presentationId   String?
+  summary          String
+  nodeCount        Int
+  edgeCount        Int
+  createdAt        DateTime        @default(now())
+
+  @@index([branchId])
 }

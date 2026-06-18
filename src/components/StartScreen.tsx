@@ -559,7 +559,7 @@ export default function StartScreen({
                       {onOpenKnowledge && (
                         <button
                           onClick={() => onOpenKnowledge(branch.id)}
-                          title="Open the Knowledge layers for this hub"
+                          title="Documents, knowledge graph, and text layers for this hub"
                           className="flex items-center gap-1 p-1.5 text-[#94a3b8] rounded hover:bg-[#1e3a5f] hover:text-white transition-colors"
                         >
                           <Brain className="w-4 h-4" />

@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from 'next/server'
 import { auth } from '@/lib/auth'
 import { prisma } from '@/lib/prisma'
 import { canAccessPresentation } from '@/lib/hubAccess'
+import { syncDeckProjection } from '@/lib/graph/deckMap'
+import type { SlideData } from '@/lib/types'
 
 export async function POST(req: NextRequest) {
   const session = await auth()
@@ -46,6 +48,26 @@ export async function POST(req: NextRequest) {
         create: createData,
       })
     : await prisma.slideVersion.create({ data: createData })
+
+  // Phase 2: sync deck structure into graph (no LLM — mapping is explicit)
+  try {
+    const pres = await prisma.presentation.findUnique({
+      where: { id: presentationId },
+      select: { branchId: true, name: true, slides: true },
+    })
+    if (pres?.branchId) {
+      const deckSlides = (Array.isArray(slides) ? slides : JSON.parse(pres.slides || '[]')) as SlideData[]
+      await syncDeckProjection({
+        branchId: pres.branchId,
+        presentationId,
+        presentationName: pres.name,
+        slides: deckSlides,
+      })
+    }
+  } catch (err) {
+    console.warn('[versions] deck graph projection skipped:', err)
+  }
+
   return NextResponse.json({ id: version.id, createdAt: version.createdAt })
 }
 

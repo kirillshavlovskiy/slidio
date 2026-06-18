@@ -6,7 +6,16 @@
 
 import type { KnowledgeLayer, KnowledgeLayerType, DecisionRecord, SlideData } from './types'
 
-// ── Relevance retrieval helpers ───────────────────────────────────────────────
+/** Max chars per KB text layer (~300 tokens). Not used for document/graph pipeline. */
+export const TEXT_LAYER_MAX_CHARS = 1200
+
+/** Layer types for short indirect context (audience, terms, period, org facts). */
+export const KB_TEXT_LAYER_TYPES: KnowledgeLayerType[] = ['terminology', 'stakeholder', 'custom']
+
+export function clampTextLayerContent(content: string): string {
+  if (content.length <= TEXT_LAYER_MAX_CHARS) return content
+  return content.slice(0, TEXT_LAYER_MAX_CHARS)
+}
 
 // Small stopword list so scoring keys on meaningful terms, not glue words.
 const STOPWORDS = new Set(
@@ -276,6 +285,42 @@ Avoid: Technical jargon without definition, overly complex formulas on single sl
 }
 
 // ── Version diff utility ──────────────────────────────────────────────────────
+
+/** Merge flat KB layers context with graph-extracted knowledge for agent prompts. */
+export function mergeKnowledgeContexts(
+  layersContext: string,
+  graphContext: string
+): string {
+  const a = layersContext.trim()
+  const b = graphContext.trim()
+  if (!a) return b
+  if (!b) return a
+  return `${a}\n\n${b}`
+}
+
+/** Fetch structured hub graph context (claims, metrics, deck links) for the agent. */
+export async function fetchGraphKnowledgeContext(opts: {
+  branchId: string | null | undefined
+  presentationId?: string | null
+  instruction?: string
+  charBudget?: number
+}): Promise<string> {
+  if (!opts.branchId) return ''
+  try {
+    const params = new URLSearchParams({
+      branchId: opts.branchId,
+      charBudget: String(opts.charBudget ?? 8000),
+    })
+    if (opts.presentationId) params.set('presentationId', opts.presentationId)
+    if (opts.instruction) params.set('instruction', opts.instruction.slice(0, 2000))
+    const res = await fetch(`/api/graph/context?${params}`)
+    if (!res.ok) return ''
+    const data = (await res.json()) as { context?: string }
+    return data.context?.trim() ?? ''
+  } catch {
+    return ''
+  }
+}
 
 export function diffSlideIds(before: SlideData[], after: SlideData[]): string[] {
   const changed: string[] = []

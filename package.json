@@ -10,6 +10,7 @@
     "db:push": "NODE_OPTIONS=--experimental-require-module prisma db push",
     "db:push:turso": "node scripts/push-turso.mjs",
     "db:migrate:collaboration": "node scripts/migrate-collaboration.mjs",
+    "db:migrate:graph": "node scripts/migrate-graph.mjs",
     "users": "node scripts/list-users.mjs"
   },
   "engines": {
@@ -30,6 +31,7 @@
     "@types/react": "^18",
     "@types/react-dom": "^18",
     "@vercel/analytics": "^2.0.1",
+    "@vercel/blob": "^2.4.0",
     "autoprefixer": "^10.4.19",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",

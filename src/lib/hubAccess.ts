@@ -176,3 +176,15 @@ export async function canAccessKnowledgeLayer(
   if (!role) return { ok: false, role: null, readOnly: true }
   return { ok: true, role, readOnly: role === 'viewer' }
 }
+
+/** Hub-scoped graph access — viewer can read; editor+ can write. */
+export async function canAccessGraph(
+  userId: string,
+  branchId: string,
+  minRole: HubRole = 'viewer'
+): Promise<{ ok: boolean; role: HubRole | null; readOnly: boolean }> {
+  const role = await getHubRole(userId, branchId)
+  if (!role) return { ok: false, role: null, readOnly: true }
+  const ok = roleAtLeast(role, minRole)
+  return { ok, role, readOnly: role === 'viewer' }
+}
