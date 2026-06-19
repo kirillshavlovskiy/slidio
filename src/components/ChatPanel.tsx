@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react'
 import {
   ImagePlus,
   RotateCcw,
+  RefreshCw,
   X,
   Bot,
   Search,
@@ -31,6 +32,13 @@ import {
   SlideData,
 } from '@/lib/types'
 import { applyChangesToSlides, getDeletedSlideIds } from '@/lib/preview'
+import {
+  buildStepLimitError,
+  buildTimeoutError,
+  formatAgentLimitError,
+  parseAgentLimitError,
+  type AgentLimitReached,
+} from '@/lib/agent/limitError'
 import SlideCanvas from '@/components/SlideCanvas'
 
 export type ChatMode = 'auto' | 'single' | 'agent'
@@ -45,9 +53,10 @@ export interface DisplayMessage {
   patchStatus?: 'pending' | 'approved' | 'declined'
   // Live agent-loop step (inspect / render / apply / verify) for the tool-using editor.
   agentStep?: {
-    kind: 'read' | 'render' | 'apply' | 'note' | 'thinking' | 'done' | 'error'
+    kind: 'read' | 'render' | 'apply' | 'note' | 'thinking' | 'done' | 'error' | 'plan' | 'review'
     label: string
     image?: string
+    limitReached?: AgentLimitReached
   }
   // Cursor-style checkpoint: deck snapshot taken right before this user message
   // was sent, so we can revert everything this message (and later) changed.
@@ -74,12 +83,16 @@ interface Props {
   onSubmitAnswers?: (text: string) => void
   // Restore the deck to this message's checkpoint and load its text for editing.
   onRevert?: (index: number) => void
+  // Retruncate chat and resend this message to the AI (works even without a checkpoint).
+  onResend?: (index: number) => void
   // When set (nonce changes), prefill the input with this text (used by revert/edit).
   draft?: { text: string; nonce: number }
   // ── Inline proposal widget ──
   slides?: SlideData[]                 // current deck, to render the proposed thumbnail
   pendingChanges?: Change[] | null     // the live (unresolved) proposal
   pendingSummary?: string              // live proposal summary (kept fresh after refine)
+  amendmentSource?: 'single' | 'agent' | null
+  amendmentCheckpoint?: SlideData[] | null
   onApproveProposal?: () => void
   onDeclineProposal?: () => void
   onOpenProposal?: () => void          // open the full preview overlay
@@ -144,10 +157,13 @@ export default function ChatPanel({
   onPickOption,
   onSubmitAnswers,
   onRevert,
+  onResend,
   draft,
   slides,
   pendingChanges,
   pendingSummary,
+  amendmentSource,
+  amendmentCheckpoint,
   onApproveProposal,
   onDeclineProposal,
   onOpenProposal,
@@ -304,11 +320,26 @@ export default function ChatPanel({
                     imageUrl={msg.imageUrl}
                     imageUrls={msg.imageUrls}
                     onRevert={
-                      msg.checkpoint && onRevert && !isLoading ? () => onRevert(i) : undefined
+                      msg.checkpoint && onRevert && canEdit ? () => onRevert(i) : undefined
+                    }
+                    onResend={
+                      msg.text?.trim() && onResend && canEdit ? () => onResend(i) : undefined
                     }
                   />
                 ) : msg.agentStep ? (
-                  <AgentStepBubble step={msg.agentStep} />
+                  <AgentStepBubble
+                    step={msg.agentStep}
+                    canEdit={canEdit}
+                    onContinue={() => onSend('continue', [], 'auto')}
+                    onNewRequest={() => {
+                      setText('')
+                      const el = inputRef.current
+                      if (el) {
+                        el.focus()
+                        el.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+                      }
+                    }}
+                  />
                 ) : msg.response ? (
                   <AssistantBubble
                     response={msg.response}
@@ -523,7 +554,29 @@ export default function ChatPanel({
 
 // ── Sub-components ─────────────────────────────────────────────────────────────
 
-function AgentStepBubble({ step }: { step: NonNullable<DisplayMessage['agentStep']> }) {
+function AgentStepBubble({
+  step,
+  canEdit,
+  onContinue,
+  onNewRequest,
+}: {
+  step: NonNullable<DisplayMessage['agentStep']>
+  canEdit?: boolean
+  onContinue?: () => void
+  onNewRequest?: () => void
+}) {
+  const limitReached = step.limitReached ?? parseAgentLimitError(step.label)
+  if (limitReached && step.kind === 'error') {
+    return (
+      <AgentLimitReachedBox
+        info={limitReached}
+        canEdit={canEdit}
+        onContinue={onContinue}
+        onNewRequest={onNewRequest}
+      />
+    )
+  }
+
   const meta = {
     read: { Icon: Search, color: '#60a5fa', tag: 'INSPECT' },
     render: { Icon: Camera, color: '#2dd4bf', tag: 'RENDER' },
@@ -532,6 +585,8 @@ function AgentStepBubble({ step }: { step: NonNullable<DisplayMessage['agentStep
     thinking: { Icon: Brain, color: '#818cf8', tag: 'THINKING' },
     done: { Icon: Check, color: '#34d399', tag: 'DONE' },
     error: { Icon: AlertTriangle, color: '#f87171', tag: 'ERROR' },
+    plan: { Icon: Brain, color: '#fbbf24', tag: 'PLAN' },
+    review: { Icon: AlertTriangle, color: '#fb923c', tag: 'REVIEW' },
   }[step.kind]
   const { Icon, color, tag } = meta
   return (
@@ -561,28 +616,148 @@ function AgentStepBubble({ step }: { step: NonNullable<DisplayMessage['agentStep
   )
 }
 
+function AgentLimitReachedBox({
+  info,
+  canEdit,
+  onContinue,
+  onNewRequest,
+}: {
+  info: AgentLimitReached
+  canEdit?: boolean
+  onContinue?: () => void
+  onNewRequest?: () => void
+}) {
+  const title =
+    info.type === 'step_limit'
+      ? `${info.stepLimit ?? '?'} step limit — paused`
+      : info.type === 'apply_limit'
+        ? `${info.applyLimit ?? '?'} edit limit — paused`
+        : info.type === 'oscillation'
+          ? 'Edit loop detected — paused'
+          : info.type === 'no_tool_call'
+            ? 'Agent stalled — paused'
+            : info.type === 'spacing_limit'
+              ? 'Spacing/balance limit — paused'
+              : info.type === 'overloaded'
+                ? 'API overloaded — paused'
+                : info.type === 'rate_limit'
+                  ? 'Rate limit — paused'
+                  : 'Step timed out'
+  const intro =
+    info.type === 'step_limit'
+      ? `The agent hit the ${info.stepLimit ?? '?'} step limit. Context is saved — Continue resumes from the exact step.`
+      : info.type === 'apply_limit'
+        ? `This segment hit the ${info.applyLimit ?? '?'} apply_changes limit. Context is saved — Continue adds more batches without restarting.`
+        : info.type === 'oscillation'
+          ? 'The agent repeated an identical edit. Context is saved — Continue resumes the pipeline.'
+          : info.type === 'no_tool_call'
+            ? 'The agent stopped without calling a tool. Context is saved — Continue resumes.'
+            : info.type === 'spacing_limit'
+              ? 'Spacing/balance review hit its segment limit with issues still open. Context is saved — Continue resumes fixes.'
+              : info.type === 'overloaded'
+                ? 'Anthropic is temporarily overloaded. Context is saved — wait ~30s, then Continue resumes from the exact step.'
+                : info.type === 'rate_limit'
+                  ? 'Anthropic rate limit hit. Context is saved — wait ~60s, then Continue resumes from the exact step.'
+                  : 'This agent step took too long (server limit). Earlier steps in the run are kept.'
+
+  const totalModified = info.modifiedSlideIds.length + (info.modifiedOverflow ?? 0)
+  const slideList = info.modifiedSlideIds.join(', ')
+  const slideSuffix = info.modifiedOverflow ? ` +${info.modifiedOverflow} more` : ''
+
+  const footer = info.hasChanges
+    ? 'Changes are live on the canvas — use Accept / Decline in the bar above.'
+    : info.type === 'timeout'
+      ? 'No changes were applied. Narrow scope or retry with fewer slides.'
+      : 'No slides were modified in this run.'
+
+  return (
+    <div className="flex justify-start">
+      <div className="max-w-[90%] w-full rounded-lg border border-amber-500/40 bg-[#1a1408] px-3 py-2.5">
+        <div className="flex items-start gap-2">
+          <AlertTriangle className="w-4 h-4 flex-shrink-0 text-amber-400 mt-0.5" />
+          <div className="min-w-0 flex-1">
+            <p className="text-[10px] font-bold tracking-wider text-amber-400 uppercase">
+              {title}
+            </p>
+            <p className="mt-1 text-xs text-[#e2e8f0] leading-relaxed">{intro}</p>
+            <ul className="mt-2 space-y-1 text-[11px] text-[#cbd5e1]">
+              {info.applyBatches ? (
+                <li>· {info.applyBatches} apply batch(es) completed</li>
+              ) : null}
+              {totalModified > 0 ? (
+                <li>
+                  · Slides modified ({totalModified}): {slideList}
+                  {slideSuffix}
+                </li>
+              ) : (
+                <li>· No slides were modified before the stop</li>
+              )}
+              {info.lastAction ? <li>· Last action: {info.lastAction}</li> : null}
+            </ul>
+            <p className="mt-2 text-[11px] text-[#94a3b8] leading-relaxed">{footer}</p>
+            {canEdit && (
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={onContinue}
+                  className="px-3 py-1.5 rounded-md text-xs font-semibold bg-[#60a5fa] text-[#0d1b2a]
+                             hover:bg-[#93c5fd] transition-colors"
+                >
+                  Continue
+                </button>
+                <button
+                  type="button"
+                  onClick={onNewRequest}
+                  className="px-3 py-1.5 rounded-md text-xs font-semibold border border-[#334155] text-[#cbd5e1]
+                             hover:border-[#60a5fa] hover:text-[#60a5fa] transition-colors"
+                >
+                  New request
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function UserBubble({
   text,
   imageUrl,
   imageUrls,
   onRevert,
+  onResend,
 }: {
   text: string
   imageUrl?: string
   imageUrls?: string[]
   onRevert?: () => void
+  onResend?: () => void
 }) {
   return (
     <div className="flex justify-end items-start gap-1.5 group">
-      {onRevert && (
-        <button
-          onClick={onRevert}
-          title="Revert deck to before this message and edit it"
-          className="mt-1 flex-shrink-0 p-1 rounded text-[#475569] opacity-0 group-hover:opacity-100
-                     hover:text-[#60a5fa] hover:bg-[#1e3a5f] transition-all"
-        >
-          <RotateCcw className="w-3.5 h-3.5" />
-        </button>
+      {(onResend || onRevert) && (
+        <div className="mt-1 flex flex-col gap-0.5 flex-shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
+          {onResend && (
+            <button
+              onClick={onResend}
+              title="Resend this message to the AI"
+              className="p-1 rounded text-[#475569] hover:text-[#60a5fa] hover:bg-[#1e3a5f] transition-all"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+            </button>
+          )}
+          {onRevert && (
+            <button
+              onClick={onRevert}
+              title="Revert deck to before this message and edit it"
+              className="p-1 rounded text-[#475569] hover:text-[#60a5fa] hover:bg-[#1e3a5f] transition-all"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+            </button>
+          )}
+        </div>
       )}
       <div className="max-w-[85%] bg-[#1e3a5f] rounded-lg rounded-tr-none px-3 py-2">
         <p className="text-xs font-bold text-[#60a5fa] mb-1">YOU</p>
@@ -867,6 +1042,7 @@ function ProposalWidget({
   slides,
   changes,
   summary,
+  headline = 'AI ✦ PROPOSED CHANGES',
   onApprove,
   onDecline,
   onOpen,
@@ -874,6 +1050,7 @@ function ProposalWidget({
   slides: SlideData[]
   changes: Change[]
   summary: string
+  headline?: string
   onApprove?: () => void
   onDecline?: () => void
   onOpen?: () => void
@@ -894,7 +1071,7 @@ function ProposalWidget({
   return (
     <div className="flex justify-start">
       <div className="max-w-[92%] w-full bg-[#0f2a1a] border border-[#16a34a] rounded-lg rounded-tl-none p-2.5">
-        <p className="text-xs font-bold text-[#4ade80] mb-1.5">AI ✦ PROPOSED CHANGES</p>
+        <p className="text-xs font-bold text-[#4ade80] mb-1.5">{headline}</p>
         <p className="text-sm text-white mb-2 leading-snug">{summary}</p>
 
         {/* Clickable proposed-slide preview */}

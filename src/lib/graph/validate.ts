@@ -57,11 +57,14 @@ export function validateEdgeCreation(
   switch (edgeType) {
     case 'SUPPORTED_BY':
       return (
-        (fromType === 'Claim' || fromType === 'Metric') && toType === 'DocumentChunk'
+        (fromType === 'Claim' || fromType === 'Metric' || fromType === 'Topic') &&
+        toType === 'DocumentChunk'
       ) || (fromType === 'SlideElement' && toType === 'DocumentChunk')
     case 'ABOUT':
       return (
         (fromType === 'Claim' && toType === 'Topic') ||
+        (fromType === 'Metric' && toType === 'Topic') ||
+        (fromType === 'Topic' && toType === 'Topic') ||
         (fromType === 'Slide' && toType === 'Topic')
       )
     case 'PART_OF':

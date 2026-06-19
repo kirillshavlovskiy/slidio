@@ -7,6 +7,13 @@ import { filterExtractions } from './validate'
 import { createGraphNode, deleteGraphForSource } from './nodes'
 import { createGraphEdge } from './edges'
 import { snapshotGraphVersion } from './version'
+import {
+  ensureSourceGraphConnectivity,
+  getOrCreateHubTopic,
+  linkKnowledgeToTopic,
+  linkSubtopicToHub,
+  linkTopicToChunk,
+} from './connectivity'
 
 export type IngestPrepareResult = {
   chunkCount: number
@@ -131,6 +138,12 @@ export async function prepareSourceIngest(sourceId: string): Promise<IngestPrepa
     properties: { fileType: fresh.fileType, blobUrl: fresh.blobUrl },
   })
 
+  await getOrCreateHubTopic({
+    branchId: fresh.branchId,
+    sourceDocumentId: fresh.id,
+    sourceTitle: fresh.title,
+  })
+
   let structureNodeCount = 1
   for (let ordinal = 0; ordinal < segments.length; ordinal++) {
     const seg = segments[ordinal]
@@ -192,8 +205,8 @@ export async function extractSourceBatch(
   batchIndex: number,
   hubHints?: string
 ): Promise<IngestBatchResult> {
-  const fresh = await prisma.sourceDocument.findUnique({ where: { id: sourceId } })
-  if (!fresh) throw new Error('Source not found')
+  const source = await prisma.sourceDocument.findUnique({ where: { id: sourceId } })
+  if (!source) throw new Error('Source not found')
 
   const chunks = await prisma.documentChunk.findMany({
     where: { sourceDocumentId: sourceId },
@@ -207,7 +220,15 @@ export async function extractSourceBatch(
 
   const batchStart = batchIndex * BATCH_SIZE
   const batchChunks = chunks.slice(batchStart, batchStart + BATCH_SIZE)
-  const topicNameToId = await topicNameMap(fresh.branchId, fresh.id)
+  const topicNameToId = await topicNameMap(source.branchId, source.id)
+  const hubTopicId = await getOrCreateHubTopic({
+    branchId: source.branchId,
+    sourceDocumentId: source.id,
+    sourceTitle: source.title,
+  })
+  const branchId = source.branchId
+  const sourceDocId = source.id
+  const sourceTitle = source.title
 
   let batchResults: Awaited<ReturnType<typeof extractFromChunkBatch>>
   try {
@@ -226,42 +247,89 @@ export async function extractSourceBatch(
 
   let itemsAdded = 0
 
+  async function ensureTopicId(name: string, confidence: number, chunkNodeId: string): Promise<string> {
+    const key = name.toLowerCase()
+    let topicId = topicNameToId.get(key)
+    if (!topicId) {
+      const topicNode = await createGraphNode({
+        branchId,
+        type: 'Topic',
+        name,
+        status: 'candidate',
+        confidence,
+        sourceDocumentId: sourceDocId,
+      })
+      topicId = topicNode.id
+      topicNameToId.set(key, topicId)
+      itemsAdded++
+      await linkTopicToChunk({
+        branchId,
+        topicId,
+        chunkNodeId,
+        confidence,
+      })
+      await linkSubtopicToHub({
+        branchId,
+        topicId,
+        hubTopicId,
+        confidence,
+      })
+    }
+    return topicId
+  }
+
   for (let j = 0; j < batchChunks.length; j++) {
     const chunk = batchChunks[j]
-    const chunkNodeId = await chunkNodeIdFor(fresh.id, chunk.id)
+    const chunkNodeId = await chunkNodeIdFor(sourceDocId, chunk.id)
     const items = filterExtractions(batchResults[j] ?? [], chunk.text)
+    const sectionTopic = chunk.sectionTitle?.trim() || sourceTitle
 
     for (const item of items) {
       if (item.type === 'Topic') {
         const key = item.name.toLowerCase()
-        if (!topicNameToId.has(key)) {
+        let topicId = topicNameToId.get(key)
+        if (!topicId) {
           const topicNode = await createGraphNode({
-            branchId: fresh.branchId,
+            branchId,
             type: 'Topic',
             name: item.name,
             description: item.description ?? null,
             confidence: item.confidence,
-            sourceDocumentId: fresh.id,
+            sourceDocumentId: sourceDocId,
           })
-          topicNameToId.set(key, topicNode.id)
+          topicId = topicNode.id
+          topicNameToId.set(key, topicId)
           itemsAdded++
         }
+        await linkTopicToChunk({
+          branchId,
+          topicId,
+          chunkNodeId,
+          confidence: item.confidence,
+          evidenceText: item.evidenceText ?? item.description ?? null,
+        })
+        await linkSubtopicToHub({
+          branchId,
+          topicId,
+          hubTopicId,
+          confidence: item.confidence,
+        })
         continue
       }
 
       const node = await createGraphNode({
-        branchId: fresh.branchId,
+        branchId,
         type: item.type,
         name: item.name,
         description: item.description ?? null,
         confidence: item.confidence,
-        sourceDocumentId: fresh.id,
+        sourceDocumentId: sourceDocId,
         properties: item.evidenceText ? { evidenceText: item.evidenceText } : {},
       })
       itemsAdded++
 
       await createGraphEdge({
-        branchId: fresh.branchId,
+        branchId,
         fromNodeId: node.id,
         toNodeId: chunkNodeId,
         type: 'SUPPORTED_BY',
@@ -269,28 +337,13 @@ export async function extractSourceBatch(
         evidenceText: item.evidenceText ?? item.description ?? null,
       })
 
-      const topicLabel = item.topicName?.trim()
-      if (topicLabel && item.type === 'Claim') {
-        const key = topicLabel.toLowerCase()
-        let topicId = topicNameToId.get(key)
-        if (!topicId) {
-          const topicNode = await createGraphNode({
-            branchId: fresh.branchId,
-            type: 'Topic',
-            name: topicLabel,
-            status: 'candidate',
-            confidence: item.confidence,
-            sourceDocumentId: fresh.id,
-          })
-          topicId = topicNode.id
-          topicNameToId.set(key, topicId)
-          itemsAdded++
-        }
-        await createGraphEdge({
-          branchId: fresh.branchId,
-          fromNodeId: node.id,
-          toNodeId: topicId,
-          type: 'ABOUT',
+      const topicLabel = (item.topicName?.trim() || sectionTopic).trim()
+      if (topicLabel) {
+        const topicId = await ensureTopicId(topicLabel, item.confidence, chunkNodeId)
+        await linkKnowledgeToTopic({
+          branchId,
+          nodeId: node.id,
+          topicId,
           confidence: item.confidence,
         })
       }
@@ -298,17 +351,18 @@ export async function extractSourceBatch(
   }
 
   const done = batchIndex >= totalBatches - 1
-  const kCount = await knowledgeNodeCount(fresh.id)
+  const kCount = await knowledgeNodeCount(sourceDocId)
 
   if (done) {
+    await ensureSourceGraphConnectivity(sourceDocId)
     await prisma.sourceDocument.update({
       where: { id: sourceId },
       data: { status: 'extracted', error: null, updatedAt: new Date() },
     })
     await snapshotGraphVersion({
-      branchId: fresh.branchId,
-      sourceDocumentId: fresh.id,
-      summary: `Ingested ${chunks.length} chunks from ${fresh.title}`,
+      branchId,
+      sourceDocumentId: sourceDocId,
+      summary: `Ingested ${chunks.length} chunks from ${sourceTitle}`,
     })
   } else {
     await prisma.sourceDocument.update({

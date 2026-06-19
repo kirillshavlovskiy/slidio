@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   Brain, Palette, BookOpen, Users, Database,
   Plus, Pencil, Trash2, X, Check, FileText, Bot, PenLine, Upload, Paperclip, Loader2,
+  Eye, EyeOff,
   Network, FolderOpen, Sparkles, Link2,
 } from 'lucide-react'
 import type { KnowledgeLayer, KnowledgeLayerType } from '@/lib/types'
@@ -14,7 +15,7 @@ import { cn } from '@/lib/utils'
 import ExtractionProgressBar, { parseBatchProgress } from '@/components/knowledge/ExtractionProgressBar'
 import KnowledgeGraphViz from '@/components/knowledge/KnowledgeGraphViz'
 import { KB_TEXT_LAYER_TYPES, TEXT_LAYER_MAX_CHARS } from '@/lib/knowledge'
-import { fileTypeFromName, parseDocumentToText } from '@/lib/parseDocumentClient'
+import { fileTypeFromName, needsServerExtract, parseDocumentToText } from '@/lib/parseDocumentClient'
 
 type PanelTab = 'layers' | 'sources' | 'graph'
 
@@ -98,6 +99,11 @@ interface Props {
   readOnly?: boolean
   /** Which tab to open on — defaults to Sources when a hub is scoped. */
   initialTab?: PanelTab
+  /** Called after deck ↔ knowledge mapping completes (refresh editor link badges). */
+  onDeckLinksChange?: () => void
+  /** Show paperclip pins on slide elements linked to the knowledge graph. */
+  showMappingPins?: boolean
+  onShowMappingPinsChange?: (show: boolean) => void
 }
 
 type LayerMeta = {
@@ -154,7 +160,7 @@ const SOURCE_ICONS: Record<string, React.ReactNode> = {
 }
 
 const UPLOAD_ACCEPT =
-  '.pdf,.docx,.txt,.md,.markdown,.csv,.tsv,.json,.yaml,.yml,.html,.htm,.xml,.log,.rst,.ini,.toml,text/*'
+  '.pdf,.docx,.pptx,.pptm,.xlsx,.xlsm,.txt,.md,.markdown,.csv,.tsv,.json,.yaml,.yml,.html,.htm,.xml,.log,.rst,.ini,.toml,text/*'
 
 const STATUS_COLORS: Record<string, string> = {
   registered: 'bg-slate-500/20 text-slate-300',
@@ -175,6 +181,9 @@ export default function KnowledgePanel({
   presentationName,
   readOnly = false,
   initialTab,
+  onDeckLinksChange,
+  showMappingPins = false,
+  onShowMappingPinsChange,
 }: Props) {
   const [activeTab, setActiveTab] = useState<PanelTab>(
     initialTab ?? (branchId ? 'sources' : 'layers')
@@ -192,6 +201,7 @@ export default function KnowledgePanel({
   const [sources, setSources] = useState<SourceDocument[]>([])
   const [sourcesLoading, setSourcesLoading] = useState(false)
   const [sourceUploading, setSourceUploading] = useState(false)
+  const [sourceUploadLabel, setSourceUploadLabel] = useState<string | null>(null)
   const [ingestingId, setIngestingId] = useState<string | null>(null)
   const [ingestProgress, setIngestProgress] = useState<{
     batch: number
@@ -228,6 +238,19 @@ export default function KnowledgePanel({
     if (!branchId) return
     setGraphLoading(true)
     try {
+      if (!readOnly) {
+        const srcRes = await fetch(`/api/graph/sources?branchId=${branchId}`)
+        if (srcRes.ok) {
+          const srcList = (await srcRes.json()) as SourceDocument[]
+          if (srcList.some(s => s.status === 'extracted')) {
+            await fetch('/api/graph/connectivity', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ branchId }),
+            }).catch(() => {})
+          }
+        }
+      }
       const [nodesRes, edgesRes] = await Promise.all([
         fetch(`/api/graph/nodes?branchId=${branchId}`),
         fetch(`/api/graph/edges?branchId=${branchId}`),
@@ -237,7 +260,7 @@ export default function KnowledgePanel({
     } finally {
       setGraphLoading(false)
     }
-  }, [branchId])
+  }, [branchId, readOnly])
 
   const loadDeckMapping = useCallback(async () => {
     if (!presentationId) {
@@ -300,6 +323,7 @@ export default function KnowledgePanel({
       await postMap({ phase: 'finalize' })
       await loadDeckMapping()
       await loadGraph()
+      onDeckLinksChange?.()
       setActiveTab('graph')
     } catch (err) {
       setUploadError(err instanceof Error ? err.message : 'Deck mapping failed')
@@ -336,12 +360,15 @@ export default function KnowledgePanel({
     if (!file || !branchId) return
     setSourceUploading(true)
     setUploadError(null)
+    setSourceUploadLabel(
+      needsServerExtract(file.name) ? 'Reading document with AI skills…' : 'Reading document…'
+    )
     try {
-      const parsed = await parseDocumentToText(file)
+      const parsed = await parseDocumentToText(file, { branchId })
       const fileType = fileTypeFromName(file.name)
       if (fileType === 'unknown') {
         throw new Error(
-          'Unsupported file type. Use PDF, DOCX, TXT, MD, CSV, JSON, YAML, HTML or XML.'
+          'Unsupported file type. Use PDF, DOCX, PPTX, XLSX, TXT, MD, CSV, JSON, YAML, HTML or XML.'
         )
       }
       const res = await fetch('/api/graph/sources', {
@@ -363,6 +390,7 @@ export default function KnowledgePanel({
       setUploadError(err instanceof Error ? err.message : 'Upload failed')
     } finally {
       setSourceUploading(false)
+      setSourceUploadLabel(null)
     }
   }
 
@@ -559,6 +587,25 @@ export default function KnowledgePanel({
           tab once a deck is open.
         </p>
       )}
+      {presentationId && onShowMappingPinsChange && (
+        <button
+          type="button"
+          onClick={() => onShowMappingPinsChange(!showMappingPins)}
+          className={`inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-[10px] font-semibold transition-colors ${
+            showMappingPins
+              ? 'border-cyan-500/50 bg-cyan-500/15 text-cyan-200'
+              : 'border-[#334155] bg-[#112236] text-[#94a3b8] hover:border-cyan-500/40 hover:text-cyan-200'
+          }`}
+          title={
+            showMappingPins
+              ? 'Hide paperclip pins on the slide canvas'
+              : 'Show paperclip pins for mapped elements on the slide canvas'
+          }
+        >
+          {showMappingPins ? <Eye className="w-3 h-3" /> : <EyeOff className="w-3 h-3" />}
+          {showMappingPins ? 'Mapping pins visible' : 'Mapping pins hidden'}
+        </button>
+      )}
       {presentationId && !canRunDeckMap && (
         <p className="text-[10px] text-amber-300">
           Extract knowledge from documents first ({' '}
@@ -597,11 +644,14 @@ export default function KnowledgePanel({
             {deckMapping.slideTopics?.length ? ` · ${deckMapping.slideTopics.length} slide topics` : ''}
           </p>
           {deckMapping.mappings.slice(0, 12).map((m, i) => (
-            <div key={`${m.elementId}-${i}`} className="text-[10px] border-l-2 border-cyan-500/40 pl-2">
-              <span className="text-white">{m.elementName}</span>
-              <span className="text-[#64748B]"> → </span>
-              <span className="text-cyan-300">{m.knowledgeName}</span>
-              <span className="text-[#475569]"> ({m.knowledgeType})</span>
+            <div key={`${m.elementId}-${i}`} className="text-[10px] border-l-2 border-cyan-500/40 pl-2 flex items-start gap-1.5">
+              <Paperclip className="w-3 h-3 text-cyan-400 flex-shrink-0 mt-0.5" />
+              <span>
+                <span className="text-white">{m.elementName}</span>
+                <span className="text-[#64748B]"> → </span>
+                <span className="text-cyan-300">{m.knowledgeName}</span>
+                <span className="text-[#475569]"> ({m.knowledgeType})</span>
+              </span>
             </div>
           ))}
           {deckMapping.mappingCount > 12 && (
@@ -906,8 +956,9 @@ export default function KnowledgePanel({
                 <>
                   <div className="rounded-lg border border-[#1e3a5f] bg-[#112236] px-4 py-3">
                     <p className="text-xs text-[#94A3B8] leading-relaxed">
-                      Upload business documents here. After upload, click <strong className="text-white">Extract</strong> to
-                      build the knowledge graph (claims, metrics, topics). View results in the{' '}
+                      Upload PDF, DOCX, PPTX, XLSX, or text files (PowerPoint and Excel are read with Anthropic document skills).
+                      After upload, click <strong className="text-white">Extract</strong> to build the knowledge graph.
+                      View results in the{' '}
                       <button type="button" onClick={() => setActiveTab('graph')} className="text-violet-400 underline">
                         Knowledge Graph
                       </button>{' '}
@@ -918,8 +969,17 @@ export default function KnowledgePanel({
                     <div className="flex justify-end">
                       <Button variant="default" size="sm" disabled={sourceUploading}
                         onClick={() => sourceInputRef.current?.click()}>
-                        {sourceUploading ? <Loader2 className="w-3 h-3 animate-spin" /> : <Upload className="w-3 h-3" />}
-                        Upload document
+                        {sourceUploading ? (
+                          <>
+                            <Loader2 className="w-3 h-3 animate-spin" />
+                            {sourceUploadLabel || 'Uploading…'}
+                          </>
+                        ) : (
+                          <>
+                            <Upload className="w-3 h-3" />
+                            Upload document
+                          </>
+                        )}
                       </Button>
                     </div>
                   )}
@@ -928,7 +988,7 @@ export default function KnowledgePanel({
                       <Loader2 className="w-4 h-4 animate-spin" /> Loading sources…
                     </div>
                   ) : sources.length === 0 ? (
-                    <p className="text-xs text-[#64748B] italic">No sources yet. Upload a PDF, DOCX, or text file to begin.</p>
+                    <p className="text-xs text-[#64748B] italic">No sources yet. Upload PDF, DOCX, PPTX, XLSX, or text files to begin.</p>
                   ) : (
                     sources.map(src => (
                       <div key={src.id} className="rounded-lg border border-[#1e3a5f] bg-[#112236] p-3 mb-2">

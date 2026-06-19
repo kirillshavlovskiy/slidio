@@ -13,6 +13,7 @@ type GraphNodeRow = {
   status: string
   confidence: number
   sourceDocumentId?: string | null
+  properties?: Record<string, unknown>
 }
 
 type GraphEdgeRow = {
@@ -90,14 +91,18 @@ function layoutGraph(
   const positions = new Map<string, { x: number; y: number }>()
 
   const topics = visible.filter(n => n.type === 'Topic')
+  const hubTopics = topics.filter(n => n.properties?.isHub === true)
+  const ringTopics = topics.filter(n => n.properties?.isHub !== true)
   const claims = visible.filter(n => n.type === 'Claim')
   const metrics = visible.filter(n => n.type === 'Metric')
   const sources = visible.filter(n => n.type === 'SourceDocument')
   const chunks = visible.filter(n => n.type === 'DocumentChunk')
 
-  const topicRing = 90 + topics.length * 6
-  topics.forEach((t, i) => {
-    const angle = (i / Math.max(topics.length, 1)) * Math.PI * 2 - Math.PI / 2
+  hubTopics.forEach(t => positions.set(t.id, { x: cx, y: cy }))
+
+  const topicRing = 90 + ringTopics.length * 6
+  ringTopics.forEach((t, i) => {
+    const angle = (i / Math.max(ringTopics.length, 1)) * Math.PI * 2 - Math.PI / 2
     positions.set(t.id, {
       x: cx + Math.cos(angle) * topicRing,
       y: cy + Math.sin(angle) * topicRing * 0.7,
@@ -131,7 +136,17 @@ function layoutGraph(
       })
     }
 
+    const hubId = hubTopics[0]?.id
     orphans.forEach((n, i) => {
+      if (hubId && positions.has(hubId) && n.id !== hubId) {
+        const center = positions.get(hubId)!
+        const angle = (i / Math.max(orphans.length, 1)) * Math.PI * 2
+        positions.set(n.id, {
+          x: center.x + Math.cos(angle) * innerR,
+          y: center.y + Math.sin(angle) * innerR,
+        })
+        return
+      }
       const angle = (i / Math.max(orphans.length, 1)) * Math.PI * 2
       positions.set(n.id, {
         x: cx + Math.cos(angle) * outerR,
@@ -199,6 +214,7 @@ function layoutGraph(
 
   const layoutNodes: LayoutNode[] = visible.map(n => {
     const pos = positions.get(n.id) ?? { x: cx, y: cy }
+    const isHub = n.type === 'Topic' && n.properties?.isHub === true
     const style = NODE_STYLE[n.type] ?? { color: '#334155', stroke: '#64748b', r: 12 }
     return {
       id: n.id,
@@ -206,9 +222,9 @@ function layoutGraph(
       name: n.name,
       x: pos.x,
       y: pos.y,
-      r: style.r,
-      color: style.color,
-      stroke: style.stroke,
+      r: isHub ? Math.max(style.r, 26) : style.r,
+      color: isHub ? '#6d28d9' : style.color,
+      stroke: isHub ? '#c4b5fd' : style.stroke,
     }
   })
 

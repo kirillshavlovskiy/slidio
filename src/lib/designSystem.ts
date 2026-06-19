@@ -551,13 +551,147 @@ logo's colors clash with the slide background (dark logo on a dark slide).`
 ${darkBlock}
 
 DESIGN RULES & ADHERENCE:
-${tokens.rules.length ? tokens.rules.map(r => `- ${r}`).join('\n\n') : '- (none provided)'}
+${
+  tokens.rules.length
+    ? tokens.rules.map(r => `- ${r}`).join('\n\n')
+    : `- No custom design rules were uploaded — the structured style tokens above ARE the complete schema.
+- Apply the SAME tokens on EVERY slide: slidePatch.bg, style.color, style.bg, style.fontFace, style.fontSize.
+- Reuse one consistent header pattern (title bar + accent bar geometry/colors) across all section slides.
+- Do NOT fall back to generic/default palettes (e.g. dark FX styling) when this design system is active.`
+}
 
 RULES:
 - Use ONLY colors from this palette/tokens unless the user explicitly names another colour.
 - Use the design system's font families and type scale for all text.
 - Respect the radii, spacing and shadow scales above.
 - This design system overrides generic/default styling.`
+}
+
+/** Compact deck-build block: exact patch values so every new slide matches the design system. */
+export function formatDesignSystemDeckAlignmentBlock(ds: DesignSystem): string {
+  const { palette, typography } = ds.styleTokens
+  const bg = palette.background ?? ds.tokens.palette[0]
+  const titleColor = palette.textPrimary ?? 'FFFFFF'
+  const bodyColor = palette.textMuted ?? palette.textPrimary ?? titleColor
+  const accent = palette.accent ?? palette.primary ?? ds.tokens.palette[1]
+  const font = typography.fontFamily ?? ds.tokens.fontFamilies[0] ?? 'Calibri'
+  const headlinePt = typography.headlineSize ?? 28
+  const bodyPt = typography.bodySize ?? 16
+  const smallPt = typography.smallSize ?? 12
+
+  const lines = [
+    '=== DESIGN SYSTEM — APPLY TO EVERY NEW SLIDE ===',
+    `System: "${ds.name}" — use these EXACT values on ALL slides (no ad-hoc colors or fonts).`,
+    bg ? `Slide background: slidePatch.bg = "${bg}"` : '',
+    `Headlines/titles: style.color = "${titleColor}", style.fontFace = "${font}", style.fontSize = ${headlinePt}`,
+    `Body text: style.color = "${bodyColor}", style.fontFace = "${font}", style.fontSize = ${bodyPt}`,
+    `Labels/footnotes: style.fontSize = ${smallPt}, style.color = "${bodyColor}"`,
+    accent ? `Accent bars/chips/rects: style.bg = "${accent}"` : '',
+    'Reuse the SAME header pattern (title position, accent bar geometry) on every section slide.',
+    'Charts: set series.color or chart.palette from this system\'s accent/primary colors.',
+    ds.tokens.rules.length
+      ? ''
+      : 'No custom design rules uploaded — tokens above are the authoritative schema.',
+    '=== END DESIGN ALIGNMENT ===',
+  ]
+  return lines.filter(Boolean).join('\n')
+}
+
+/** Alignment block for restyling slides that already exist (deck-wide apply). */
+export function formatDesignSystemApplyExistingBlock(ds: DesignSystem): string {
+  const base = formatDesignSystemDeckAlignmentBlock(ds)
+  return (
+    base
+      .replace(
+        '=== DESIGN SYSTEM — APPLY TO EVERY NEW SLIDE ===',
+        '=== DESIGN SYSTEM — APPLY TO ALL EXISTING SLIDES ==='
+      )
+      .replace('=== END DESIGN ALIGNMENT ===', '=== END DESIGN APPLY ===') +
+    '\nPRESERVE content, copy, and layout geometry (x, y, w, h, z-order) — change ONLY styling (bg, colors, fonts, chart palette).'
+  )
+}
+
+export function formatDesignSystemApplyScopedBlock(ds: DesignSystem, slideIds: string[]): string {
+  const base = formatDesignSystemDeckAlignmentBlock(ds)
+  const scope =
+    slideIds.length === 1
+      ? `slide (id: ${slideIds[0]})`
+      : `${slideIds.length} slides: ${slideIds.map(id => `(id: ${id})`).join(', ')}`
+  return (
+    base
+      .replace(
+        '=== DESIGN SYSTEM — APPLY TO EVERY NEW SLIDE ===',
+        `=== DESIGN SYSTEM — APPLY TO SCOPED SLIDES ONLY (${scope}) ===`
+      )
+      .replace('use these EXACT values on ALL slides', 'use these EXACT values on the scoped slide(s) ONLY') +
+    '\nDo NOT restyle any slide outside this scope.' +
+    '\nPRESERVE content, copy, and layout geometry (x, y, w, h, z-order) — change ONLY styling (bg, colors, fonts, chart palette).'
+  )
+}
+
+/** Scoped quick-action / selection apply — active slide, multi-select, or elements only. */
+export function buildApplyDesignSystemScopedInstruction(
+  ds: DesignSystem,
+  opts: {
+    slideIds: string[]
+    elementIds?: string[]
+    activeSlideId?: string
+  }
+): string {
+  const scopeTag = opts.slideIds.map(id => `(id: ${id})`).join(', ')
+  const tokens = formatDesignSystemApplyScopedBlock(ds, opts.slideIds)
+
+  if (opts.elementIds && opts.elementIds.length > 0 && opts.activeSlideId) {
+    return (
+      `Apply the loaded design system "${ds.name}" to ONLY these selected elements on slide (id: ${opts.activeSlideId}): ` +
+      `${opts.elementIds.join(', ')}.\n` +
+      `Change style.fontFace, style.color, and style.bg on those elements only. ` +
+      `You may set slidePatch.bg on this slide if needed for contrast. ` +
+      `Do NOT restyle other elements or any other slides.\n\n${tokens}\n\n` +
+      `Workflow: get_slide → apply_changes (scoped elements only) → render_slide → finish.`
+    )
+  }
+
+  const n = opts.slideIds.length
+  return (
+    `Apply the loaded design system "${ds.name}" to ${n === 1 ? 'this slide' : `these ${n} slides`}: ${scopeTag}.\n` +
+    `Restyle ONLY the listed slide(s) — backgrounds, text colors, shape fills, fonts, and chart colors. ` +
+    `Do NOT touch any other slides in the deck.\n\n${tokens}\n\n` +
+    `Workflow: get_slides with slideIds: [${opts.slideIds.map(id => `"${id}"`).join(', ')}] → ` +
+    `apply_changes → render_slide on one scoped slide → finish.`
+  )
+}
+
+/** One-click instruction: convert the whole deck to the loaded design system. */
+export function buildApplyDesignSystemToDeckInstruction(
+  ds: DesignSystem,
+  slideCount: number
+): string {
+  const n = slideCount === 1 ? '1 slide' : `${slideCount} slides`
+  return (
+    `Convert the ENTIRE presentation (${n}) to the loaded design system "${ds.name}". ` +
+    `Restyle EVERY slide — backgrounds, text colors, shape fills, fonts, and chart colors — ` +
+    `using the authoritative tokens below. Do NOT rewrite copy or move elements unless a font change causes overflow.\n\n` +
+    formatDesignSystemApplyExistingBlock(ds) +
+    `\n\nWorkflow: get_slides (whole deck) → apply_changes in batches of 2–4 slides per call ` +
+    `(slidePatch.bg per slide; style.fontFace, style.color, style.bg on every text/chip/bar/rect; ` +
+    `chart palette/series colors) → render_slide on 1–2 representative slides → finish when all slides match.`
+  )
+}
+
+/** Wrap a natural-language styling request with authoritative deck-wide design-system tokens. */
+export function buildDesignSystemAlignmentFromUserNote(
+  ds: DesignSystem,
+  slideCount: number,
+  userNote: string
+): string {
+  return (
+    `${userNote.trim()}\n\n` +
+    `[DECK-WIDE DESIGN SYSTEM — apply bg + font + color tokens to EVERY slide. ` +
+    `Change ONLY styling (slidePatch.bg, style.fontFace, style.color, style.bg). ` +
+    `Do NOT nudge x/y/w/h for margin balance or spacing polish — geometry is frozen.]\n\n` +
+    buildApplyDesignSystemToDeckInstruction(ds, slideCount)
+  )
 }
 
 // ── Knowledge-layer plumbing (reuses the template pipeline) ─────────────────────
@@ -751,3 +885,11 @@ export const DS_TEXT_CATEGORIES: DSCategory[] = ['stylesheet', 'data', 'document
 export function isTextCategory(category: DSCategory): boolean {
   return DS_TEXT_CATEGORIES.includes(category)
 }
+
+export {
+  DESIGN_SYSTEM_PRESETS,
+  buildPresetDesignSystem,
+  isPresetDesignSystemFile,
+  type DesignSystemPresetId,
+  type DesignSystemPresetMeta,
+} from './designSystemPresets'

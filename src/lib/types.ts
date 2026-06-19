@@ -194,6 +194,8 @@ export interface ConversationMessage {
   role: 'user' | 'assistant'
   // raw content string — for assistant messages this is the stringified ClaudeResponse
   content: string
+  /** conversationHistory index before this user message (enables resend/revert after reload). */
+  historyLength?: number
   // optional annotated-slide screenshot (base64 PNG data URL) attached to a user message
   imageDataUrl?: string
   // optional user-uploaded reference images (base64 data URLs) attached to a user message

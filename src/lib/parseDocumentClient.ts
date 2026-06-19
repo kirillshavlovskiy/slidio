@@ -1,4 +1,5 @@
 import JSZip from 'jszip'
+import { extractPptxText } from '@/lib/ooxmlTextExtract'
 
 // Cap stored text so a huge file can't bloat the knowledge context / DB row.
 // Keep this in sync with the server route (src/app/api/parse-document/route.ts).
@@ -20,10 +21,28 @@ export function fileTypeFromName(filename: string): string {
   const lower = filename.toLowerCase()
   if (lower.endsWith('.pdf')) return 'pdf'
   if (lower.endsWith('.docx')) return 'docx'
+  if (lower.endsWith('.pptx') || lower.endsWith('.pptm')) return 'pptx'
+  if (lower.endsWith('.xlsx') || lower.endsWith('.xlsm') || lower.endsWith('.xls')) return 'xlsx'
   for (const ext of TEXT_EXTENSIONS) {
     if (lower.endsWith(ext)) return ext.slice(1)
   }
   return 'unknown'
+}
+
+/** Formats that must be parsed on the server (Anthropic document skills). */
+export function needsServerExtract(filename: string): boolean {
+  const ft = fileTypeFromName(filename)
+  return ft === 'xlsx' || ft === 'pptx'
+}
+
+async function extractViaServer(file: File, branchId: string): Promise<ParsedDocument> {
+  const form = new FormData()
+  form.append('file', file)
+  form.append('branchId', branchId)
+  const res = await fetch('/api/graph/extract', { method: 'POST', body: form })
+  const data = (await res.json()) as ParsedDocument & { error?: string }
+  if (!res.ok) throw new Error(data.error || 'Document extraction failed')
+  return data
 }
 
 function decodeEntities(s: string): string {
@@ -186,19 +205,32 @@ async function extractPdfText(buffer: ArrayBuffer): Promise<string> {
  *
  * Throws an Error with a user-facing message on unsupported types / empty text.
  */
-export async function parseDocumentToText(file: File): Promise<ParsedDocument> {
+export async function parseDocumentToText(
+  file: File,
+  opts?: { branchId?: string }
+): Promise<ParsedDocument> {
   const lower = file.name.toLowerCase()
+
+  if (needsServerExtract(file.name)) {
+    if (!opts?.branchId) {
+      throw new Error('branchId is required to extract PPTX/XLSX documents')
+    }
+    return extractViaServer(file, opts.branchId)
+  }
+
   let text = ''
 
   if (lower.endsWith('.pdf')) {
     text = await extractPdfText(await file.arrayBuffer())
   } else if (lower.endsWith('.docx')) {
     text = await extractDocxText(await file.arrayBuffer())
+  } else if (lower.endsWith('.pptx') || lower.endsWith('.pptm')) {
+    text = await extractPptxText(await file.arrayBuffer())
   } else if (TEXT_EXTENSIONS.some(ext => lower.endsWith(ext))) {
     text = await file.text()
   } else {
     throw new Error(
-      'Unsupported file type. Use PDF, DOCX, TXT, MD, CSV, JSON, YAML, HTML or XML.'
+      'Unsupported file type. Use PDF, DOCX, PPTX, XLSX, TXT, MD, CSV, JSON, YAML, HTML or XML.'
     )
   }
 

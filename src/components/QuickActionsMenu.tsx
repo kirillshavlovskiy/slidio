@@ -1,7 +1,7 @@
 'use client'
 import { useState } from 'react'
 import {
-  Wand2, SplitSquareHorizontal, Combine, LayoutGrid, Sparkles, BarChart3, Table,
+  Wand2, SplitSquareHorizontal, Combine, LayoutGrid, Layers, Sparkles, BarChart3, Table,
   type LucideIcon,
 } from 'lucide-react'
 import { QuickAction, QuickActionContext } from '@/lib/quickActions'
@@ -11,6 +11,7 @@ const ACTION_ICONS: Record<string, LucideIcon> = {
   SplitSquareHorizontal,
   Combine,
   LayoutGrid,
+  Layers,
   Sparkles,
   BarChart3,
   Table,

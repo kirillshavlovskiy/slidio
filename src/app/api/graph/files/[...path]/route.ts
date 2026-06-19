@@ -10,6 +10,8 @@ function contentTypeFor(filePath: string): string {
   if (ext === '.txt') return 'text/plain; charset=utf-8'
   if (ext === '.pdf') return 'application/pdf'
   if (ext === '.docx') return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+  if (ext === '.pptx') return 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+  if (ext === '.xlsx') return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
   if (ext === '.json') return 'application/json'
   if (ext === '.csv') return 'text/csv'
   return 'application/octet-stream'

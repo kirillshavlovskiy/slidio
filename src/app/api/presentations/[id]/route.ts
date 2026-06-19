@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { auth } from '@/lib/auth'
 import { prisma } from '@/lib/prisma'
 import { normalizeConversationHistory } from '@/lib/conversation'
+import { EDITOR_SESSION_VERSION, type EditorSession } from '@/lib/editorSession'
 import { canAccessPresentation, getHubRole, roleAtLeast } from '@/lib/hubAccess'
 
 export async function GET(_req: NextRequest, { params }: { params: { id: string } }) {
@@ -27,6 +28,17 @@ export async function GET(_req: NextRequest, { params }: { params: { id: string 
     conversationHistory = []
   }
 
+  let editorSession: EditorSession | null = null
+  try {
+    const rawJson = (p as { editorSession?: string | null }).editorSession
+    const raw = rawJson ? JSON.parse(rawJson) : null
+    if (raw && raw.version === EDITOR_SESSION_VERSION) {
+      editorSession = raw as EditorSession
+    }
+  } catch {
+    editorSession = null
+  }
+
   return NextResponse.json({
     id: p.id,
     name: p.name,
@@ -35,6 +47,7 @@ export async function GET(_req: NextRequest, { params }: { params: { id: string 
     activeSlideId: p.activeSlideId,
     slides: JSON.parse(p.slides),
     conversationHistory,
+    editorSession,
     versions: p.versions.map(v => ({
       id: v.id,
       label: v.label,

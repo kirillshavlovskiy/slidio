@@ -18,6 +18,7 @@ export function conversationToDisplay(history: ConversationMessage[]): DisplayMe
       return {
         role: 'user' as const,
         text: msg.content,
+        ...(typeof msg.historyLength === 'number' ? { historyLength: msg.historyLength } : {}),
         ...(msg.imageDataUrl ? { imageUrl: msg.imageDataUrl } : {}),
         ...(msg.imageDataUrls && msg.imageDataUrls.length > 0
           ? { imageUrls: msg.imageDataUrls }

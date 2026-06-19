@@ -10,6 +10,23 @@
  * Re-running creates NEW prices each time, so only run it once per mode.
  */
 import Stripe from "stripe";
+import { readFileSync, existsSync } from "node:fs";
+
+function loadEnvLocal() {
+  const path = ".env.local";
+  if (!existsSync(path)) return;
+  for (const line of readFileSync(path, "utf8").split("\n")) {
+    const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/);
+    if (!m || process.env[m[1]] != null) continue;
+    let v = m[2].trim();
+    if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
+      v = v.slice(1, -1);
+    }
+    process.env[m[1]] = v;
+  }
+}
+
+loadEnvLocal();
 
 const key = process.env.STRIPE_SECRET_KEY;
 if (!key) {

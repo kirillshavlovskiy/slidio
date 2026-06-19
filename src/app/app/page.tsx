@@ -22,8 +22,9 @@ import {
 } from '@/lib/conversation'
 import { savePresentation, saveVersion, persistDecision, setDecisionStatus } from '@/lib/persistence'
 import ProposalPreviewModal from '@/components/ProposalPreviewModal'
+import AmendmentsBar from '@/components/AmendmentsBar'
 import IconPicker from '@/components/IconPicker'
-import { QUICK_ACTIONS, QuickAction, QuickActionContext } from '@/lib/quickActions'
+import { QUICK_ACTIONS, QuickAction, QuickActionContext, resolveQuickActionTargetSlideIds } from '@/lib/quickActions'
 import TemplateUploader, { TemplateKnowledge } from '@/components/TemplateUploader'
 import {
   mergeTemplateList,
@@ -31,6 +32,10 @@ import {
   syncTemplateKnowledgeLayers,
 } from '@/lib/templateKnowledge'
 import KnowledgePanel from '@/components/KnowledgePanel'
+import {
+  type DeckElementLink,
+  indexDeckElementLinks,
+} from '@/lib/deckKnowledgeLinks'
 import DesignSystemPanel from '@/components/DesignSystemPanel'
 import { DesignTokensProvider } from '@/components/DesignTokensProvider'
 import {
@@ -41,6 +46,11 @@ import {
   storeDesignSystem,
   loadStoredDesignSystem,
   buildFontFaceCss,
+  buildApplyDesignSystemToDeckInstruction,
+  buildDesignSystemAlignmentFromUserNote,
+  formatDesignSystemDeckAlignmentBlock,
+  formatDesignSystemApplyExistingBlock,
+  formatDesignSystemApplyScopedBlock,
 } from '@/lib/designSystem'
 import {
   type MediaAsset,
@@ -85,11 +95,24 @@ import {
   diffSlideIds,
   mergeKnowledgeContexts,
   fetchGraphKnowledgeContext,
+  fetchAgentPlan,
+  reviewAgentChanges,
 } from '@/lib/knowledge'
+import { formatValidationForAgent, formatValidationForUser } from '@/lib/agent/review'
+import type { SemanticEditPlan, ValidationResult } from '@/lib/agent/types'
 import { summarizeDeckChanges } from '@/lib/versionDiff'
 import {
   applyChangesToSlides,
+  excludeChangesByElements,
+  excludeChangesBySlide,
+  filterChangesByElements,
+  filterChangesBySlide,
+  countChangesBySlide,
+  getAffectedElementIds,
+  getDeletedElementIds,
   getDeletedSlideIds,
+  getPendingSlideIds,
+  resolveEffectivePendingChanges,
 } from '@/lib/preview'
 import {
   changesAddSlides,
@@ -97,13 +120,71 @@ import {
   effectiveSlideLimit,
   formatPresentationScopeNote,
   formatScopeGateNote,
+  buildDeckBuildResumeInstruction,
+  buildDeckBuildContinuationInstruction,
+  formatDeckBuildExecuteBlock,
+  isDeckBuildResumeTask,
+  isDesignSystemAlignmentRequest,
+  isDeckWideDesignSystemRequest,
   isNewDeckBuildRequest,
   parsePresentationScope,
-  projectDeckSlideCount,
+  PRESENTATION_DEPTH_QUESTION,
+  slimSlideJson,
+  wouldExceedScopeSlideLimit,
 } from '@/lib/presentationScope'
+import {
+  buildAgentContinuationInstruction,
+  buildSlideTargetFixInstruction,
+  findRecentLayoutFixTask,
+  isAgentContinuationMessage,
+  isClarificationAskingForClaims,
+  isClarificationAskingToConfirmSlides,
+  isKnowledgeBasedEditRequest,
+  isLayoutAuditChangeRequest,
+  isLayoutGeometryOnlyRequest,
+  isDeckWideLayoutAudit,
+  isDeckWideInstruction,
+  isShortSlideTargetAnswer,
+  parseSlideNumbersFromText,
+  parseSlideIdsFromText,
+  recoverIncompleteContextFromHistory,
+  withLayoutAuditDirective,
+  type IncompleteAgentContext,
+} from '@/lib/agent/routingHeuristics'
+import {
+  formatAgentWorkScopeBlock,
+  resolveAgentWorkScope,
+  type AgentWorkScope,
+} from '@/lib/agent/workScope'
+import {
+  buildApplyLimitError,
+  buildNoToolCallPauseError,
+  buildOverloadedError,
+  buildRateLimitError,
+  buildSpacingLimitError,
+  buildStepLimitError,
+  buildTimeoutError,
+  formatAgentLimitError,
+} from '@/lib/agent/limitError'
+import {
+  AGENT_PAUSE_STATE_VERSION,
+  buildAgentResumeNote,
+  cloneMessages,
+  type AgentPauseReason,
+  type AgentPauseState,
+} from '@/lib/agent/agentPauseState'
 import { analyzeChanges, formatChangeReport } from '@/lib/changeDiagnostics'
+import { readShowKnowledgePins, writeShowKnowledgePins } from '@/lib/showKnowledgePins'
+import {
+  clearEditorSessionLocal,
+  hasRestorableEditorSession,
+  readEditorSessionLocal,
+  slimDisplayForSession,
+  writeEditorSessionLocal,
+  type EditorSession,
+} from '@/lib/editorSession'
 import { installGlobalErrorReporting, reportClientError } from '@/lib/clientLog'
-import { formatLayoutIssues, reviewLayoutChange, SLIDE_W_IN, SLIDE_H_IN } from '@/lib/layout'
+import { formatLayoutIssues, formatOverlapCheck, formatSpacingCheck, findOverlapIssues, findOverlapsAmong, findSpacingIssues, filterGeometryLayoutIssues, filterOverlapOnlyLayoutIssues, reviewLayoutChange, SLIDE_W_IN, SLIDE_H_IN } from '@/lib/layout'
 import { slidesForScope, ScopeMode, RouterScope } from '@/lib/scope'
 import { computeSlideSelection } from '@/lib/slideSelection'
 import { duplicateSlides, mergeSlides, splitSlide, SlideOpResult } from '@/lib/slideOps'
@@ -256,18 +337,52 @@ export default function Home() {
   const runAgentRef = useRef<
     | ((
         instruction: string,
-        opts?: { effort?: Effort; skipUserEcho?: boolean; checkpoint?: SlideData[]; historyLength?: number }
+        opts?: {
+          effort?: Effort
+          skipUserEcho?: boolean
+          checkpoint?: SlideData[]
+          historyLength?: number
+          continuation?: boolean
+          scopedSlideIds?: string[]
+          uiScopeAuthoritative?: boolean
+          deckWide?: boolean
+          /** Resume the exact agent message thread from a pipeline pause. */
+          resumeFromPause?: boolean
+        }
       ) => void)
     | null
   >(null)
   // Groups a burst of keyboard nudges into a single undo step.
   const nudgeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  // ── Pending patch (awaiting user Apply/Discard) ──────────────────────────────
+  // ── Pending amendments (live on canvas; accept/decline via top bar) ───────────
   const [pendingChanges, setPendingChanges] = useState<Change[] | null>(null)
   const [pendingSummary, setPendingSummary] = useState<string>('')
-  // Retained only to reset highlight intent on new proposals; the live highlight
-  // toggle now lives inside the preview overlay (ProposalPreviewModal).
+  const [amendmentCheckpoint, setAmendmentCheckpoint] = useState<SlideData[] | null>(null)
+  const [amendmentSource, setAmendmentSource] = useState<'single' | 'agent' | null>(null)
+  const [agentRunIncomplete, setAgentRunIncomplete] = useState(false)
+  const pendingChangesRef = useRef<Change[] | null>(null)
+  const amendmentsCommittedRef = useRef(false)
+  const agentProgressRef = useRef({
+    applyBatches: 0,
+    changedSlideIds: new Set<string>(),
+    lastAction: '',
+  })
+  const incompleteAgentContextRef = useRef<IncompleteAgentContext | null>(null)
+  const agentPauseStateRef = useRef<AgentPauseState | null>(null)
+  useEffect(() => {
+    pendingChangesRef.current = pendingChanges
+  }, [pendingChanges])
+  const [showKnowledgePins, setShowKnowledgePins] = useState(false)
+  const showKnowledgePinsReadyRef = useRef(false)
+  useEffect(() => {
+    setShowKnowledgePins(readShowKnowledgePins())
+    showKnowledgePinsReadyRef.current = true
+  }, [])
+  const setShowKnowledgePinsPersisted = useCallback((show: boolean) => {
+    setShowKnowledgePins(show)
+    if (showKnowledgePinsReadyRef.current) writeShowKnowledgePins(show)
+  }, [])
   const [, setHighlightDiffOnCanvas] = useState(false)
   // Full-screen proposal preview overlay (opened from the chat proposal widget).
   const [isPreviewOpen, setIsPreviewOpen] = useState(false)
@@ -282,12 +397,20 @@ export default function Home() {
   const [isRefining, setIsRefining] = useState(false)
   // Agentic tool-loop editor (inspect → edit → render → verify, like Claude in PPT).
   const [isAgentRunning, setIsAgentRunning] = useState(false)
+  const effectivePendingChanges = useMemo(
+    () =>
+      isAgentRunning
+        ? null
+        : resolveEffectivePendingChanges(pendingChanges, amendmentCheckpoint, slides),
+    [pendingChanges, amendmentCheckpoint, slides, isAgentRunning]
+  )
   const [captureSlide, setCaptureSlide] = useState<SlideData | null>(null)
   const [captureScale, setCaptureScale] = useState(AGENT_RENDER_SCALE)
   const agentCaptureRef = useRef<HTMLDivElement>(null)
   // Cancellation: a flag the agent loop checks each step, plus the in-flight
   // request's AbortController so a Stop also kills the current network call.
   const agentStopRef = useRef(false)
+  const isAgentRunningRef = useRef(false)
   const agentAbortRef = useRef<AbortController | null>(null)
   // In-flight single-shot (/api/edit) request, so the composer Stop button can
   // abort a one-shot generation the same way it stops an agent run.
@@ -302,6 +425,7 @@ export default function Home() {
   // ── Knowledge Memory Architecture ────────────────────────────────────────────
   const [knowledgeLayers, setKnowledgeLayers] = useState<KnowledgeLayer[]>(defaultKnowledgeLayers())
   const [showKnowledge, setShowKnowledge] = useState(false)
+  const [deckElementLinks, setDeckElementLinks] = useState<DeckElementLink[]>([])
 
   // ── Design System (uploaded token/style package the AI follows) ──────────────
   const [dsId] = useState(() => `${Date.now()}`)
@@ -618,18 +742,68 @@ export default function Home() {
     else if (selectedElementIds.length === 0) setLeftTab('slides')
   }, [selectedElementIds])
 
-  // Auto-save presentation state (slides, chat, active slide) after edits
+  // Auto-save presentation state (slides, chat, active slide, unfinished session) after edits
   useEffect(() => {
     if (!presentationId || !initialLoadDone) return
     const timer = setTimeout(() => {
+      const incompleteCtx = incompleteAgentContextRef.current
+      const hasPendingAmendments = (pendingChanges?.length ?? 0) > 0
+      const hasUnfinished =
+        hasPendingAmendments ||
+        agentRunIncomplete ||
+        !!pendingAgentInstruction ||
+        display.some(m => !!m.agentStep || m.patchStatus === 'pending')
+
+      let editorSession: EditorSession | null = null
+      if (hasUnfinished) {
+        editorSession = {
+          version: 1,
+          updatedAt: Date.now(),
+          slides,
+          activeSlideId,
+          selectedSlideIds,
+          selectedElementIds,
+          pendingChanges,
+          amendmentCheckpoint,
+          pendingSummary,
+          amendmentSource,
+          pendingDecisionId,
+          agentRunIncomplete,
+          incompleteAgentContext: incompleteCtx,
+          agentPauseState: agentPauseStateRef.current,
+          pendingAgentInstruction,
+          display: slimDisplayForSession(display),
+        }
+        writeEditorSessionLocal(presentationId, editorSession)
+      } else {
+        clearEditorSessionLocal(presentationId)
+      }
+
       savePresentation(presentationId, {
         slides,
         conversationHistory,
         activeSlideId,
+        editorSession: hasUnfinished ? editorSession : null,
       }).catch(err => console.error('Failed to save presentation', err))
     }, 400)
     return () => clearTimeout(timer)
-  }, [slides, conversationHistory, activeSlideId, presentationId, initialLoadDone])
+  }, [
+    slides,
+    conversationHistory,
+    activeSlideId,
+    presentationId,
+    initialLoadDone,
+    pendingChanges,
+    amendmentCheckpoint,
+    pendingSummary,
+    amendmentSource,
+    pendingDecisionId,
+    agentRunIncomplete,
+    pendingAgentInstruction,
+    display,
+    selectedSlideIds,
+    selectedElementIds,
+  ])
 
   // Commit manual edits into the version timeline. Debounced + coalesced: a burst
   // of direct edits becomes one "Manual edits" snapshot that keeps updating until
@@ -696,6 +870,54 @@ export default function Home() {
     return () => clearTimeout(timer)
   }, [slides, presentationId, initialLoadDone, makeBranchMeta])
 
+  // Flush unfinished session to localStorage immediately before tab close.
+  useEffect(() => {
+    if (!presentationId || !initialLoadDone) return
+    const flush = () => {
+      const hasPendingAmendments = (pendingChangesRef.current?.length ?? 0) > 0
+      const hasUnfinished =
+        hasPendingAmendments ||
+        agentRunIncomplete ||
+        !!pendingAgentInstruction ||
+        display.some(m => !!m.agentStep || m.patchStatus === 'pending')
+      if (!hasUnfinished) return
+      const session: EditorSession = {
+        version: 1,
+        updatedAt: Date.now(),
+        slides: slidesRef.current,
+        activeSlideId,
+        selectedSlideIds,
+        selectedElementIds,
+        pendingChanges: pendingChangesRef.current,
+        amendmentCheckpoint,
+        pendingSummary,
+        amendmentSource,
+        pendingDecisionId,
+        agentRunIncomplete,
+        incompleteAgentContext: incompleteAgentContextRef.current,
+        agentPauseState: agentPauseStateRef.current,
+        pendingAgentInstruction,
+        display: slimDisplayForSession(display),
+      }
+      writeEditorSessionLocal(presentationId, session)
+    }
+    window.addEventListener('beforeunload', flush)
+    return () => window.removeEventListener('beforeunload', flush)
+  }, [
+    presentationId,
+    initialLoadDone,
+    activeSlideId,
+    selectedSlideIds,
+    selectedElementIds,
+    amendmentCheckpoint,
+    pendingSummary,
+    amendmentSource,
+    pendingDecisionId,
+    agentRunIncomplete,
+    pendingAgentInstruction,
+    display,
+  ])
+
   // ── Portfolio: load branches + presentation list for the start screen ─────────
   const loadPortfolio = useCallback(async () => {
     setPortfolioLoading(true)
@@ -749,7 +971,14 @@ export default function Home() {
 
         // Reset transient editor state from any previous deck.
         setPendingChanges(null)
+        pendingChangesRef.current = null
         setPendingSummary('')
+        setAmendmentCheckpoint(null)
+        setAmendmentSource(null)
+        setHighlightDiffOnCanvas(false)
+        setAgentRunIncomplete(false)
+        incompleteAgentContextRef.current = null
+        setPendingAgentInstruction(null)
         setSelectedElementIds([])
         setEditingElementId(null)
         setStrokes([])
@@ -772,6 +1001,74 @@ export default function Home() {
         const history = normalizeConversationHistory(detail.conversationHistory)
         setConversationHistory(history)
         setDisplay(history.length > 0 ? conversationToDisplay(history) : [DEFAULT_WELCOME])
+
+        const apiSession = detail.editorSession as EditorSession | null | undefined
+        const localSession = readEditorSessionLocal(id)
+        let restoredSession: EditorSession | null = null
+        if (apiSession && hasRestorableEditorSession(apiSession)) restoredSession = apiSession
+        if (localSession && hasRestorableEditorSession(localSession)) {
+          if (
+            !restoredSession ||
+            (localSession.updatedAt ?? 0) > (restoredSession.updatedAt ?? 0)
+          ) {
+            restoredSession = localSession
+          }
+        }
+        if (restoredSession) {
+          const restoredSlides = JSON.parse(
+            JSON.stringify(restoredSession.slides)
+          ) as SlideData[]
+          if (restoredSlides.length > 0) {
+            setSlides(restoredSlides)
+            slidesRef.current = restoredSlides
+          }
+          const nextActive =
+            restoredSession.activeSlideId &&
+            (restoredSlides.length ? restoredSlides : loadedSlides).some(
+              s => s.id === restoredSession!.activeSlideId
+            )
+              ? restoredSession.activeSlideId
+              : restoredActiveId
+          setActiveSlideId(nextActive)
+          setSelectedSlideIds(
+            restoredSession.selectedSlideIds?.length
+              ? restoredSession.selectedSlideIds
+              : [nextActive]
+          )
+          setSelectionAnchorId(nextActive)
+          setSelectedElementIds(restoredSession.selectedElementIds ?? [])
+
+          if (restoredSession.pendingChanges?.length) {
+            setPendingChanges(restoredSession.pendingChanges)
+            pendingChangesRef.current = restoredSession.pendingChanges
+            setAmendmentCheckpoint(restoredSession.amendmentCheckpoint)
+            setAmendmentSource(restoredSession.amendmentSource)
+            setPendingSummary(restoredSession.pendingSummary ?? '')
+            setPendingDecisionId(restoredSession.pendingDecisionId)
+            setHighlightDiffOnCanvas(true)
+          }
+
+          setAgentRunIncomplete(restoredSession.agentRunIncomplete)
+          incompleteAgentContextRef.current = restoredSession.incompleteAgentContext
+          agentPauseStateRef.current = restoredSession.agentPauseState ?? null
+          setPendingAgentInstruction(restoredSession.pendingAgentInstruction)
+
+          if (restoredSession.display?.length) {
+            setDisplay(restoredSession.display)
+          }
+
+          setDisplay(prev => [
+            ...prev,
+            {
+              role: 'assistant',
+              agentStep: {
+                kind: 'note',
+                label:
+                  'Restored your unfinished session after reload — review pending changes or say "continue" to resume the agent.',
+              },
+            },
+          ])
+        }
 
         if (detail.versions?.length > 0) {
           const loadedVersions: SlideVersion[] = detail.versions.map(
@@ -821,15 +1118,17 @@ export default function Home() {
 
         // Knowledge for this branch (seed defaults if the branch is empty).
         const branchId: string | null = detail.branchId ?? null
+        let loadedLayers: KnowledgeLayer[] = defaultKnowledgeLayers()
         try {
           const klRes = await fetch(
             `/api/knowledge${branchId ? `?branchId=${branchId}` : ''}`
           )
           if (klRes.ok) {
             const layers: KnowledgeLayer[] = await klRes.json()
-            if (layers.length > 0) setKnowledgeLayers(layers)
-            else if (branchId) setKnowledgeLayers(await seedBranchKnowledge(branchId))
-            else setKnowledgeLayers(defaultKnowledgeLayers())
+            if (layers.length > 0) loadedLayers = layers
+            else if (branchId) loadedLayers = await seedBranchKnowledge(branchId)
+            else loadedLayers = defaultKnowledgeLayers()
+            setKnowledgeLayers(loadedLayers)
           }
         } catch {
           /* keep current layers */
@@ -842,6 +1141,7 @@ export default function Home() {
           setDsName(restoredDs.name)
           setDsFiles(restoredDs.files)
           setDesignSystem(restoredDs)
+          setKnowledgeLayers(syncDesignSystemLayers(restoredDs, loadedLayers))
         } else {
           designSystemRef.current = null
           setDsName('')
@@ -1120,16 +1420,71 @@ export default function Home() {
     void loadPortfolio()
   }, [status, loadPortfolio])
 
+  // During an agent run, keep the canvas frozen at the pre-run checkpoint so live
+  // apply_changes patches don't desync highlights from what AmendmentsBar shows.
+  const displaySlides = useMemo(() => {
+    if (isAgentRunning && amendmentCheckpoint) return amendmentCheckpoint
+    return slides
+  }, [isAgentRunning, amendmentCheckpoint, slides])
+
   // NEVER assert here: after an agent/manual edit deletes or replaces the active
   // slide, activeSlideId can momentarily point at a slide that no longer exists.
   // A bare `!` then throws "Cannot read properties of undefined (reading
   // 'elements')" on render → Next does a full reload → the user's just-typed
   // message is lost ("chat disappears"). Fall back to the first slide and let the
   // resync effect below repair activeSlideId.
-  const activeSlide = slides.find(s => s.id === activeSlideId) ?? slides[0]
+  const activeSlide = displaySlides.find(s => s.id === activeSlideId) ?? displaySlides[0]
   const selectedElements = (activeSlide?.elements ?? []).filter(el =>
     selectedElementIds.includes(el.id)
   )
+
+  const loadDeckElementLinks = useCallback(async (pid: string) => {
+    try {
+      const res = await fetch(`/api/graph/map/deck/${pid}`)
+      if (!res.ok) {
+        setDeckElementLinks([])
+        return
+      }
+      const data = (await res.json()) as { mappings?: DeckElementLink[] }
+      setDeckElementLinks(data.mappings ?? [])
+    } catch {
+      setDeckElementLinks([])
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!presentationId) {
+      setDeckElementLinks([])
+      return
+    }
+    void loadDeckElementLinks(presentationId)
+  }, [presentationId, loadDeckElementLinks])
+
+  const deckLinkIndex = useMemo(
+    () => indexDeckElementLinks(deckElementLinks),
+    [deckElementLinks]
+  )
+
+  const knowledgeLinkByElementId = useMemo(() => {
+    const m = new Map<string, { knowledgeName: string; knowledgeType: string }>()
+    for (const link of deckElementLinks) {
+      m.set(link.elementId, {
+        knowledgeName: link.knowledgeName,
+        knowledgeType: link.knowledgeType,
+      })
+    }
+    return m
+  }, [deckElementLinks])
+
+  const linkedElementIdsBySlide = useMemo(() => {
+    const m = new Map<string, Set<string>>()
+    for (const [slideId, links] of deckLinkIndex.bySlideId) {
+      m.set(slideId, new Set(links.map(l => l.elementId)))
+    }
+    return m
+  }, [deckLinkIndex])
+
+  const activeSlideLinkedElementIds = linkedElementIdsBySlide.get(activeSlide?.id ?? '')
 
   // Self-heal a stale active-slide selection (e.g. after an edit deletes/replaces
   // the slide it pointed at) so the canvas tracks a real slide instead of crashing.
@@ -1167,10 +1522,27 @@ export default function Home() {
     el.addEventListener('wheel', onWheel, { passive: false })
     return () => el.removeEventListener('wheel', onWheel)
   }, [pendingChanges])
-  const pendingSlideIds = pendingChanges
-    ? Array.from(new Set(pendingChanges.map(c => c.slideId)))
-    : []
-  const pendingDeletedSlideIds = pendingChanges ? getDeletedSlideIds(pendingChanges) : []
+  const pendingSlideIds = effectivePendingChanges ? getPendingSlideIds(effectivePendingChanges) : []
+  const pendingDeletedSlideIds = effectivePendingChanges ? getDeletedSlideIds(effectivePendingChanges) : []
+  const pendingHighlightedElementIds = useMemo(() => {
+    if (!effectivePendingChanges || !activeSlide?.id) return []
+    return [
+      ...getAffectedElementIds(effectivePendingChanges, activeSlide.id),
+      ...getDeletedElementIds(effectivePendingChanges, activeSlide.id),
+    ]
+  }, [effectivePendingChanges, activeSlide?.id])
+  const selectedPendingAmendmentCount = useMemo(() => {
+    if (!effectivePendingChanges || selectedElementIds.length === 0) return 0
+    return filterChangesByElements(effectivePendingChanges, selectedElementIds).length
+  }, [effectivePendingChanges, selectedElementIds])
+  const activeSlidePendingCount = useMemo(() => {
+    if (!effectivePendingChanges || !activeSlide?.id) return 0
+    return countChangesBySlide(effectivePendingChanges, activeSlide.id)
+  }, [effectivePendingChanges, activeSlide?.id])
+  const activePendingSlideIndex = useMemo(() => {
+    if (!activeSlide?.id) return -1
+    return pendingSlideIds.indexOf(activeSlide.id)
+  }, [pendingSlideIds, activeSlide?.id])
 
   // ── Send a message to Claude ─────────────────────────────────────────────────
   const callApi = useCallback(
@@ -1183,6 +1555,14 @@ export default function Home() {
       routerScope: RouterScope = 'active'
     ) => {
       setIsLoading(true)
+      if (amendmentCheckpoint) {
+        const restored = JSON.parse(JSON.stringify(amendmentCheckpoint)) as SlideData[]
+        setSlides(restored)
+        slidesRef.current = restored
+      }
+      setAmendmentCheckpoint(null)
+      setAmendmentSource(null)
+      setAgentRunIncomplete(false)
       setPendingChanges(null)
 
       const lastUserMessage = [...newHistory].reverse().find(m => m.role === 'user')?.content ?? ''
@@ -1217,6 +1597,22 @@ export default function Home() {
           instruction: lastUserMessage,
           charBudget: 8000,
         })
+        const targetSlideIds =
+          selectedSlideIds.length > 0
+            ? selectedSlideIds
+            : activeSlideId
+              ? [activeSlideId]
+              : []
+        const agentPlan = await fetchAgentPlan({
+          branchId,
+          presentationId,
+          instruction: lastUserMessage,
+          targetSlideIds,
+        })
+        const knowledgeContext = mergeKnowledgeContexts(
+          mergeKnowledgeContexts(layerCtx, graphCtx),
+          agentPlan?.plan_context ?? ''
+        )
         const res = await fetch('/api/edit', {
           method: 'POST',
           signal: ac.signal,
@@ -1230,7 +1626,7 @@ export default function Home() {
             allSlides: slides,
             intent: answerOnly ? 'ask' : 'edit',
             templateKnowledge: mergeTemplatesKnowledge(templates) || null,
-            knowledgeContext: mergeKnowledgeContexts(layerCtx, graphCtx),
+            knowledgeContext,
             annotatedImage: annotatedImage || null,
             attachedImages,
             mediaManifest: mediaManifest(collectAllAssets()),
@@ -1256,6 +1652,66 @@ export default function Home() {
           ])
           setIsLoading(false)
           runAgentRef.current?.(lastUserMessage, { effort: bumpEffort(effort), skipUserEcho: true })
+          return
+        }
+
+        // Safety net: single-shot asked user to list claims despite hub graph in context.
+        if (
+          data.type === 'clarification' &&
+          !answerOnly &&
+          (graphCtx.trim() || agentPlan?.has_graph_knowledge) &&
+          isKnowledgeBasedEditRequest(lastUserMessage) &&
+          isClarificationAskingForClaims(data.question ?? '')
+        ) {
+          console.log('[edit] claim-list clarification with graph context — escalating to agent')
+          setDisplay(prev => [
+            ...prev,
+            {
+              role: 'assistant',
+              agentStep: {
+                kind: 'note',
+                label: 'Hub research is available — switching to the agent to apply claims automatically.',
+              },
+            },
+          ])
+          setIsLoading(false)
+          runAgentRef.current?.(lastUserMessage, { effort: bumpEffort(effort), skipUserEcho: true })
+          return
+        }
+
+        // Safety net: single-shot asked to confirm slides after user already named them.
+        if (
+          data.type === 'clarification' &&
+          !answerOnly &&
+          isClarificationAskingToConfirmSlides(data.question ?? '') &&
+          (parseSlideNumbersFromText(lastUserMessage, slides.length).length > 0 ||
+            !!findRecentLayoutFixTask(newHistory))
+        ) {
+          const nums = parseSlideNumbersFromText(lastUserMessage, slides.length)
+          const prior = findRecentLayoutFixTask(newHistory) ?? lastUserMessage
+          const ids =
+            nums.length > 0
+              ? nums.map(n => slides[n - 1]?.id).filter((id): id is string => !!id)
+              : []
+          const instruction =
+            ids.length > 0
+              ? buildSlideTargetFixInstruction(nums, ids, prior)
+              : withLayoutAuditDirective(
+                  `${prior}\n\nUser follow-up: ${lastUserMessage}\nDo NOT ask again — apply fixes now.`
+                )
+          console.log('[edit] slide-confirm clarification loop — escalating to agent')
+          setDisplay(prev => [
+            ...prev,
+            {
+              role: 'assistant',
+              agentStep: {
+                kind: 'note',
+                label: 'Applying fixes on the slides you named — switching to the agent.',
+              },
+            },
+          ])
+          setIsLoading(false)
+          runAgentRef.current?.(instruction, { effort: bumpEffort(effort), skipUserEcho: true })
           return
         }
 
@@ -1325,14 +1781,19 @@ export default function Home() {
         ])
 
         if (data.type === 'patch') {
+          const checkpoint = JSON.parse(JSON.stringify(slides)) as SlideData[]
+          const preview = applyChangesToSlides(checkpoint, data.changes)
+          setAmendmentCheckpoint(checkpoint)
+          setAmendmentSource('single')
+          setAgentRunIncomplete(false)
           setPendingChanges(data.changes)
           setPendingSummary(data.summary)
-          setHighlightDiffOnCanvas(false)
+          setHighlightDiffOnCanvas(true)
+          setSlides(preview)
+          slidesRef.current = preview
 
-          // The preview canvas only renders the active slide. If the change
-          // targets a different slide, jump to the first changed slide so the
-          // proposed changes are actually visible in the Current/Proposed view.
-          const changedSlideIds = Array.from(new Set(data.changes.map(c => c.slideId)))
+          // Jump to the first changed slide so amendments are visible immediately.
+          const changedSlideIds = getPendingSlideIds(data.changes)
           if (changedSlideIds.length > 0 && !changedSlideIds.includes(activeSlideId)) {
             const target = changedSlideIds[0]
             setActiveSlideId(target)
@@ -1354,7 +1815,7 @@ export default function Home() {
             proposedSummary: data.summary,
             proposedChanges: data.changes,
             status: 'pending',
-            snapshotBefore: JSON.parse(JSON.stringify(slides)),
+            snapshotBefore: checkpoint,
           }
           setDecisions(prev => [...prev, record])
 
@@ -1393,7 +1854,7 @@ export default function Home() {
         setIsLoading(false)
       }
     },
-    [slides, activeSlideId, selectedSlideIds, selectedElementIds, knowledgeLayers, decisions, templates, presentationId, presentationSummaries, designSystem, collectAllAssets]
+    [slides, activeSlideId, selectedSlideIds, selectedElementIds, knowledgeLayers, decisions, templates, presentationId, presentationSummaries, designSystem, collectAllAssets, amendmentCheckpoint]
   )
 
   const handleSlideSelect = useCallback(
@@ -1474,26 +1935,31 @@ export default function Home() {
       const slide = slides.find(s => s.id === activeSlideId)
       if (!slide) return
       const sel = slide.elements.filter(e => selectedElementIds.includes(e.id))
-      if (sel.length < 2) return
+      const linkedOnSlide = linkedElementIdsBySlide.get(slide.id)
+      const linkedSel = linkedOnSlide?.size
+        ? sel.filter(e => linkedOnSlide.has(e.id))
+        : sel
+      const targets = linkedSel.length >= 2 ? linkedSel : sel
+      if (targets.length < 2) return
 
-      const minX = Math.min(...sel.map(e => e.x))
-      const maxX = Math.max(...sel.map(e => e.x + e.w))
-      const minY = Math.min(...sel.map(e => e.y))
-      const maxY = Math.max(...sel.map(e => e.y + e.h))
+      const minX = Math.min(...targets.map(e => e.x))
+      const maxX = Math.max(...targets.map(e => e.x + e.w))
+      const minY = Math.min(...targets.map(e => e.y))
+      const maxY = Math.max(...targets.map(e => e.y + e.h))
 
       const updates = new Map<string, { x?: number; y?: number }>()
-      if (mode === 'left') sel.forEach(e => updates.set(e.id, { x: minX }))
-      else if (mode === 'right') sel.forEach(e => updates.set(e.id, { x: maxX - e.w }))
+      if (mode === 'left') targets.forEach(e => updates.set(e.id, { x: minX }))
+      else if (mode === 'right') targets.forEach(e => updates.set(e.id, { x: maxX - e.w }))
       else if (mode === 'hcenter') {
         const c = (minX + maxX) / 2
-        sel.forEach(e => updates.set(e.id, { x: c - e.w / 2 }))
-      } else if (mode === 'top') sel.forEach(e => updates.set(e.id, { y: minY }))
-      else if (mode === 'bottom') sel.forEach(e => updates.set(e.id, { y: maxY - e.h }))
+        targets.forEach(e => updates.set(e.id, { x: c - e.w / 2 }))
+      } else if (mode === 'top') targets.forEach(e => updates.set(e.id, { y: minY }))
+      else if (mode === 'bottom') targets.forEach(e => updates.set(e.id, { y: maxY - e.h }))
       else if (mode === 'vmiddle') {
         const c = (minY + maxY) / 2
-        sel.forEach(e => updates.set(e.id, { y: c - e.h / 2 }))
-      } else if (mode === 'distribute-h' && sel.length >= 3) {
-        const sorted = [...sel].sort((a, b) => a.x - b.x)
+        targets.forEach(e => updates.set(e.id, { y: c - e.h / 2 }))
+      } else if (mode === 'distribute-h' && targets.length >= 3) {
+        const sorted = [...targets].sort((a, b) => a.x - b.x)
         const totalW = sorted.reduce((s, e) => s + e.w, 0)
         const gap = (maxX - minX - totalW) / (sorted.length - 1)
         let cursor = minX
@@ -1501,8 +1967,8 @@ export default function Home() {
           updates.set(e.id, { x: cursor })
           cursor += e.w + gap
         })
-      } else if (mode === 'distribute-v' && sel.length >= 3) {
-        const sorted = [...sel].sort((a, b) => a.y - b.y)
+      } else if (mode === 'distribute-v' && targets.length >= 3) {
+        const sorted = [...targets].sort((a, b) => a.y - b.y)
         const totalH = sorted.reduce((s, e) => s + e.h, 0)
         const gap = (maxY - minY - totalH) / (sorted.length - 1)
         let cursor = minY
@@ -1534,7 +2000,7 @@ export default function Home() {
         )
       )
     },
-    [slides, activeSlideId, selectedElementIds, pushHistory]
+    [slides, activeSlideId, selectedElementIds, linkedElementIdsBySlide, pushHistory]
   )
 
   // Move all selected elements by (dx, dy) inches. Consecutive nudges within a
@@ -2020,16 +2486,36 @@ export default function Home() {
         activeSlideIndex: slides.findIndex(s => s.id === activeSlideId),
         selectedSlideIds,
         selectedElementIds,
+        designSystem: designSystemRef.current,
       }
       if (!action.isAvailable(ctx)) return
-      const instruction = action.buildInstruction(ctx)
+      incompleteAgentContextRef.current = null
+      setAgentRunIncomplete(false)
+      const scopedSlideIds = action.deckWide ? [] : resolveQuickActionTargetSlideIds(ctx)
+      const scopedCtx: QuickActionContext = {
+        ...ctx,
+        selectedSlideIds: scopedSlideIds.length ? scopedSlideIds : ctx.selectedSlideIds,
+        activeSlideId: scopedSlideIds[0] ?? ctx.activeSlideId,
+        activeSlideIndex:
+          scopedSlideIds[0] != null
+            ? ctx.slides.findIndex(s => s.id === scopedSlideIds[0])
+            : ctx.activeSlideIndex,
+      }
+      const instruction = action.buildInstruction(scopedCtx)
+      if (scopedSlideIds.length > 0) {
+        setSelectedSlideIds(scopedSlideIds)
+        setSelectionAnchorId(scopedSlideIds[0])
+      }
       const checkpoint = JSON.parse(JSON.stringify(slides)) as SlideData[]
       const historyLength = conversationHistory.length
-      setConversationHistory(prev => [...prev, { role: 'user', content: instruction }])
+      setConversationHistory(prev => [...prev, { role: 'user', content: instruction, historyLength: prev.length }])
       runAgentRef.current?.(instruction, {
         effort: action.effort ?? 'medium',
         checkpoint,
         historyLength,
+        scopedSlideIds: scopedSlideIds.length ? scopedSlideIds : undefined,
+        uiScopeAuthoritative: scopedSlideIds.length > 0,
+        deckWide: action.deckWide,
       })
     },
     [
@@ -2043,6 +2529,29 @@ export default function Home() {
       canEdit,
     ]
   )
+
+  const applyDesignSystemToDeck = useCallback(() => {
+    if (isLoading || isAgentRunning || !canEdit || !!pendingChanges) return
+    const ds = designSystemRef.current
+    if (!ds || ds.files.length === 0 || slides.length === 0) return
+
+    incompleteAgentContextRef.current = null
+    setAgentRunIncomplete(false)
+    const instruction = buildApplyDesignSystemToDeckInstruction(ds, slides.length)
+    const checkpoint = JSON.parse(JSON.stringify(slides)) as SlideData[]
+    const historyLength = conversationHistory.length
+    setConversationHistory(prev => [
+      ...prev,
+      { role: 'user', content: instruction, historyLength: prev.length },
+    ])
+    setShowDesignSystem(false)
+    runAgentRef.current?.(instruction, {
+      effort: 'high',
+      checkpoint,
+      historyLength,
+      deckWide: true,
+    })
+  }, [isLoading, isAgentRunning, canEdit, pendingChanges, slides, conversationHistory])
 
   const handleSend = useCallback(
     async (text: string, images: string[] = [], uiMode: UiMode = 'auto') => {
@@ -2094,6 +2603,122 @@ export default function Home() {
         ])
       }
 
+      // ── Continue: resume an interrupted agent run (layout audit, step limit, timeout) ──
+      if (isAgentContinuationMessage(text)) {
+        const modifiedFromPending = pendingChanges ? getPendingSlideIds(pendingChanges) : []
+        if (agentPauseStateRef.current) {
+          const ps = agentPauseStateRef.current
+          const agentCheckpoint = JSON.parse(JSON.stringify(slides)) as SlideData[]
+          const agentHistoryLength = conversationHistory.length
+          setConversationHistory(prev => [
+            ...prev,
+            { role: 'user', content: text, historyLength: prev.length },
+          ])
+          setDisplay(prev => [
+            ...prev,
+            { role: 'user', text, checkpoint: agentCheckpoint, historyLength: agentHistoryLength },
+          ])
+          runAgentRef.current?.(ps.originalInstruction, {
+            effort: (ps.agentEffort as Effort) ?? 'high',
+            continuation: true,
+            resumeFromPause: true,
+            skipUserEcho: true,
+          })
+          return
+        }
+        const ctx =
+          incompleteAgentContextRef.current ??
+          recoverIncompleteContextFromHistory(conversationHistory, modifiedFromPending)
+        if (ctx || agentRunIncomplete || modifiedFromPending.length > 0) {
+          const resolved: IncompleteAgentContext = ctx ?? {
+            originalInstruction:
+              [...conversationHistory].reverse().find(m => m.role === 'user' && !isAgentContinuationMessage(m.content))
+                ?.content ?? 'Finish the previous editing task',
+            modifiedSlideIds: modifiedFromPending,
+            targetSlideIds: [],
+            lastAction: agentProgressRef.current.lastAction,
+            wasLayoutAudit: false,
+            deckWide: false,
+          }
+          if (modifiedFromPending.length && !resolved.modifiedSlideIds.length) {
+            resolved.modifiedSlideIds = modifiedFromPending
+          }
+          incompleteAgentContextRef.current = resolved
+          const allSlideIds = slides.map(s => s.id)
+          const dsForAlign =
+            designSystemRef.current && designSystemRef.current.files.length > 0
+              ? designSystemRef.current
+              : null
+          const deckDesignAlignment = dsForAlign
+            ? formatDesignSystemDeckAlignmentBlock(dsForAlign)
+            : undefined
+          const resumeInstruction =
+            resolved.deckWide || isDeckBuildResumeTask(resolved.originalInstruction)
+              ? buildDeckBuildContinuationInstruction(
+                  resolved.originalInstruction,
+                  slides.length,
+                  allSlideIds,
+                  deckDesignAlignment
+                )
+              : buildAgentContinuationInstruction(resolved, allSlideIds)
+          const agentCheckpoint = JSON.parse(JSON.stringify(slides)) as SlideData[]
+          const agentHistoryLength = conversationHistory.length
+          setConversationHistory(prev => [
+            ...prev,
+            { role: 'user', content: text, historyLength: prev.length },
+          ])
+          setDisplay(prev => [
+            ...prev,
+            { role: 'user', text, checkpoint: agentCheckpoint, historyLength: agentHistoryLength },
+          ])
+          runAgentRef.current?.(resumeInstruction, {
+            effort:
+              resolved.deckWide || isDeckBuildResumeTask(resolved.originalInstruction)
+                ? 'high'
+                : 'medium',
+            continuation: true,
+            skipUserEcho: true,
+          })
+          return
+        }
+      }
+
+      // ── Slide-number follow-up: user answered "14 and 15" etc. after a layout fix thread ──
+      const slideNums = parseSlideNumbersFromText(text, slides.length)
+      const priorLayoutTask = findRecentLayoutFixTask(conversationHistory)
+      if (
+        slideNums.length > 0 &&
+        isShortSlideTargetAnswer(text, slideNums) &&
+        priorLayoutTask
+      ) {
+        const slideIds = slideNums.map(n => slides[n - 1]?.id).filter((id): id is string => !!id)
+        if (slideIds.length > 0) {
+          const agentInstruction = buildSlideTargetFixInstruction(
+            slideNums,
+            slideIds,
+            priorLayoutTask
+          )
+          setSelectedSlideIds(slideIds)
+          setActiveSlideId(slideIds[0])
+          setSelectionAnchorId(slideIds[0])
+          const agentCheckpoint = JSON.parse(JSON.stringify(slides)) as SlideData[]
+          const agentHistoryLength = conversationHistory.length
+          setConversationHistory(prev => [
+            ...prev,
+            { role: 'user', content: text, historyLength: prev.length },
+          ])
+          setDisplay(prev => [
+            ...prev,
+            { role: 'user', text, checkpoint: agentCheckpoint, historyLength: agentHistoryLength },
+          ])
+          runAgentRef.current?.(agentInstruction, {
+            effort: 'medium',
+            skipUserEcho: true,
+          })
+          return
+        }
+      }
+
       // ── Route: a fast model decides flow (single-shot vs agent) + effort ──
       // Briefly flag loading so the routing model call (≈1s) doesn't look frozen;
       // each downstream branch shows the user bubble + manages its own loading.
@@ -2123,9 +2748,11 @@ export default function Home() {
         cls.scope === 'ask'
       ) {
         setPendingScopeInstruction(text)
+        const scopeCheckpoint = JSON.parse(JSON.stringify(slides)) as SlideData[]
+        const scopeHistoryLength = conversationHistory.length
         setDisplay(prev => [
           ...prev,
-          { role: 'user', text },
+          { role: 'user', text, checkpoint: scopeCheckpoint, historyLength: scopeHistoryLength },
           {
             role: 'assistant',
             response: {
@@ -2177,6 +2804,8 @@ export default function Home() {
       )
 
       if (route === 'agent') {
+        incompleteAgentContextRef.current = null
+        setAgentRunIncomplete(false)
         // Snapshot BEFORE recording the turn so the agent's user bubble can carry a
         // Cursor-style checkpoint (edit/revert to this exact point) just like single-shot.
         const agentCheckpoint = JSON.parse(JSON.stringify(slides)) as SlideData[]
@@ -2184,11 +2813,73 @@ export default function Home() {
         // Record the user turn in history so later turns (single-shot OR agent)
         // can see it — otherwise agent instructions vanish from the thread and
         // follow-ups like "do that across all slides" lose their referent.
-        setConversationHistory(prev => [...prev, { role: 'user', content: text }])
-        runAgentRef.current?.(text, {
-          effort,
+        setConversationHistory(prev => [
+          ...prev,
+          { role: 'user', content: text, historyLength: prev.length },
+        ])
+        // New deck builds need depth before the agent runs — gate is also in runAgent
+        // for self-escalation paths; this catches the direct agent route early.
+        if (isNewDeckBuildRequest(text) && !parsePresentationScope(text)) {
+          setPendingAgentInstruction(text)
+          setDisplay(prev => [
+            ...prev,
+            {
+              role: 'user',
+              text,
+              checkpoint: agentCheckpoint,
+              historyLength: agentHistoryLength,
+            },
+            {
+              role: 'assistant',
+              response: {
+                type: 'clarification',
+                question:
+                  'Before building from your documents, choose how comprehensive the presentation should be:',
+                questions: [PRESENTATION_DEPTH_QUESTION],
+              },
+            },
+          ])
+          return
+        }
+        runAgentRef.current?.(
+          (() => {
+            const ds = designSystemRef.current
+            if (ds?.files.length && isDeckWideDesignSystemRequest(text)) {
+              return buildDesignSystemAlignmentFromUserNote(ds, slides.length, text)
+            }
+            return text
+          })(),
+          {
+          effort:
+            isDesignSystemAlignmentRequest(text) || isLayoutAuditChangeRequest(text)
+              ? 'high'
+              : effort,
           checkpoint: agentCheckpoint,
           historyLength: agentHistoryLength,
+          deckWide: isDeckWideDesignSystemRequest(text) ? true : undefined,
+          ...(() => {
+            if (
+              !isLayoutAuditChangeRequest(text) ||
+              isDeckWideLayoutAudit(text) ||
+              isDeckWideInstruction(text)
+            ) {
+              return {}
+            }
+            const explicitNums = parseSlideNumbersFromText(text, slides.length)
+            const explicitSlideIds = parseSlideIdsFromText(text).filter(id =>
+              slides.some(s => s.id === id)
+            )
+            if (explicitNums.length > 0 || explicitSlideIds.length > 0) return {}
+            const scoped = resolveQuickActionTargetSlideIds({
+              slides,
+              activeSlideId,
+              activeSlideIndex: slides.findIndex(s => s.id === activeSlideId),
+              selectedSlideIds,
+              selectedElementIds,
+            })
+            if (!scoped.length) return {}
+            return { scopedSlideIds: scoped, uiScopeAuthoritative: true as const }
+          })(),
         })
         return
       }
@@ -2196,6 +2887,7 @@ export default function Home() {
       const userMsg: ConversationMessage = {
         role: 'user',
         content: text,
+        historyLength: conversationHistory.length,
         ...(annotatedImage ? { imageDataUrl: annotatedImage } : {}),
         ...(images.length > 0 ? { imageDataUrls: images } : {}),
       }
@@ -2241,7 +2933,7 @@ export default function Home() {
        ])
      }
     },
-    [conversationHistory, callApi, strokes, slides, selectedElementIds, selectedSlideIds, isAgentRunning, canEdit]
+    [conversationHistory, callApi, strokes, slides, selectedElementIds, selectedSlideIds, isAgentRunning, canEdit, agentRunIncomplete, pendingChanges]
   )
 
   // ── Agentic editor: render one slide off-screen to a PNG so the model can see it ──
@@ -2341,7 +3033,19 @@ export default function Home() {
   const runAgent = useCallback(
     async (
       instruction: string,
-      opts?: { effort?: Effort; skipUserEcho?: boolean; checkpoint?: SlideData[]; historyLength?: number }
+      opts?: {
+        effort?: Effort
+        skipUserEcho?: boolean
+        checkpoint?: SlideData[]
+        historyLength?: number
+        continuation?: boolean
+        /** Sidebar/quick-action slide scope — authoritative over instruction text parsing. */
+        scopedSlideIds?: string[]
+        uiScopeAuthoritative?: boolean
+        deckWide?: boolean
+        /** Resume the exact agent message thread from a pipeline pause. */
+        resumeFromPause?: boolean
+      }
     ) => {
       // Re-entrancy guard: only block on the agent's OWN in-flight flag. Do NOT
       // gate on isLoading — handleSend briefly sets isLoading(true) while the
@@ -2350,17 +3054,132 @@ export default function Home() {
       // nothing hit the server. isLoading is the single-shot/router indicator.
       if (isAgentRunning || !instruction.trim()) return
       if (!canEdit) return
-      const effort: Effort = opts?.effort ?? 'medium'
-      agentStopRef.current = false // reset cancellation flag for this run
-      setIsAgentRunning(true)
-      setPendingChanges(null)
-      pushHistory()
+      const isContinuation =
+        opts?.continuation === true || opts?.resumeFromPause === true
+      const restoringPause = opts?.resumeFromPause === true && !!agentPauseStateRef.current
+      if (!isContinuation && !opts?.resumeFromPause) {
+        agentPauseStateRef.current = null
+      }
+      const agentInstruction = isContinuation
+        ? instruction.trim()
+        : withLayoutAuditDirective(instruction.trim())
 
-      // Snapshot the deck before the run so we can version the net change on finish,
-      // and track the latest apply summary / skipped count for the audit entry.
-      const beforeRun = JSON.parse(JSON.stringify(slidesRef.current)) as SlideData[]
+      // Central gate: every agent entry (router, self-escalation, quick actions) must
+      // pick presentation depth before building a new deck from source material.
+      if (
+        !isContinuation &&
+        isNewDeckBuildRequest(agentInstruction) &&
+        !parsePresentationScope(agentInstruction)
+      ) {
+        setPendingAgentInstruction(agentInstruction)
+        setDisplay(prev => [
+          ...prev,
+          {
+            role: 'assistant',
+            response: {
+              type: 'clarification',
+              question:
+                'Before building from your documents, choose how comprehensive the presentation should be:',
+              questions: [PRESENTATION_DEPTH_QUESTION],
+            },
+          },
+        ])
+        return
+      }
+
+      const priorCtxForScope = incompleteAgentContextRef.current
+      const scopeSource =
+        isContinuation && priorCtxForScope?.originalInstruction
+          ? `${priorCtxForScope.originalInstruction}\n${agentInstruction}`
+          : agentInstruction
+      const parsedScopeForBuild = parsePresentationScope(scopeSource)
+      const deckBuildResume =
+        isContinuation &&
+        !!priorCtxForScope &&
+        (priorCtxForScope.deckWide || isDeckBuildResumeTask(priorCtxForScope.originalInstruction)) &&
+        !!parsedScopeForBuild
+      let deckBuildWithScope =
+        (isNewDeckBuildRequest(agentInstruction) && !!parsePresentationScope(agentInstruction)) ||
+        deckBuildResume ||
+        (restoringPause && !!agentPauseStateRef.current?.deckBuildWithScope)
+
+      let layoutAuditRun =
+        isLayoutAuditChangeRequest(agentInstruction) ||
+        (isContinuation && incompleteAgentContextRef.current?.wasLayoutAudit === true)
+      const deckWideLayoutAudit =
+        isDeckWideLayoutAudit(agentInstruction) ||
+        (isContinuation && incompleteAgentContextRef.current?.deckWide === true)
+      let geometryOnlyRun = isLayoutGeometryOnlyRequest(agentInstruction)
+      if (restoringPause && agentPauseStateRef.current) {
+        const ps = agentPauseStateRef.current
+        deckBuildWithScope = ps.deckBuildWithScope
+        layoutAuditRun = ps.layoutAuditRun
+        geometryOnlyRun = ps.geometryOnlyRun
+      }
+      const routedEffort: Effort = opts?.effort ?? 'medium'
+      agentStopRef.current = false // reset cancellation flag for this run
+      amendmentsCommittedRef.current = false
+      isAgentRunningRef.current = true
+      setIsAgentRunning(true)
+
+      let beforeRun: SlideData[]
+
+      if (isContinuation) {
+        // Keep live canvas + pending amendments from the interrupted run.
+        beforeRun =
+          amendmentCheckpoint ??
+          (JSON.parse(JSON.stringify(slidesRef.current)) as SlideData[])
+        if (!amendmentCheckpoint) {
+          setAmendmentCheckpoint(beforeRun)
+          setAmendmentSource('agent')
+        }
+        if (restoringPause && agentPauseStateRef.current) {
+          incompleteAgentContextRef.current = agentPauseStateRef.current.incompleteContext
+        }
+        agentProgressRef.current = {
+          applyBatches: 0,
+          changedSlideIds: new Set(incompleteAgentContextRef.current?.modifiedSlideIds ?? []),
+          lastAction: incompleteAgentContextRef.current?.lastAction ?? '',
+        }
+        setAgentRunIncomplete(false)
+      } else {
+        incompleteAgentContextRef.current = null
+        if (amendmentCheckpoint) {
+          const restored = JSON.parse(JSON.stringify(amendmentCheckpoint)) as SlideData[]
+          setSlides(restored)
+          slidesRef.current = restored
+        }
+        setAmendmentCheckpoint(null)
+        setAmendmentSource(null)
+        setAgentRunIncomplete(false)
+        setPendingChanges(null)
+        pendingChangesRef.current = null
+        pushHistory()
+
+        beforeRun = JSON.parse(JSON.stringify(slidesRef.current)) as SlideData[]
+        setAmendmentCheckpoint(beforeRun)
+        setAmendmentSource('agent')
+        pendingChangesRef.current = []
+        agentProgressRef.current = {
+          applyBatches: 0,
+          changedSlideIds: new Set<string>(),
+          lastAction: '',
+        }
+        incompleteAgentContextRef.current = {
+          originalInstruction: isContinuation && priorCtxForScope?.originalInstruction
+            ? priorCtxForScope.originalInstruction
+            : agentInstruction,
+          modifiedSlideIds: [],
+          targetSlideIds: [],
+          lastAction: '',
+          wasLayoutAudit: layoutAuditRun,
+          deckWide: deckWideLayoutAudit || opts?.deckWide === true || deckBuildWithScope,
+        }
+      }
+
       let runSummary = ''
       let totalSkipped = 0
+      let runFinishedCleanly = false
 
       // When callApi self-escalates, the user's message bubble is already shown.
       // Otherwise echo it WITH a checkpoint so it gets the same edit/revert button
@@ -2370,7 +3189,7 @@ export default function Home() {
           ...prev,
           {
             role: 'user',
-            text: instruction,
+            text: agentInstruction,
             ...(opts?.checkpoint ? { checkpoint: opts.checkpoint } : {}),
             ...(typeof opts?.historyLength === 'number' ? { historyLength: opts.historyLength } : {}),
           },
@@ -2393,40 +3212,206 @@ export default function Home() {
         const i = deckSlides.findIndex(s => s.id === id)
         return i >= 0 ? `slide ${i + 1} (${id})` : id
       }
+      const explicitNums = parseSlideNumbersFromText(agentInstruction, deckSlides.length)
+      const explicitIds =
+        explicitNums.length > 0
+          ? explicitNums.map(n => deckSlides[n - 1]?.id).filter((id): id is string => !!id)
+          : []
+
+      const priorCtx = incompleteAgentContextRef.current
+      const uiScopedSlideIds = isContinuation ? undefined : opts?.scopedSlideIds
+      const uiScopeAuthoritative =
+        !isContinuation && opts?.uiScopeAuthoritative === true && !!uiScopedSlideIds?.length
+      const workScope: AgentWorkScope = resolveAgentWorkScope({
+        instruction: agentInstruction,
+        slides: deckSlides,
+        activeSlideId,
+        selectedSlideIds: uiScopedSlideIds?.length ? uiScopedSlideIds : selectedSlideIds,
+        forcedSlideIds: uiScopedSlideIds,
+        uiAuthoritativeScope: uiScopeAuthoritative,
+        geometryOnly: geometryOnlyRun,
+        deckWide:
+          deckWideLayoutAudit ||
+          opts?.deckWide === true ||
+          (isContinuation && priorCtx?.deckWide === true) ||
+          deckBuildWithScope ||
+          (isDesignSystemAlignmentRequest(agentInstruction) &&
+            isDeckWideDesignSystemRequest(agentInstruction)),
+        layoutAudit: layoutAuditRun,
+        alreadyDoneSlideIds: deckBuildWithScope
+          ? deckSlides.map(s => s.id)
+          : isContinuation
+            ? priorCtx?.modifiedSlideIds
+            : undefined,
+        priorTargetSlideIds: deckBuildWithScope
+          ? undefined
+          : isContinuation
+            ? priorCtx?.targetSlideIds
+            : undefined,
+      })
+
+      if (incompleteAgentContextRef.current) {
+        incompleteAgentContextRef.current.targetSlideIds = workScope.targetSlideIds
+      }
+
       // Ground "these / selected / slide N" references: the model only ever sees
       // slide IDs in tool calls, but the user thinks in 1-based positions and in
       // terms of the current multi-selection.
-      const selectionContext =
-        selectedSlideIds.length > 0
-          ? `The user currently has ${selectedSlideIds.length} slide(s) MULTI-SELECTED: ` +
-            `${selectedSlideIds.map(describeId).join(', ')}.\n` +
-            `If the instruction refers to "these/those slides", "the selected slides", "this slide", ` +
-            `or otherwise omits explicit slide numbers, target EXACTLY these slide IDs — nothing else.\n`
-          : `Active slide: ${describeId(activeSlideId)} (no multi-selection).\n`
+      const effectiveSelectedIds = uiScopedSlideIds?.length
+        ? uiScopedSlideIds
+        : selectedSlideIds
+      let selectionContext = ''
+      const designSystemAlign = isDesignSystemAlignmentRequest(agentInstruction)
+      const deckWideDesignSystem = isDeckWideDesignSystemRequest(agentInstruction)
+      if (deckBuildWithScope && !layoutAuditRun) {
+        const scope = parsedScopeForBuild!
+        const max = effectiveSlideLimit(scope)
+        selectionContext =
+          `DECK BUILD (${scope}): Build up to ${max} slides total from the knowledge graph. ` +
+          `Add 1–2 slides per apply_changes. ` +
+          (isContinuation
+            ? 'Do NOT delete or rebuild slides marked COMPLETED in the CONTINUE block.\n'
+            : 'Start with a cover/hub slide, then add section slides.\n')
+      } else if (designSystemAlign) {
+        const patchIds =
+          workScope.remainingSlideIds.length > 0
+            ? workScope.remainingSlideIds
+            : workScope.targetSlideIds
+        const deckWideDs = isDeckWideDesignSystemRequest(agentInstruction)
+        selectionContext =
+          deckWideDs
+            ? `DESIGN SYSTEM ALIGNMENT (deck-wide): ${deckSlides.length} slide(s). ` +
+              `Apply tokens on ALL slides in batches of 2–4.\n`
+            : `DESIGN SYSTEM ALIGNMENT (scoped): ${patchIds.length} slide(s) — ${patchIds.map(describeId).join(', ')}.\n` +
+              `Apply slidePatch.bg + style.fontFace + style.color + style.bg on ONLY these slide(s). ` +
+              `Do NOT touch other slides.\n` +
+              `Call get_slides with slideIds: [${patchIds.map(id => `"${id}"`).join(', ')}]. ` +
+              `Do NOT nudge x/y/w/h — styling only.\n`
+      } else if (workScope.remainingSlideIds.length > 0 || workScope.targetSlideIds.length > 0) {
+        const executeIds = workScope.remainingSlideIds.length
+          ? workScope.remainingSlideIds
+          : workScope.targetSlideIds
+        selectionContext =
+          `WORK SCOPE LOCK: Only ${executeIds.length} slide(s) need changes for this task. ` +
+          `Targets: ${executeIds.map(describeId).join(', ')}. ` +
+          `Call get_slides with slideIds: [${executeIds.map(id => `"${id}"`).join(', ')}]. ` +
+          `Do NOT read or patch other slides.\n`
+      } else if (deckWideLayoutAudit) {
+        selectionContext =
+          `SCOPE: Layout audit — pre-scan found no remaining issues. Verify active slide only.\n`
+      } else if (explicitIds.length > 0) {
+        selectionContext =
+          `EXPLICIT TARGET: User named slide position(s) ${explicitNums.join(', ')}. ` +
+          `Operate ONLY on: ${explicitIds.map(describeId).join(', ')}. ` +
+          `Call get_slides with slideIds: [${explicitIds.map(id => `"${id}"`).join(', ')}]. ` +
+          `Do NOT ask which slides — they already told you.\n`
+      } else if (effectiveSelectedIds.length > 0) {
+        selectionContext =
+          `The user currently has ${effectiveSelectedIds.length} slide(s) MULTI-SELECTED: ` +
+          `${effectiveSelectedIds.map(describeId).join(', ')}.\n` +
+          `If the instruction refers to "these/those slides", "the selected slides", "this slide", ` +
+          `or otherwise omits explicit slide numbers, target EXACTLY these slide IDs — nothing else.\n`
+      } else {
+        selectionContext = `Active slide: ${describeId(activeSlideId)} (no multi-selection).\n`
+      }
+
+      const workScopeBlock = formatAgentWorkScopeBlock(deckSlides, workScope, isContinuation)
+
+      const scopedSlideCount =
+        workScope.remainingSlideIds.length ||
+        workScope.targetSlideIds.length ||
+        explicitIds.length ||
+        1
+      const agentEffort: Effort =
+        deckBuildWithScope
+          ? routedEffort === 'low' || routedEffort === 'medium'
+            ? 'high'
+            : routedEffort
+          : designSystemAlign
+            ? routedEffort === 'low' || routedEffort === 'medium'
+              ? 'high'
+              : routedEffort
+          : geometryOnlyRun && scopedSlideCount <= 3
+            ? 'low'
+            : layoutAuditRun &&
+                (routedEffort === 'high' || routedEffort === 'xhigh' || routedEffort === 'max')
+              ? 'medium'
+              : routedEffort
+
+      const activeSlideForIntro = deckSlides.find(s => s.id === activeSlideId)
+      const selectedOverlapNote =
+        activeSlideForIntro && selectedElementIds.length >= 2
+          ? (() => {
+              const hits = findOverlapsAmong(selectedElementIds, activeSlideForIntro)
+              if (!hits.length) return ''
+              return (
+                `SELECTED ELEMENT OVERLAP (user highlighted these — fix on canvas):\n` +
+                `${formatLayoutIssues(hits)}\n`
+              )
+            })()
+          : ''
 
       const agentBranchId =
         activeBranchIdRef.current ??
         presentationSummaries.find(p => p.id === presentationId)?.branchId ??
         null
       const layerCtx = buildKnowledgeContext(knowledgeLayers, decisions, activeSlideId, {
-        instruction,
+        instruction: agentInstruction,
         slideText: activeSlideText(slidesRef.current, activeSlideId),
-        // The agent builds decks FROM the uploaded source docs, so feed essentially
-        // the whole document (tables/structure included) — a business plan can run
-        // 100k+ chars and the agent needs all sections, not just the first half.
-        // (Stored text is already capped at 200k in parseDocumentToText.)
-        documentCharCap: 200000,
-        documentTotalCap: 240000,
+        documentCharCap: geometryOnlyRun ? 0 : 200000,
+        documentTotalCap: geometryOnlyRun ? 0 : 240000,
       })
-      const graphCtx = await fetchGraphKnowledgeContext({
-        branchId: agentBranchId,
-        presentationId,
-        instruction,
-        charBudget: 16000,
-      })
-      const knowledgeContext = mergeKnowledgeContexts(layerCtx, graphCtx)
-      const templateKnowledge = mergeTemplatesKnowledge(templates)
-      const mediaCtx = buildMediaContext(mediaManifest(collectAllAssets()))
+      const graphCtx = geometryOnlyRun
+        ? ''
+        : await fetchGraphKnowledgeContext({
+            branchId: agentBranchId,
+            presentationId,
+            instruction: agentInstruction,
+            charBudget: 16000,
+          })
+      const planTargetSlideIds = deckBuildWithScope
+        ? deckSlides.map(s => s.id)
+        : uiScopedSlideIds?.length
+          ? uiScopedSlideIds
+          : workScope.targetSlideIds.length
+            ? workScope.targetSlideIds
+            : effectiveSelectedIds.length > 0
+              ? effectiveSelectedIds
+              : activeSlideId
+                ? [activeSlideId]
+                : []
+      const planInstruction =
+        isContinuation && incompleteAgentContextRef.current
+          ? incompleteAgentContextRef.current.originalInstruction
+          : agentInstruction
+      const agentPlan = geometryOnlyRun
+        ? null
+        : await fetchAgentPlan({
+            branchId: agentBranchId,
+            presentationId,
+            instruction: planInstruction,
+            targetSlideIds: planTargetSlideIds,
+          })
+      const semanticEditPlan: SemanticEditPlan | null = agentPlan?.semantic_edit_plan ?? null
+      const approvalRequired = agentPlan?.orchestrator.approval_required ?? false
+      const knowledgeContext = geometryOnlyRun ? '' : mergeKnowledgeContexts(layerCtx, graphCtx)
+      const templateKnowledge = geometryOnlyRun ? '' : mergeTemplatesKnowledge(templates)
+      const mediaCtx = geometryOnlyRun ? '' : buildMediaContext(mediaManifest(collectAllAssets()))
+
+      const slideIndexForIntro =
+        geometryOnlyRun && scopedSlideCount <= 3 && workScope.targetSlideIds.length
+          ? workScope.targetSlideIds
+              .map(id => {
+                const i = deckSlides.findIndex(s => s.id === id)
+                if (i < 0) return id
+                const s = deckSlides[i]
+                const title =
+                  s.elements.find(e => e.type === 'text' && e.content?.trim())?.content?.slice(0, 40) ??
+                  ''
+                return `${i + 1}. ${s.id} · ${s.elements.length} elements${title ? ` · "${title}"` : ''}`
+              })
+              .join('\n')
+          : slideIndex
 
       // Recent conversation so the agent can resolve follow-ups like "do that for
       // the whole deck" / "I asked you to…" — it previously saw ONLY the current
@@ -2448,16 +3433,56 @@ export default function Home() {
         .filter(Boolean)
         .join('\n')
 
+      const newRequestOverride =
+        !isContinuation && opts?.scopedSlideIds?.length
+          ? `NEW REQUEST OVERRIDE — UI SELECTED SLIDES (${opts.scopedSlideIds.length}): ` +
+            `${opts.scopedSlideIds.map(describeId).join(', ')}. ` +
+            `Execute ONLY on these — ignore prior [INCOMPLETE] work and all other slides.\n\n`
+          : !isContinuation && explicitIds.length > 0
+          ? `NEW REQUEST OVERRIDE — SUPERSEDES PRIOR INCOMPLETE: User named specific slide(s) in this message: ` +
+            `${explicitIds.map(describeId).join(', ')}. Execute ONLY these targets. ` +
+            `Ignore any prior assistant [INCOMPLETE] turns or unfinished work on other slides.\n\n`
+          : !isContinuation && workScope.targetSlideIds.length > 0 && layoutAuditRun
+            ? `NEW REQUEST OVERRIDE — SUPERSEDES PRIOR INCOMPLETE: Layout fix scoped to ` +
+              `${workScope.targetSlideIds.map(id => describeId(id)).join(', ')}. ` +
+              `Do NOT continue patching slides outside this scope from earlier incomplete runs.\n\n`
+            : ''
+
+      const deckSlideCap = deckBuildWithScope
+        ? effectiveSlideLimit(parsedScopeForBuild!)
+        : 0
+
+      const dsForAlign =
+        designSystemRef.current && designSystemRef.current.files.length > 0
+          ? designSystemRef.current
+          : null
+      const deckDesignAlignment = dsForAlign
+        ? formatDesignSystemDeckAlignmentBlock(dsForAlign)
+        : undefined
+      const deckDesignApplyExisting =
+        designSystemAlign && dsForAlign
+          ? deckWideDesignSystem
+            ? formatDesignSystemApplyExistingBlock(dsForAlign)
+            : formatDesignSystemApplyScopedBlock(
+                dsForAlign,
+                workScope.targetSlideIds.length
+                  ? workScope.targetSlideIds
+                  : [activeSlideId].filter((id): id is string => !!id)
+              )
+          : undefined
+
       const intro =
-        `User instruction: "${instruction}"\n\n` +
+        newRequestOverride +
+        `User instruction: "${agentInstruction}"\n\n` +
         (recentTranscript
           ? `RECENT CONVERSATION (context for follow-ups — if the current instruction refers to an ` +
             `earlier request like "I asked you to…", "do that across all slides", "the whole deck", ` +
             `resolve what "that" means from here and carry out the ORIGINAL intent across the requested scope):\n` +
             `${recentTranscript}\n\n`
           : '') +
-        `Deck overview (NUMBER. id — the leading number is the slide's 1-based position):\n${slideIndex}\n\n` +
+        `Deck overview (NUMBER. id — the leading number is the slide's 1-based position):\n${slideIndexForIntro}\n\n` +
         `${selectionContext}` +
+        (selectedOverlapNote ? `${selectedOverlapNote}\n` : '') +
         `Active slide: ${describeId(activeSlideId)}${activeIdx >= 0 ? '' : ''}. ` +
         `Selected elements: ${selectedElementIds.join(', ') || 'none'}.\n` +
         `IMPORTANT: When the user says "slide N", N is the 1-based position above — map it to the ` +
@@ -2467,27 +3492,115 @@ export default function Home() {
           : '') +
         (mediaCtx ? `\n${mediaCtx}\n` : '') +
         (templateKnowledge ? `\nReference template styling:\n${templateKnowledge}\n` : '') +
-        (isNewDeckBuildRequest(instruction) && !parsePresentationScope(instruction)
-          ? `\n${formatScopeGateNote()}\n`
+        (agentPlan?.plan_context ? `\n${agentPlan.plan_context}\n` : '') +
+        (workScopeBlock && !deckBuildWithScope ? `\n${workScopeBlock}\n` : '') +
+        (deckDesignApplyExisting ? `\n${deckDesignApplyExisting}\n` : '') +
+        (designSystemAlign
+          ? deckWideDesignSystem
+            ? `\nDESIGN SYSTEM TASK (deck-wide): Restyle ALL slides with tokens above. Geometry frozen.\n`
+            : `\nDESIGN SYSTEM TASK (scoped): Restyle ONLY slides in work scope. Do NOT touch other slides. Geometry frozen.\n`
           : '') +
+        (deckBuildWithScope
+          ? `\n${formatDeckBuildExecuteBlock(
+              parsedScopeForBuild!,
+              deckSlides.length,
+              workScope.alreadyDoneSlideIds,
+              deckDesignAlignment
+            )}\n`
+          : isNewDeckBuildRequest(agentInstruction) && !parsePresentationScope(agentInstruction)
+            ? `\n${formatScopeGateNote()}\n`
+            : '') +
         ((() => {
-          const scope = parsePresentationScope(instruction)
+          const scope = parsePresentationScope(agentInstruction)
           return scope ? `\n${formatPresentationScopeNote(scope)}\n` : ''
         })()) +
-        `\nIf the instruction covers MULTIPLE slides (e.g. "all slides", "slides 2–5", the selection, ` +
-        `the whole deck), read them all with get_slides (omit slideIds for the whole deck), then apply ONE ` +
-        `combined apply_changes covering every target slide, render 1–2 to verify, then finish. ` +
-        `For a single slide use get_slide → apply_changes → verify → finish.`
+        (deckBuildWithScope
+          ? `\nDECK BUILD: Add 2–3 NEW slides per apply_changes until slide count reaches the cap, then render 1–2 slides and finish. Do NOT rebuild or delete existing slides.${
+              deckDesignAlignment
+                ? ' Apply the loaded design system (bg, fonts, semantic colors) on every new slide.'
+                : ''
+            }`
+          : `\nIf the instruction covers MULTIPLE slides (e.g. "all slides", "slides 2–5", the selection, ` +
+            `the whole deck), read them all with get_slides (omit slideIds for the whole deck), then apply ONE ` +
+            `combined apply_changes covering every target slide, render 1–2 to verify, then finish. ` +
+            `For a single slide use get_slide → apply_changes → verify → finish.`) +
+        (layoutAuditRun
+          ? `\n\nLAYOUT AUDIT: Scope is pre-computed above — execute ONLY on listed slides. ` +
+            `get_slides with scoped slideIds (NOT the full deck). Batch apply_changes 2–4 scoped slides per call. ` +
+            `Geometry patches only (x, y, w, h, index). Align header/title icons to the SAME x/y across all scoped slides.`
+          : '') +
+        (geometryOnlyRun && scopedSlideCount <= 3
+          ? `\n\nGEOMETRY-ONLY (efficiency): ONE get_slides → ONE comprehensive apply_changes → ONE render_slide → finish. ` +
+            `Max 2 apply_changes. Do NOT re-read the slide. Do NOT change fontSize/style. ` +
+            `Ignore margin-imbalance on decorative top accent bars and text-underfill hints — fix overlaps and overflow only.`
+          : '')
 
-      const messages: AgentMessage[] = [{ role: 'user', content: intro }]
+      let messages: AgentMessage[]
+      let loopStartStep = 0
 
-      const deckBuild = isNewDeckBuildRequest(instruction)
-      let presentationScope = parsePresentationScope(instruction)
+      const deckBuild = isNewDeckBuildRequest(agentInstruction)
+      let presentationScope = parsedScopeForBuild
       let scopeConfirmed = !!presentationScope
       let introCompressed = false
 
       const addStep = (step: NonNullable<DisplayMessage['agentStep']>) =>
         setDisplay(prev => [...prev, { role: 'assistant', agentStep: step }])
+
+      if (restoringPause && agentPauseStateRef.current) {
+        const ps = agentPauseStateRef.current
+        messages = cloneMessages(ps.messages) as AgentMessage[]
+        loopStartStep = ps.nextStep
+        introCompressed = ps.introCompressed
+        presentationScope = ps.presentationScope
+        scopeConfirmed = !!presentationScope
+        messages.push({ role: 'user', content: buildAgentResumeNote(ps) })
+        addStep({
+          kind: 'plan',
+          label: `Resuming pipeline — ${ps.reasonLabel} (step ${loopStartStep + 1}, full context kept)`,
+        })
+      } else {
+        messages = [{ role: 'user', content: intro }]
+      }
+
+      if (deckBuildWithScope && !isContinuation) {
+        addStep({
+          kind: 'plan',
+          label: `Deck build: ${presentationScope} — up to ${deckSlideCap} slides (batch 2–3 per apply)`,
+        })
+      }
+
+      if (agentPlan?.has_graph_knowledge && semanticEditPlan && !isContinuation) {
+        const claimCount = semanticEditPlan.claims_to_use.length
+        const metricCount = semanticEditPlan.metrics_to_use.length
+        addStep({
+          kind: 'plan',
+          label:
+            `Knowledge plan: ${claimCount} claim(s), ${metricCount} metric(s)` +
+            (semanticEditPlan.risk_flags.length
+              ? ` · ${semanticEditPlan.risk_flags.length} risk flag(s)`
+              : '') +
+            (approvalRequired ? ' · human approval recommended' : ''),
+        })
+      }
+
+      if (workScope.targetSlideIds.length > 0 && (layoutAuditRun || (isContinuation && !deckBuildWithScope))) {
+        const scopeIds = workScope.remainingSlideIds.length
+          ? workScope.remainingSlideIds
+          : workScope.targetSlideIds
+        addStep({
+          kind: 'plan',
+          label:
+            `Work scope: ${scopeIds.length} slide(s) — ${scopeIds
+              .map(id => describeId(id))
+              .join(', ')}` +
+            (workScope.alreadyDoneSlideIds.length
+              ? ` · ${workScope.alreadyDoneSlideIds.length} already done`
+              : '') +
+            (Object.keys(workScope.issueBySlideId).length
+              ? ` · ${Object.keys(workScope.issueBySlideId).length} with detected issues`
+              : ''),
+        })
+      }
 
       // Bounded "act, don't hang" recovery: if a turn returns no tool call we
       // nudge the model to act instead of silently stopping.
@@ -2495,18 +3608,93 @@ export default function Home() {
       const MAX_NUDGES = 2
 
       // ── Phase 5 guards: verification, cost ceiling, oscillation ──
-      let appliedAny = false          // any apply_changes ran this run
-      let verifiedSinceApply = false  // a render happened after the latest apply
+      let appliedAny =
+        restoringPause && agentPauseStateRef.current
+          ? agentPauseStateRef.current.appliedAny
+          : false
+      let verifiedSinceApply =
+        restoringPause && agentPauseStateRef.current
+          ? agentPauseStateRef.current.verifiedSinceApply
+          : false
       let verifyNudges = 0            // times we've forced a verify before finish
       const MAX_VERIFY_NUDGES = 1
+      let knowledgeReviewNudges = 0
+      const MAX_KNOWLEDGE_REVIEW_NUDGES = 1
+      let spacingFinishNudges = 0
+      const MAX_SPACING_FINISH_NUDGES = geometryOnlyRun ? 0 : 2
+      let lastValidation: ValidationResult | null = null
       let applyCount = 0
-      const MAX_APPLIES = 8           // hard ceiling on edits per run (cost guard)
+      const scopedApplyCount =
+        workScope.remainingSlideIds.length ||
+        workScope.targetSlideIds.length ||
+        explicitIds.length ||
+        1
+      const MAX_APPLIES = deckBuildWithScope
+        ? Math.min(28, Math.max(16, deckSlideCap * 2))
+        : geometryOnlyRun
+          ? scopedApplyCount <= 1
+            ? 3
+            : Math.min(6, scopedApplyCount * 2)
+          : layoutAuditRun
+            ? Math.max(12, scopedApplyCount * 4)
+            : 8
+      const maxAgentSteps = deckBuildWithScope
+        ? Math.min(40, 12 + deckSlideCap * 2)
+        : AGENT_MAX_STEPS
       const applySignatures: string[] = []
       let stopFlag: string | null = null  // set to abort the loop after this turn
       let hitStepLimit = false        // ran out of steps before calling finish
 
+      const captureAgentPause = (
+        reason: AgentPauseReason,
+        reasonLabel: string,
+        step: number
+      ) => {
+        const p = agentProgressRef.current
+        const modified = Array.from(p.changedSlideIds)
+        const incomplete: IncompleteAgentContext = incompleteAgentContextRef.current ?? {
+          originalInstruction:
+            agentPauseStateRef.current?.originalInstruction ?? agentInstruction,
+          modifiedSlideIds: modified,
+          targetSlideIds: slidesRef.current.map(s => s.id),
+          lastAction: p.lastAction,
+          wasLayoutAudit: layoutAuditRun,
+          deckWide: deckBuildWithScope,
+        }
+        agentPauseStateRef.current = {
+          version: AGENT_PAUSE_STATE_VERSION,
+          reason,
+          reasonLabel,
+          originalInstruction: incomplete.originalInstruction,
+          messages: cloneMessages(messages),
+          nextStep: step + 1,
+          introCompressed,
+          presentationScope,
+          parsedScopeForBuild,
+          deckBuildWithScope,
+          layoutAuditRun,
+          geometryOnlyRun,
+          deckSlideCap,
+          agentEffort,
+          appliedAny,
+          verifiedSinceApply,
+          incompleteContext: {
+            ...incomplete,
+            modifiedSlideIds: modified,
+            lastAction: p.lastAction,
+            deckWide: incomplete.deckWide || deckBuildWithScope,
+            targetSlideIds: deckBuildWithScope
+              ? slidesRef.current.map(s => s.id)
+              : incomplete.targetSlideIds,
+          },
+          segmentIndex: (agentPauseStateRef.current?.segmentIndex ?? -1) + 1,
+          pausedAt: Date.now(),
+        }
+        incompleteAgentContextRef.current = agentPauseStateRef.current.incompleteContext
+      }
+
       try {
-        for (let step = 0; step < AGENT_MAX_STEPS; step++) {
+        for (let step = loopStartStep; step < maxAgentSteps; step++) {
           // Cancellation check at the top of each step (covers a Stop pressed
           // between turns, before the next request goes out).
           if (agentStopRef.current) {
@@ -2515,19 +3703,112 @@ export default function Home() {
           }
           const ac = new AbortController()
           agentAbortRef.current = ac
+          const deckBuildExecuteOnly =
+            deckBuildWithScope && slidesRef.current.length < deckSlideCap
+          const useReviewPhase =
+            appliedAny &&
+            !deckBuildExecuteOnly &&
+            !designSystemAlign &&
+            !(geometryOnlyRun && scopedSlideCount <= 3) &&
+            !(deckBuildWithScope && spacingFinishNudges >= MAX_SPACING_FINISH_NUDGES)
+          const agentPhase = useReviewPhase ? 'review' : 'execute'
           const res = await fetch('/api/edit/agent', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ messages, effort }),
+            body: JSON.stringify({
+              messages,
+              effort: agentEffort,
+              phase: agentPhase,
+              layoutAudit: layoutAuditRun,
+              geometryOnly: geometryOnlyRun,
+              deckBuild: deckBuildWithScope,
+            }),
             signal: ac.signal,
           })
           if (!res.ok) {
             let msg = `Agent request failed (HTTP ${res.status})`
+            let transientKind: 'overloaded' | 'rate_limit' | null = null
             try {
               const errData = await res.json()
               if (errData?.error) msg = errData.error
+              if (errData?.transient === 'overloaded' || errData?.transient === 'rate_limit') {
+                transientKind = errData.transient
+              } else if (/overloaded/i.test(String(errData?.error ?? ''))) {
+                transientKind = 'overloaded'
+              }
             } catch {
               /* non-JSON error body — keep the generic message */
+            }
+            if (!transientKind && /overloaded/i.test(msg)) transientKind = 'overloaded'
+            if (!transientKind && res.status === 429) transientKind = 'rate_limit'
+            if (!transientKind && (res.status === 503 || res.status === 529)) {
+              transientKind = 'overloaded'
+            }
+
+            const p = agentProgressRef.current
+            const modified = Array.from(p.changedSlideIds)
+            const hasChanges =
+              modified.length > 0 || (pendingChangesRef.current?.length ?? 0) > 0
+
+            if (transientKind) {
+              const limitReached =
+                transientKind === 'overloaded'
+                  ? buildOverloadedError({
+                      modifiedSlideIds: modified,
+                      applyBatches: p.applyBatches || undefined,
+                      lastAction: p.lastAction || undefined,
+                      hasChanges,
+                    })
+                  : buildRateLimitError({
+                      modifiedSlideIds: modified,
+                      applyBatches: p.applyBatches || undefined,
+                      lastAction: p.lastAction || undefined,
+                      hasChanges,
+                    })
+              msg = formatAgentLimitError(limitReached)
+              captureAgentPause(
+                transientKind,
+                transientKind === 'overloaded'
+                  ? 'Anthropic API overloaded'
+                  : 'Anthropic rate limit',
+                step
+              )
+              setAgentRunIncomplete(true)
+              if (hasChanges && pendingChangesRef.current?.length) {
+                setPendingSummary(prev => prev || runSummary || 'Agent edits (incomplete)')
+              }
+              addStep({ kind: 'error', label: msg, limitReached })
+              break
+            }
+
+            if (res.status === 504) {
+              const limitReached = buildTimeoutError({
+                modifiedSlideIds: modified,
+                applyBatches: p.applyBatches || undefined,
+                lastAction: p.lastAction || undefined,
+                hasChanges,
+              })
+              msg = formatAgentLimitError(limitReached)
+              setAgentRunIncomplete(true)
+              if (!hasChanges) {
+                setAmendmentCheckpoint(null)
+                setAmendmentSource(null)
+                setPendingChanges(null)
+                pendingChangesRef.current = null
+                setSlides(JSON.parse(JSON.stringify(beforeRun)) as SlideData[])
+                slidesRef.current = JSON.parse(JSON.stringify(beforeRun)) as SlideData[]
+              } else if (pendingChangesRef.current?.length) {
+                setPendingSummary(prev => prev || runSummary || 'Agent edits (incomplete)')
+              }
+              if (hasChanges) {
+                captureAgentPause(
+                  'timeout',
+                  'server step timed out (504)',
+                  step
+                )
+              }
+              addStep({ kind: 'error', label: msg, limitReached })
+              break
             }
             addStep({ kind: 'error', label: msg })
             break
@@ -2557,9 +3838,34 @@ export default function Home() {
 
             const { id, name, input } = block
             if (name === 'finish') {
-              // Verification gate: don't let the agent declare done after editing
-              // without ever rendering an edited slide to confirm the result.
-              if (appliedAny && !verifiedSinceApply && verifyNudges < MAX_VERIFY_NUDGES) {
+              // Knowledge validation gate: block finish when unverified claims remain
+              // on investor-facing edits until the agent revises or softens copy.
+              const needsKnowledgeFix =
+                lastValidation &&
+                (lastValidation.validation_result === 'human_review' ||
+                  (lastValidation.validation_result === 'needs_fix' &&
+                    lastValidation.issues.some(i => i.severity === 'high')))
+              if (
+                needsKnowledgeFix &&
+                knowledgeReviewNudges < MAX_KNOWLEDGE_REVIEW_NUDGES
+              ) {
+                knowledgeReviewNudges++
+                addStep({
+                  kind: 'review',
+                  label: formatValidationForUser(lastValidation!),
+                })
+                toolResults.push({
+                  type: 'tool_result',
+                  tool_use_id: id,
+                  content:
+                    `Do NOT finish yet — knowledge validation flagged issues:\n${formatValidationForAgent(lastValidation!)}`,
+                })
+              } else if (
+                appliedAny &&
+                !verifiedSinceApply &&
+                verifyNudges < MAX_VERIFY_NUDGES &&
+                !(geometryOnlyRun && scopedSlideCount <= 1)
+              ) {
                 verifyNudges++
                 addStep({
                   kind: 'note',
@@ -2571,12 +3877,157 @@ export default function Home() {
                   content:
                     'Do NOT finish yet: you applied changes but have not rendered any edited slide to confirm the result. Call render_slide on one changed slide, verify it looks right, then finish.',
                 })
+              } else if (designSystemAlign && appliedAny) {
+                finished = true
+                runFinishedCleanly = true
+                if (input?.summary) runSummary = input.summary
+                addStep({ kind: 'done', label: input?.summary || 'Done.' })
+              } else if (agentPhase === 'review' || layoutAuditRun) {
+                const modifiedIds = agentProgressRef.current.changedSlideIds
+                const finishCheckIds = new Set(modifiedIds)
+                if (layoutAuditRun) {
+                  for (const id of workScope.targetSlideIds) finishCheckIds.add(id)
+                  for (const id of workScope.remainingSlideIds) finishCheckIds.add(id)
+                } else {
+                  if (activeSlideId) finishCheckIds.add(activeSlideId)
+                  for (const id of selectedSlideIds) finishCheckIds.add(id)
+                }
+                const slidesToFinishCheck = slidesRef.current.filter(s => finishCheckIds.has(s.id))
+                const overlapsRemaining = slidesToFinishCheck.flatMap(s => findOverlapIssues(s))
+                if (overlapsRemaining.length > 0) {
+                  addStep({
+                    kind: 'review',
+                    label: `${overlapsRemaining.length} overlap(s) still on slide — separating icon/text and colliding elements.`,
+                  })
+                  toolResults.push({
+                    type: 'tool_result',
+                    tool_use_id: id,
+                    content:
+                      `Do NOT finish yet — overlap check failed:\n${formatOverlapCheck(
+                        overlapsRemaining
+                      )}\n\n` +
+                      `Call apply_changes to separate every colliding pair (move icon left of text with gap, ` +
+                      `nudge text x right + padLeft, or resize).`,
+                  })
+                } else if (!geometryOnlyRun && spacingFinishNudges < MAX_SPACING_FINISH_NUDGES) {
+                  const spacingRemaining = slidesToFinishCheck.flatMap(s => findSpacingIssues(s))
+                  if (spacingRemaining.length > 0) {
+                    spacingFinishNudges++
+                    addStep({
+                      kind: 'review',
+                      label: `Spacing/fill issues on ${spacingRemaining.length} check(s) — rebalancing margins and gaps.`,
+                    })
+                    toolResults.push({
+                      type: 'tool_result',
+                      tool_use_id: id,
+                      content:
+                        `Do NOT finish yet — review phase spacing check failed:\n${formatSpacingCheck(
+                          spacingRemaining
+                        )}\n\n` +
+                        `Call apply_changes to fix: equal top/bottom and left/right margins; even vertical gaps ` +
+                        `between stacked elements; stretch or redistribute horizontal columns to fill width evenly; ` +
+                        `for tables bump style.fontSize on cell text flagged as text-underfill so copy fills each cell.`,
+                    })
+                  } else {
+                    finished = true
+                    runFinishedCleanly = true
+                    if (input?.summary) runSummary = input.summary
+                    addStep({ kind: 'done', label: input?.summary || 'Done.' })
+                  }
+                } else if (geometryOnlyRun) {
+                  finished = true
+                  runFinishedCleanly = true
+                  if (input?.summary) runSummary = input.summary
+                  addStep({ kind: 'done', label: input?.summary || 'Done.' })
+                } else if (spacingFinishNudges >= MAX_SPACING_FINISH_NUDGES) {
+                  const spacingRemaining = slidesToFinishCheck.flatMap(s => findSpacingIssues(s))
+                  if (spacingRemaining.length > 0) {
+                    addStep({
+                      kind: 'review',
+                      label: `Spacing/balance limit — ${spacingRemaining.length} issue(s) remain; pipeline paused.`,
+                    })
+                    toolResults.push({
+                      type: 'tool_result',
+                      tool_use_id: id,
+                      content:
+                        `Do NOT finish yet — spacing/balance review limit reached for this segment:\n${formatSpacingCheck(
+                          spacingRemaining
+                        )}\n\n` +
+                        `Say "continue" to resume margin/gap fixes, or Accept/Decline changes on the canvas.`,
+                    })
+                    stopFlag =
+                      'Paused: spacing/balance review limit reached — say "continue" to resume.'
+                  } else {
+                    finished = true
+                    runFinishedCleanly = true
+                    if (input?.summary) runSummary = input.summary
+                    addStep({ kind: 'done', label: input?.summary || 'Done.' })
+                  }
+                } else {
+                  finished = true
+                  runFinishedCleanly = true
+                  if (input?.summary) runSummary = input.summary
+                  addStep({ kind: 'done', label: input?.summary || 'Done.' })
+                }
+              } else if (!appliedAny && layoutAuditRun) {
+                addStep({
+                  kind: 'note',
+                  label: 'Layout audit requires apply_changes — asking the agent to patch slides, not just report.',
+                })
+                toolResults.push({
+                  type: 'tool_result',
+                  tool_use_id: id,
+                  content:
+                    'Do NOT finish yet: this is a layout audit/fix task but you applied ZERO changes. ' +
+                    'Call get_slides, then apply_changes with geometry patches (x, y, w, h, spacing) for every issue. ' +
+                    'A text-only deck inventory is not acceptable — fixes must appear on the slides. ' +
+                    'Scope slide caps do NOT block geometry edits on existing slides.',
+                })
               } else {
                 finished = true
+                runFinishedCleanly = true
                 if (input?.summary) runSummary = input.summary
                 addStep({ kind: 'done', label: input?.summary || 'Done.' })
               }
             } else if (name === 'ask_user') {
+              const questions = Array.isArray(input?.questions) ? input!.questions! : []
+              const asksSlideIds = questions.some(q =>
+                /\b(which\s+slide|what\s+slide|slide\s+id|last\s*\/\s*closing|confirm\s+both|which\s+is\s+the\s+last)\b/i.test(
+                  q.question ?? ''
+                )
+              )
+              const depthOnly =
+                questions.length > 0 &&
+                questions.every((q: ClarificationQuestion) => q.id === 'presentation_depth')
+              if (asksSlideIds || designSystemAlign) {
+                toolResults.push({
+                  type: 'tool_result',
+                  tool_use_id: id,
+                  content:
+                    'Do NOT call ask_user to identify slides. The deck overview lists every position → id ' +
+                    `(slide 1 = first, slide ${slidesRef.current.length} = last). ` +
+                    'Call get_slides (omit slideIds) then apply_changes immediately.',
+                  is_error: true,
+                })
+              } else if (scopeConfirmed && depthOnly && deckBuild) {
+                toolResults.push({
+                  type: 'tool_result',
+                  tool_use_id: id,
+                  content:
+                    'Presentation depth is already confirmed in the DECK BUILD block. ' +
+                    'Proceed with get_slides and apply_changes — do NOT call ask_user for depth.',
+                  is_error: true,
+                })
+              } else if (isContinuation || agentInstruction.includes('[CONTINUE —')) {
+                toolResults.push({
+                  type: 'tool_result',
+                  tool_use_id: id,
+                  content:
+                    'Do NOT call ask_user on a CONTINUE request. The original task and remaining slides are in the intro. ' +
+                    'Proceed with get_slides and apply_changes for the outstanding work immediately.',
+                  is_error: true,
+                })
+              } else {
               // Pause the loop and surface structured questions to the user. We end
               // this run (changes so far are kept) and resume once they answer.
               const questions = Array.isArray(input?.questions) ? input!.questions! : []
@@ -2593,14 +4044,16 @@ export default function Home() {
                   is_error: true,
                 })
               }
+              }
             } else if (name === 'get_slide') {
               const slide = slidesRef.current.find(s => s.id === input?.slideId)
+              agentProgressRef.current.lastAction = `Inspected ${input?.slideId}`
               addStep({ kind: 'read', label: `Inspected ${input?.slideId}` })
               toolResults.push({
                 type: 'tool_result',
                 tool_use_id: id,
                 content: slide
-                  ? JSON.stringify({ id: slide.id, bg: slide.bg, elements: slide.elements })
+                  ? slimSlideJson([{ id: slide.id, bg: slide.bg, elements: slide.elements }])
                   : `Slide ${input?.slideId} not found. Available: ${slidesRef.current
                       .map(s => s.id)
                       .join(', ')}`,
@@ -2608,6 +4061,51 @@ export default function Home() {
               })
             } else if (name === 'get_slides') {
               const requested = Array.isArray(input?.slideIds) ? (input!.slideIds as string[]) : null
+              const scopedIds =
+                workScope.remainingSlideIds.length > 0
+                  ? workScope.remainingSlideIds
+                  : workScope.targetSlideIds
+              const scopeLocked =
+                scopedIds.length > 0 &&
+                scopedIds.length < slidesRef.current.length &&
+                !workScope.allowFullDeckRead
+              const uiScopeLocked = !!opts?.scopedSlideIds?.length
+              if (
+                requested &&
+                scopeLocked &&
+                (layoutAuditRun || (isContinuation && !deckBuildWithScope) || uiScopeLocked)
+              ) {
+                const allowed = new Set(scopedIds)
+                const outside = requested.filter(id => !allowed.has(id))
+                if (outside.length) {
+                  toolResults.push({
+                    type: 'tool_result',
+                    tool_use_id: id,
+                    content:
+                      `Slides outside work scope: ${outside.join(', ')}. ` +
+                      `Call get_slides with slideIds: [${scopedIds.map(sid => `"${sid}"`).join(', ')}] only.`,
+                    is_error: true,
+                  })
+                  continue
+                }
+              }
+              if (
+                !requested &&
+                scopedIds.length > 0 &&
+                scopedIds.length < slidesRef.current.length &&
+                !workScope.allowFullDeckRead &&
+                (layoutAuditRun || (isContinuation && !deckBuildWithScope) || uiScopeLocked)
+              ) {
+                toolResults.push({
+                  type: 'tool_result',
+                  tool_use_id: id,
+                  content:
+                    `Do NOT read the full deck — work scope is limited to ${scopedIds.length} slide(s). ` +
+                    `Call get_slides again with slideIds: [${scopedIds.map(sid => `"${sid}"`).join(', ')}].`,
+                  is_error: true,
+                })
+                continue
+              }
               const picked = requested
                 ? slidesRef.current.filter(s => requested.includes(s.id))
                 : slidesRef.current
@@ -2617,10 +4115,13 @@ export default function Home() {
                   ? `Inspected ${picked.length} slide(s): ${picked.map(s => s.id).join(', ')}`
                   : `Inspected all ${picked.length} slides`,
               })
+              agentProgressRef.current.lastAction = requested
+                ? `Inspected ${picked.length} slide(s)`
+                : `Inspected all ${picked.length} slides`
               toolResults.push({
                 type: 'tool_result',
                 tool_use_id: id,
-                content: JSON.stringify(
+                content: slimSlideJson(
                   picked.map(s => ({ id: s.id, bg: s.bg, elements: s.elements }))
                 ),
               })
@@ -2629,6 +4130,7 @@ export default function Home() {
               const png = slide ? await renderSlideToPng(slide) : null
               // A render after an edit counts as verification (satisfies the gate).
               if (appliedAny) verifiedSinceApply = true
+              agentProgressRef.current.lastAction = `Rendered ${input?.slideId}`
               addStep({ kind: 'render', label: `Rendered ${input?.slideId}`, image: png ?? undefined })
               if (png) {
                 toolResults.push({
@@ -2678,24 +4180,58 @@ export default function Home() {
                 collectAllAssets()
               )
 
-              if (deckBuild && changesAddSlides(changes) && !scopeConfirmed) {
+              const scopeSlideIds =
+                workScope.remainingSlideIds.length > 0
+                  ? workScope.remainingSlideIds
+                  : workScope.targetSlideIds
+              const scopeLocked =
+                scopeSlideIds.length > 0 && scopeSlideIds.length < slidesRef.current.length
+              const uiScopeLocked = !!opts?.scopedSlideIds?.length
+              if (
+                scopeLocked &&
+                (layoutAuditRun || (isContinuation && !deckBuildWithScope) || uiScopeLocked) &&
+                !(deckBuild && scopeConfirmed && changesAddSlides(changes))
+              ) {
+                const allowed = new Set(scopeSlideIds)
+                const touched = [
+                  ...new Set(changes.map(c => c.slideId).filter((id): id is string => !!id)),
+                ]
+                const outside = touched.filter(id => !allowed.has(id))
+                if (outside.length) {
+                  addStep({
+                    kind: 'note',
+                    label: `Blocked — patch targeted slide(s) outside scope: ${outside.join(', ')}`,
+                  })
+                  toolResults.push({
+                    type: 'tool_result',
+                    tool_use_id: id,
+                    content:
+                      `These slide(s) are OUTSIDE the locked work scope: ${outside.join(', ')}. ` +
+                      `apply_changes ONLY for: ${scopeSlideIds.join(', ')}. Nothing was applied.`,
+                    is_error: true,
+                  })
+                  continue
+                }
+              }
+
+              if (deckBuild && !scopeConfirmed) {
                 addStep({
                   kind: 'note',
-                  label: 'Blocked slide creation — choose Light / Medium / In-depth first.',
+                  label: 'Blocked — choose Light / Medium / In-depth first.',
                 })
                 toolResults.push({
                   type: 'tool_result',
                   tool_use_id: id,
                   content:
-                    'You must call ask_user FIRST with question id "presentation_depth" (Light ≤5 / Medium ≤10 / In-depth ≤15 slides) before adding slides. Nothing was applied.',
+                    'You must call ask_user FIRST with question id "presentation_depth" (Light ≤5 / Medium ≤10 / In-depth ≤15 slides) before any apply_changes on a new deck build. Nothing was applied.',
                   is_error: true,
                 })
                 continue
               }
 
-              const slideLimit = effectiveSlideLimit(presentationScope)
-              const projected = projectDeckSlideCount(slidesRef.current, changes)
-              if (projected > slideLimit) {
+              if (wouldExceedScopeSlideLimit(slidesRef.current, changes, presentationScope)) {
+                const slideLimit = effectiveSlideLimit(presentationScope)
+                const projected = applyChangesToSlides(slidesRef.current, changes).length
                 addStep({
                   kind: 'note',
                   label: `Blocked — would exceed the ${slideLimit}-slide limit (${projected} total).`,
@@ -2704,9 +4240,10 @@ export default function Home() {
                   type: 'tool_result',
                   tool_use_id: id,
                   content:
-                    `This patch would bring the deck to ${projected} slides, exceeding the limit of ${slideLimit}` +
+                    `This patch would ADD slides and bring the deck to ${projected}, exceeding the limit of ${slideLimit}` +
                     (presentationScope ? ` (${presentationScope} scope)` : '') +
-                    `. Nothing was applied. Add at most ${Math.max(0, slideLimit - slidesRef.current.length)} more slide(s), or finish.`,
+                    `. Nothing was applied. Scope caps apply only when creating NEW slides — geometry/content edits on existing slides are always allowed. ` +
+                    `Add at most ${Math.max(0, slideLimit - slidesRef.current.length)} more slide(s), or finish.`,
                   is_error: true,
                 })
                 continue
@@ -2722,28 +4259,84 @@ export default function Home() {
               verifiedSinceApply = false
               if (repeats >= 1) {
                 stopFlag =
-                  'Stopped: the agent re-applied an identical edit (likely looping). Changes so far are kept.'
+                  'Paused: identical edit loop detected. Changes kept — say "continue" to resume the pipeline.'
               } else if (applyCount > MAX_APPLIES) {
-                stopFlag = `Stopped: reached the ${MAX_APPLIES}-edit ceiling for one run. Changes so far are kept.`
+                stopFlag = `Paused: reached the ${MAX_APPLIES}-edit limit for this segment. Changes kept — say "continue" to resume.`
               }
               const report = analyzeChanges(slidesRef.current, changes)
               const before = slidesRef.current
               const next = applyChangesToSlides(before, changes)
+              const sum = input?.summary || `${report.willApply} change(s)`
               slidesRef.current = next
-              setSlides(next)
+              pendingChangesRef.current = [...(pendingChangesRef.current ?? []), ...changes]
+              for (const c of changes) agentProgressRef.current.changedSlideIds.add(c.slideId)
+              agentProgressRef.current.applyBatches++
+              agentProgressRef.current.lastAction = `Applied ${report.willApply} change(s): ${sum}`
+              if (incompleteAgentContextRef.current) {
+                const merged = new Set([
+                  ...incompleteAgentContextRef.current.modifiedSlideIds,
+                  ...Array.from(agentProgressRef.current.changedSlideIds),
+                ])
+                incompleteAgentContextRef.current = {
+                  ...incompleteAgentContextRef.current,
+                  modifiedSlideIds: Array.from(merged),
+                  targetSlideIds:
+                    incompleteAgentContextRef.current.targetSlideIds.length > 0
+                      ? incompleteAgentContextRef.current.targetSlideIds
+                      : workScope.targetSlideIds,
+                  lastAction: agentProgressRef.current.lastAction,
+                }
+              }
               // Programmatic geometry check (mirrors a designer measuring for
               // overflow): surface only the issues THIS edit introduced so the
               // model can self-correct without re-rendering every slide.
-              const { newIssues } = reviewLayoutChange(before, next)
-              const sum = input?.summary || `${report.willApply} change(s)`
+              const { newIssues, spacingIssues, overlapIssues } = reviewLayoutChange(before, next)
+              const geomNewIssues = designSystemAlign
+                ? filterOverlapOnlyLayoutIssues(newIssues)
+                : geometryOnlyRun
+                  ? filterGeometryLayoutIssues(newIssues)
+                  : newIssues
+              const touchedIds = new Set(changes.map(c => c.slideId).filter(Boolean))
+              const spacingOnTouched = spacingIssues.filter(
+                i => i.slideId && touchedIds.has(i.slideId)
+              )
+              const overlapOnTouched = overlapIssues.filter(
+                i => i.slideId && touchedIds.has(i.slideId)
+              )
               runSummary = sum
               totalSkipped += report.skipped
               addStep({
                 kind: 'apply',
                 label: `Applied ${report.willApply}/${report.total}: ${sum}${
-                  newIssues.length ? ` · ${newIssues.length} layout issue(s)` : ''
+                  geomNewIssues.length ? ` · ${geomNewIssues.length} layout issue(s)` : ''
                 }`,
               })
+
+              let knowledgeReviewBlock = ''
+              if (semanticEditPlan || approvalRequired) {
+                const validation = await reviewAgentChanges({
+                  instruction: agentInstruction,
+                  semanticEditPlan,
+                  changes,
+                  slidesAfter: next,
+                  approvalRequired,
+                })
+                if (validation) {
+                  lastValidation = validation
+                  if (validation.issues.length) {
+                    addStep({
+                      kind: 'review',
+                      label: formatValidationForUser(validation),
+                    })
+                  }
+                  if (validation.validation_result !== 'pass') {
+                    knowledgeReviewBlock = `\n\nKNOWLEDGE VALIDATION:\n${formatValidationForAgent(validation)}`
+                  } else {
+                    knowledgeReviewBlock = '\n\nKNOWLEDGE VALIDATION: PASS — no blocking issues.'
+                  }
+                }
+              }
+
               toolResults.push({
                 type: 'tool_result',
                 tool_use_id: id,
@@ -2752,12 +4345,32 @@ export default function Home() {
                     ? ` (${report.skipped} skipped — verify those element ids actually exist on the slide)`
                     : ''
                 }.${
-                  newIssues.length
-                    ? `\n\nLAYOUT CHECK — this edit introduced ${newIssues.length} geometry issue(s) (slide is 10×7.5in); fix them before finishing:\n${formatLayoutIssues(
-                        newIssues
+                  geomNewIssues.length
+                    ? `\n\nLAYOUT CHECK — this edit introduced ${geomNewIssues.length} geometry issue(s) (slide is 10×7.5in); fix them before finishing:\n${formatLayoutIssues(
+                        geomNewIssues
                       )}`
                     : '\n\nLAYOUT CHECK — no new overflow/overlap detected.'
-                } Re-render the slide to verify the result visually.`,
+                }${
+                  geometryOnlyRun
+                    ? overlapOnTouched.length
+                      ? `\n\n${formatOverlapCheck(overlapOnTouched)}`
+                      : '\n\nOVERLAP CHECK — no content-hiding overlaps detected.'
+                    : designSystemAlign
+                      ? overlapOnTouched.length
+                        ? `\n\n${formatOverlapCheck(overlapOnTouched)}`
+                        : '\n\nSTYLING PASS — ignore margin-imbalance on accent bars; overlaps only.'
+                    : agentPhase === 'review' || layoutAuditRun
+                      ? `\n\n${formatOverlapCheck(overlapOnTouched)}\n\n${formatSpacingCheck(spacingOnTouched)}`
+                      : geomNewIssues.some(i => i.kind === 'overlap')
+                        ? `\n\n${formatOverlapCheck(geomNewIssues.filter(i => i.kind === 'overlap'))}`
+                        : ''
+                }${knowledgeReviewBlock}${
+                  designSystemAlign
+                    ? ' Finish when bg/fonts/colors match on all target slides — do not chase margins.'
+                    : geometryOnlyRun
+                      ? ' Finish after one render if overlaps are clear.'
+                      : ' Re-render the slide to verify the result visually.'
+                }`,
               })
             } else {
               toolResults.push({
@@ -2786,17 +4399,30 @@ export default function Home() {
                 },
               },
             ])
-            setPendingAgentInstruction(instruction)
+            setPendingAgentInstruction(agentInstruction)
+            const modifiedNow = diffSlideIds(beforeRun, slidesRef.current)
+            if (incompleteAgentContextRef.current) {
+              incompleteAgentContextRef.current = {
+                ...incompleteAgentContextRef.current,
+                modifiedSlideIds: modifiedNow,
+                targetSlideIds: slidesRef.current.map(s => s.id),
+                deckWide: isNewDeckBuildRequest(agentInstruction),
+                lastAction: 'Paused for user input',
+              }
+            } else if (modifiedNow.length > 0) {
+              incompleteAgentContextRef.current = {
+                originalInstruction: agentInstruction,
+                modifiedSlideIds: modifiedNow,
+                targetSlideIds: slidesRef.current.map(s => s.id),
+                lastAction: 'Paused for user input',
+                wasLayoutAudit: false,
+                deckWide: isNewDeckBuildRequest(agentInstruction),
+              }
+            }
             // Record what was asked so the resumed run has continuity.
             const asked = payload.questions.map(q => q.question).filter(Boolean).join(' | ')
             runSummary =
               `[asked the user]${payload.intro ? ` ${payload.intro}` : ''}${asked ? ` — ${asked}` : ''}`.trim()
-            break
-          }
-
-          // Cost/oscillation abort — surface why and stop (changes already applied).
-          if (stopFlag) {
-            addStep({ kind: 'error', label: stopFlag })
             break
           }
 
@@ -2829,27 +4455,37 @@ export default function Home() {
               })
               continue
             }
+            captureAgentPause(
+              'no_tool_call',
+              'agent stopped without calling a tool',
+              step
+            )
+            const modified = Array.from(agentProgressRef.current.changedSlideIds)
+            const limitReached = buildNoToolCallPauseError({
+              modifiedSlideIds: modified,
+              lastAction: agentProgressRef.current.lastAction || undefined,
+              hasChanges: modified.length > 0,
+            })
             addStep({
               kind: 'error',
-              label:
-                'Agent stopped without finishing (no tool call). Any changes so far are applied — try resending with a more specific, smaller-scope instruction.',
+              label: formatAgentLimitError(limitReached),
+              limitReached,
             })
+            setAgentRunIncomplete(true)
             break
           }
 
           messages.push({ role: 'user', content: toolResults })
 
-          // Drop heavy knowledge/template/media from the intro after step 1 — they
-          // were available on the first turn and must not be re-sent every step.
-          if (!introCompressed && step === 0) {
+          if (!introCompressed && step === loopStartStep) {
             introCompressed = true
-            const parsedScope = parsePresentationScope(instruction)
+            const parsedScope = parsePresentationScope(agentInstruction)
             if (parsedScope) presentationScope = parsedScope
             const first = messages[0]
             if (first?.role === 'user' && typeof first.content === 'string') {
               messages[0] = {
                 role: 'user',
-                content: compressAgentIntro(first.content, instruction, {
+                content: compressAgentIntro(first.content, agentInstruction, {
                   scopeNote: presentationScope
                     ? formatPresentationScopeNote(presentationScope)
                     : undefined,
@@ -2858,11 +4494,70 @@ export default function Home() {
             }
           }
 
-          if (step === AGENT_MAX_STEPS - 1) {
-            hitStepLimit = true
+          if (stopFlag) {
+            const modified = Array.from(agentProgressRef.current.changedSlideIds)
+            const oscillation = stopFlag.includes('identical edit')
+            const spacingLimit = stopFlag.includes('spacing/balance')
+            captureAgentPause(
+              spacingLimit ? 'spacing_limit' : oscillation ? 'oscillation' : 'apply_limit',
+              stopFlag.replace(/^Paused:\s*/i, ''),
+              step
+            )
+            const limitReached = spacingLimit
+              ? buildSpacingLimitError({
+                  modifiedSlideIds: modified,
+                  applyBatches: agentProgressRef.current.applyBatches || undefined,
+                  lastAction: agentProgressRef.current.lastAction || undefined,
+                  hasChanges: modified.length > 0 || (pendingChangesRef.current?.length ?? 0) > 0,
+                })
+              : buildApplyLimitError({
+                  applyLimit: MAX_APPLIES,
+                  modifiedSlideIds: modified,
+                  applyBatches: agentProgressRef.current.applyBatches || undefined,
+                  lastAction: agentProgressRef.current.lastAction || undefined,
+                  hasChanges: modified.length > 0 || (pendingChangesRef.current?.length ?? 0) > 0,
+                  oscillation,
+                })
             addStep({
               kind: 'error',
-              label: `Reached the ${AGENT_MAX_STEPS}-step limit before finishing — changes so far are applied. Say "continue" to finish the rest.`,
+              label: formatAgentLimitError(limitReached),
+              limitReached,
+            })
+            setAgentRunIncomplete(true)
+            break
+          }
+
+          if (step === maxAgentSteps - 1) {
+            hitStepLimit = true
+            setAgentRunIncomplete(true)
+            const p = agentProgressRef.current
+            const modified = Array.from(p.changedSlideIds)
+            captureAgentPause(
+              'step_limit',
+              `reached the ${maxAgentSteps}-step limit`,
+              step
+            )
+            if (incompleteAgentContextRef.current) {
+              const merged = new Set([
+                ...incompleteAgentContextRef.current.modifiedSlideIds,
+                ...modified,
+              ])
+              incompleteAgentContextRef.current = {
+                ...incompleteAgentContextRef.current,
+                modifiedSlideIds: Array.from(merged),
+                lastAction: p.lastAction,
+              }
+            }
+            const limitReached = buildStepLimitError({
+              stepLimit: maxAgentSteps,
+              modifiedSlideIds: modified,
+              lastAction: p.lastAction || undefined,
+              hasChanges: modified.length > 0,
+            })
+            addStep({
+              kind: 'error',
+              label: formatAgentLimitError(limitReached),
+              limitReached,
             })
           }
         }
@@ -2882,17 +4577,48 @@ export default function Home() {
       } finally {
         agentAbortRef.current = null
         agentStopRef.current = false
+        isAgentRunningRef.current = false
         setCaptureSlide(null)
         setIsAgentRunning(false)
-        // Version + audit the net change, even on partial completion / error so a
-        // half-finished run is still rollback-able. No-op when nothing changed.
-        recordAgentRun(
-          beforeRun,
-          slidesRef.current,
-          instruction,
-          runSummary,
-          totalSkipped ? ` (${totalSkipped} change(s) skipped)` : ''
-        )
+        const afterRun = slidesRef.current
+        const changedSlideIds = diffSlideIds(beforeRun, afterRun)
+        if (hitStepLimit && incompleteAgentContextRef.current && changedSlideIds.length > 0) {
+          incompleteAgentContextRef.current = {
+            ...incompleteAgentContextRef.current,
+            modifiedSlideIds: Array.from(
+              new Set([...incompleteAgentContextRef.current.modifiedSlideIds, ...changedSlideIds])
+            ),
+            lastAction: agentProgressRef.current.lastAction,
+          }
+        }
+        if (changedSlideIds.length > 0 && pendingChangesRef.current?.length && !amendmentsCommittedRef.current) {
+          const net = resolveEffectivePendingChanges(
+            pendingChangesRef.current,
+            beforeRun,
+            afterRun
+          )
+          const toReview = net?.length ? net : pendingChangesRef.current
+          setAmendmentCheckpoint(beforeRun)
+          setAmendmentSource('agent')
+          setPendingChanges(toReview)
+          pendingChangesRef.current = toReview
+          if (stopFlag) setAgentRunIncomplete(true)
+          setPendingSummary(prev => prev || runSummary || agentInstruction.slice(0, 120))
+          setHighlightDiffOnCanvas(true)
+          if (!changedSlideIds.includes(activeSlideId)) {
+            const target = changedSlideIds[0]
+            setActiveSlideId(target)
+            setSelectedSlideIds([target])
+            setSelectionAnchorId(target)
+          }
+        } else if (changedSlideIds.length === 0) {
+          setAmendmentCheckpoint(null)
+          setAmendmentSource(null)
+          setPendingChanges(null)
+          pendingChangesRef.current = null
+          setSlides(JSON.parse(JSON.stringify(beforeRun)) as SlideData[])
+          slidesRef.current = JSON.parse(JSON.stringify(beforeRun)) as SlideData[]
+        }
         // Reconcile React state with the ref source-of-truth in case any path
         // updated one without the other during the loop.
         setSlides(slidesRef.current)
@@ -2901,7 +4627,7 @@ export default function Home() {
         // was cut off at the step limit, flag it as INCOMPLETE so a later "continue"
         // re-reads the slide and finishes the remaining work instead of starting over.
         const outcome = hitStepLimit
-          ? `[INCOMPLETE — stopped at the ${AGENT_MAX_STEPS}-step limit before finishing.${
+          ? `[INCOMPLETE — stopped at the ${maxAgentSteps}-step limit before finishing.${
               runSummary ? ` Applied so far: ${runSummary}.` : ''
             } Remaining work on the original request is NOT done yet. If the user says "continue", re-read the target slide(s) with get_slide, see what is already there, and finish ONLY the outstanding parts.]`
           : runSummary
@@ -2910,6 +4636,11 @@ export default function Home() {
             ...prev,
             { role: 'assistant', content: JSON.stringify({ type: 'clarification', question: outcome }) },
           ])
+        }
+        if (runFinishedCleanly && !hitStepLimit) {
+          incompleteAgentContextRef.current = null
+          agentPauseStateRef.current = null
+          setAgentRunIncomplete(false)
         }
       }
     },
@@ -2931,6 +4662,7 @@ export default function Home() {
       canEdit,
       presentationId,
       presentationSummaries,
+      amendmentCheckpoint,
     ]
   )
 
@@ -2971,6 +4703,7 @@ export default function Home() {
   // a new branch starts at the restored checkpoint so the work splits into two.
   const revertToMessage = useCallback(
     (displayIndex: number) => {
+      stopProcessing()
       const target = display[displayIndex]
       if (!target?.checkpoint) return
       const confirmed = window.confirm(
@@ -3034,7 +4767,88 @@ export default function Home() {
       // Load the message text back into the input for editing/resubmitting.
       setChatDraft({ text: target.text ?? '', nonce: Date.now() })
     },
-    [display, slides, presentationId, makeBranchMeta, closeManualSession]
+    [display, slides, presentationId, makeBranchMeta, closeManualSession, stopProcessing]
+  )
+
+  /** Resolve conversationHistory index before a user message (works after reload). */
+  const resolveHistoryIndex = useCallback(
+    (displayIndex: number): number | null => {
+      const target = display[displayIndex]
+      if (target?.role !== 'user') return null
+      if (typeof target.historyLength === 'number') return target.historyLength
+
+      let userIdx = 0
+      for (let i = 0; i < displayIndex; i++) {
+        if (display[i]?.role === 'user') userIdx++
+      }
+      let seen = 0
+      for (let i = 0; i < conversationHistory.length; i++) {
+        const m = conversationHistory[i]
+        if (m.role !== 'user') continue
+        if (seen === userIdx && m.content === (target.text ?? '')) {
+          return typeof m.historyLength === 'number' ? m.historyLength : i
+        }
+        seen++
+      }
+      return null
+    },
+    [display, conversationHistory]
+  )
+
+  // Retruncate chat from a past user message and resend it to the AI.
+  const resendMessage = useCallback(
+    async (displayIndex: number) => {
+      const target = display[displayIndex]
+      if (target?.role !== 'user' || !target.text?.trim() || !canEdit) return
+
+      stopProcessing()
+
+      const historyIndex = resolveHistoryIndex(displayIndex)
+      if (historyIndex === null) {
+        window.alert('Could not locate this message in chat history — try typing it again.')
+        return
+      }
+
+      let restoreDeck = false
+      if (target.checkpoint) {
+        restoreDeck = window.confirm(
+          'Resend this message?\n\n' +
+            'OK = restore the deck to how it was BEFORE this message, then resend.\n' +
+            'Cancel = keep the current deck and resend anyway.'
+        )
+      } else if (!window.confirm('Resend this message to the AI?')) {
+        return
+      }
+
+      setDisplay(prev => prev.slice(0, displayIndex))
+      setConversationHistory(prev => prev.slice(0, historyIndex))
+      setPendingChanges(null)
+      setPendingSummary('')
+      setPendingDecisionId(null)
+      setPendingAgentInstruction(null)
+      setPendingScopeInstruction(null)
+      setHighlightDiffOnCanvas(false)
+
+      if (restoreDeck && target.checkpoint) {
+        pushHistory()
+        setSlides(JSON.parse(JSON.stringify(target.checkpoint)) as SlideData[])
+      }
+
+      // Wait for an in-flight agent/single-shot to finish stopping.
+      for (let i = 0; i < 40; i++) {
+        if (!isAgentRunningRef.current && !singleShotAbortRef.current) break
+        await new Promise<void>(r => setTimeout(r, 50))
+      }
+      handleSend(target.text!.trim(), [], 'auto')
+    },
+    [
+      display,
+      canEdit,
+      stopProcessing,
+      resolveHistoryIndex,
+      pushHistory,
+      handleSend,
+    ]
   )
 
   // Switch the active branch: restore the deck to that branch's latest snapshot and
@@ -3102,7 +4916,7 @@ export default function Home() {
         handleSend(scoped)
         return
       }
-      const text = `Option ${option.id}: ${option.label}`
+      const text = withLayoutAuditDirective(`Option ${option.id}: ${option.label}`)
       handleSend(text)
     },
     [handleSend, pendingScopeInstruction]
@@ -3115,47 +4929,141 @@ export default function Home() {
       if (pendingAgentInstruction) {
         const orig = pendingAgentInstruction
         setPendingAgentInstruction(null)
-        setDisplay(prev => [...prev, { role: 'user', text }])
+        const answerCheckpoint = JSON.parse(JSON.stringify(slides)) as SlideData[]
+        const answerHistoryLength = conversationHistory.length
+        setDisplay(prev => [
+          ...prev,
+          { role: 'user', text, checkpoint: answerCheckpoint, historyLength: answerHistoryLength },
+        ])
+        setConversationHistory(prev => [
+          ...prev,
+          { role: 'user', content: text, historyLength: prev.length },
+        ])
         const scope = parsePresentationScope(text)
         const scopeHint = scope ? `\n${formatPresentationScopeNote(scope)}\n` : ''
+        const completedSlideIds = amendmentCheckpoint
+          ? diffSlideIds(amendmentCheckpoint, slides)
+          : []
+
+        // Agent already built slide(s) then paused for depth — continue without rolling back.
+        if (completedSlideIds.length > 0 && scope) {
+          incompleteAgentContextRef.current = {
+            originalInstruction: orig,
+            modifiedSlideIds: completedSlideIds,
+            targetSlideIds: slides.map(s => s.id),
+            lastAction: 'Slides built before depth answer',
+            wasLayoutAudit: false,
+            deckWide: true,
+          }
+          const dsForAlign =
+            designSystemRef.current && designSystemRef.current.files.length > 0
+              ? designSystemRef.current
+              : null
+          const deckDesignAlignment = dsForAlign
+            ? formatDesignSystemDeckAlignmentBlock(dsForAlign)
+            : undefined
+          runAgentRef.current?.(
+            buildDeckBuildResumeInstruction(
+              orig,
+              text,
+              scope,
+              completedSlideIds,
+              deckDesignAlignment
+            ),
+            { skipUserEcho: true, continuation: true, effort: 'high' }
+          )
+          return
+        }
+
+        const slideNums = parseSlideNumbersFromText(text, slides.length)
+        const slideIds = slideNums.map(n => slides[n - 1]?.id).filter((id): id is string => !!id)
+        const slideHint =
+          slideIds.length > 0
+            ? `\n${buildSlideTargetFixInstruction(slideNums, slideIds, orig)}\n`
+            : ''
         runAgentRef.current?.(
-          `${orig}\n\n[Earlier you paused to ask me clarifying questions. My answers:]\n${text}${scopeHint}\n\nNow proceed and build exactly that — do not ask again.`,
-          { skipUserEcho: true }
+          `${orig}\n\n[User chose presentation depth:]\n${text}${scopeHint}${slideHint}\n\n` +
+            `Build the full presentation now. Do NOT call ask_user for depth again.`,
+          { skipUserEcho: true, effort: 'high' }
         )
         return
       }
+
+      const slideNums = parseSlideNumbersFromText(text, slides.length)
+      const priorLayoutTask = findRecentLayoutFixTask(conversationHistory)
+      if (
+        slideNums.length > 0 &&
+        isShortSlideTargetAnswer(text, slideNums) &&
+        priorLayoutTask
+      ) {
+        const slideIds = slideNums.map(n => slides[n - 1]?.id).filter((id): id is string => !!id)
+        if (slideIds.length > 0) {
+          const agentInstruction = buildSlideTargetFixInstruction(
+            slideNums,
+            slideIds,
+            priorLayoutTask
+          )
+          setSelectedSlideIds(slideIds)
+          setActiveSlideId(slideIds[0])
+          setSelectionAnchorId(slideIds[0])
+          const answerCheckpoint = JSON.parse(JSON.stringify(slides)) as SlideData[]
+          const answerHistoryLength = conversationHistory.length
+          setDisplay(prev => [
+            ...prev,
+            { role: 'user', text, checkpoint: answerCheckpoint, historyLength: answerHistoryLength },
+          ])
+          setConversationHistory(prev => [
+            ...prev,
+            { role: 'user', content: text, historyLength: prev.length },
+          ])
+          runAgentRef.current?.(agentInstruction, { effort: 'medium', skipUserEcho: true })
+          return
+        }
+      }
+
       handleSend(text)
     },
-    [handleSend, pendingAgentInstruction]
+    [handleSend, pendingAgentInstruction, conversationHistory, slides, amendmentCheckpoint]
   )
 
-  // ── Apply patch to slides ────────────────────────────────────────────────────
-  const applyChanges = useCallback(() => {
-    if (!pendingChanges) return
-    if (!canEdit) return
-    const newSlides = applyChangesToSlides(slides, pendingChanges)
-    const changedIds = diffSlideIds(slides, newSlides)
+  // ── Commit pending amendments (canvas preview → saved version) ─────────────
+  const commitAmendments = useCallback(
+    (opts?: {
+      before?: SlideData[]
+      after?: SlideData[]
+      changes?: Change[]
+      summary?: string
+    }) => {
+      if (isAgentRunningRef.current) {
+        agentStopRef.current = true
+        agentAbortRef.current?.abort()
+      }
+      amendmentsCommittedRef.current = true
+      const changesLog =
+        opts?.changes ??
+        resolveEffectivePendingChanges(pendingChanges, amendmentCheckpoint, slides) ??
+        pendingChanges
+      if (!changesLog || !canEdit) return
+      const before = opts?.before ?? amendmentCheckpoint ?? slides
+      const newSlides = opts?.after ?? slides
+      const summaryText = opts?.summary ?? pendingSummary
+      const changedIds = diffSlideIds(before, newSlides)
 
     console.groupCollapsed(
-      `%c[edit] applied changes · ${changedIds.length} slide(s) changed`,
+      `%c[edit] accepted amendments · ${changedIds.length} slide(s) changed`,
       'color:#4ade80;font-weight:bold'
     )
-    console.log('proposed changes:', pendingChanges)
-    console.log('slides actually changed:', changedIds)
-    if (pendingChanges.length > 0 && changedIds.length === 0) {
-      console.warn(
-        '[edit] Apply produced NO change to any slide — the patch parsed but had no effect (e.g. unknown ids or unrecognized fields).'
-      )
-    }
+    console.log('pending changes:', changesLog)
+    console.log('slides changed:', changedIds)
     console.groupEnd()
 
     const versionId = crypto.randomUUID()
-    const diff = summarizeDeckChanges(slides, newSlides)
+    const diff = summarizeDeckChanges(before, newSlides)
     const version: SlideVersion = {
       id: versionId,
       timestamp: Date.now(),
       label: null,
-      changeLog: `${pendingSummary || 'Changes applied'} · ${diff.text}`,
+      changeLog: `${summaryText || 'Changes applied'} · ${diff.text}`,
       slides: JSON.parse(JSON.stringify(newSlides)),
       decisionId: pendingDecisionId,
       slideCount: newSlides.length,
@@ -3174,9 +5082,29 @@ export default function Home() {
         console.warn('[persist] decision accept failed', e)
       )
       setPendingDecisionId(null)
+    } else if (amendmentSource === 'agent' && changedIds.length > 0) {
+      const decisionId = crypto.randomUUID()
+      const decision: DecisionRecord = {
+        id: decisionId,
+        timestamp: Date.now(),
+        slideIds: changedIds,
+        selectedElementIds: [],
+        instruction: summaryText || 'Agent edit',
+        proposedSummary: summaryText || 'Agent edit',
+        proposedChanges: changesLog,
+        status: 'accepted',
+        snapshotBefore: JSON.parse(JSON.stringify(before)),
+      }
+      setDecisions(prev => [...prev, decision])
+      if (presentationId) {
+        persistDecision(presentationId, decision).catch(e =>
+          console.warn('[persist] agent decision failed', e)
+        )
+      }
     }
 
     pushHistory()
+    slidesRef.current = newSlides
     setSlides(newSlides)
     closeManualSession(newSlides)
 
@@ -3191,15 +5119,25 @@ export default function Home() {
       setSelectedSlideIds(prev => prev.filter(id => newSlides.some(s => s.id === id)))
     }
 
+    setAmendmentCheckpoint(null)
+    setAmendmentSource(null)
+    setAgentRunIncomplete(false)
+    incompleteAgentContextRef.current = null
     setPendingChanges(null)
+    pendingChangesRef.current = null
     setPendingSummary('')
     setRefineNote(null)
     setHighlightDiffOnCanvas(false)
     setIsPreviewOpen(false)
     setSelectedElementIds([])
     setEditingElementId(null)
+    setPendingAgentInstruction(null)
 
     if (presentationId) {
+      clearEditorSessionLocal(presentationId)
+      savePresentation(presentationId, { editorSession: null }).catch(e =>
+        console.warn('[persist] clear editor session failed', e)
+      )
       // Stable client id is sent through; no post-hoc id swap needed.
       saveVersion(presentationId, version).catch(e =>
         console.warn('[persist] version save failed', e)
@@ -3223,32 +5161,217 @@ export default function Home() {
       { role: 'user', text: confirmMsg.content },
       { role: 'assistant', response: doneResponse },
     ])
-  }, [pendingChanges, pendingSummary, pendingDecisionId, slides, presentationId, activeSlideId, makeBranchMeta, closeManualSession, canEdit])
+    },
+    [
+      pendingChanges,
+      pendingSummary,
+      pendingDecisionId,
+      slides,
+      amendmentCheckpoint,
+      amendmentSource,
+      presentationId,
+      activeSlideId,
+      makeBranchMeta,
+      closeManualSession,
+      canEdit,
+      pushHistory,
+    ]
+  )
 
-  // ── Discard patch ─────────────────────────────────────────────────────────────
+  const applyChanges = useCallback(() => commitAmendments(), [commitAmendments])
+
+  // ── Discard all pending amendments (revert canvas to checkpoint) ─────────────
   const discardChanges = useCallback((reason?: string) => {
-    // Guard: this is sometimes wired directly to an onClick, which would pass a
-    // MouseEvent as `reason`. Only treat genuine strings as a rejection reason.
     const rejectionReason = typeof reason === 'string' ? reason.trim() || undefined : undefined
+    if (isAgentRunningRef.current) {
+      agentStopRef.current = true
+      agentAbortRef.current?.abort()
+    }
+    amendmentsCommittedRef.current = true
+    if (amendmentCheckpoint) {
+      const restored = JSON.parse(JSON.stringify(amendmentCheckpoint)) as SlideData[]
+      setSlides(restored)
+      slidesRef.current = restored
+    }
+    setAmendmentCheckpoint(null)
+    setAmendmentSource(null)
+    setAgentRunIncomplete(false)
+    incompleteAgentContextRef.current = null
     setPendingChanges(null)
+    pendingChangesRef.current = null
     setPendingSummary('')
     setRefineNote(null)
     setHighlightDiffOnCanvas(false)
     setIsPreviewOpen(false)
+    setPendingAgentInstruction(null)
     setDisplay(prev =>
       prev.map(m => (m.patchStatus === 'pending' ? { ...m, patchStatus: 'declined' as const } : m))
     )
+    if (presentationId) {
+      clearEditorSessionLocal(presentationId)
+      savePresentation(presentationId, { editorSession: null }).catch(e =>
+        console.warn('[persist] clear editor session failed', e)
+      )
+    }
     if (pendingDecisionId) {
       setDecisions(prev => prev.map(d =>
         d.id === pendingDecisionId ? { ...d, status: 'rejected', rejectionReason } : d
       ))
-      // Persist status + reason together so the memory is scoped, not a blanket ban.
       setDecisionStatus(pendingDecisionId, 'rejected', rejectionReason ?? '').catch(e =>
         console.warn('[persist] decision reject failed', e)
       )
       setPendingDecisionId(null)
     }
-  }, [pendingDecisionId])
+  }, [pendingDecisionId, amendmentCheckpoint, presentationId])
+
+  const applyPartialAmendmentAccept = useCallback(
+    (accepted: Change[], remaining: Change[]) => {
+      if (!amendmentCheckpoint || !effectivePendingChanges || !canEdit) return
+      if (!remaining.length) {
+        commitAmendments({
+          before: amendmentCheckpoint,
+          after: slides,
+          changes: effectivePendingChanges,
+        })
+        return
+      }
+      const newCheckpoint = applyChangesToSlides(amendmentCheckpoint, accepted)
+      setAmendmentCheckpoint(newCheckpoint)
+      setPendingChanges(remaining)
+      pendingChangesRef.current = remaining
+      const newSlides = applyChangesToSlides(newCheckpoint, remaining)
+      setSlides(newSlides)
+      slidesRef.current = newSlides
+    },
+    [amendmentCheckpoint, effectivePendingChanges, slides, canEdit, commitAmendments]
+  )
+
+  const acceptAmendmentForElement = useCallback(
+    (elementId: string) => {
+      if (!effectivePendingChanges || !amendmentCheckpoint || !canEdit) return
+      const accepted = filterChangesByElements(effectivePendingChanges, [elementId])
+      if (!accepted.length) return
+      const remaining = excludeChangesByElements(effectivePendingChanges, [elementId])
+      applyPartialAmendmentAccept(accepted, remaining)
+    },
+    [effectivePendingChanges, amendmentCheckpoint, canEdit, applyPartialAmendmentAccept]
+  )
+
+  const declineAmendmentForElement = useCallback(
+    (elementId: string) => {
+      if (!effectivePendingChanges || !amendmentCheckpoint || !canEdit) return
+      const remaining = excludeChangesByElements(effectivePendingChanges, [elementId])
+      if (remaining.length === effectivePendingChanges.length) return
+      if (remaining.length === 0) {
+        discardChanges()
+        return
+      }
+      const newSlides = applyChangesToSlides(amendmentCheckpoint, remaining)
+      setSlides(newSlides)
+      slidesRef.current = newSlides
+      setPendingChanges(remaining)
+      pendingChangesRef.current = remaining
+    },
+    [effectivePendingChanges, amendmentCheckpoint, canEdit, discardChanges]
+  )
+
+  const acceptSelectedAmendments = useCallback(() => {
+    if (!effectivePendingChanges || !amendmentCheckpoint || selectedElementIds.length === 0 || !canEdit)
+      return
+    const accepted = filterChangesByElements(effectivePendingChanges, selectedElementIds)
+    if (accepted.length === 0) return
+    const remaining = excludeChangesByElements(effectivePendingChanges, selectedElementIds)
+    setSelectedElementIds([])
+    applyPartialAmendmentAccept(accepted, remaining)
+  }, [
+    effectivePendingChanges,
+    amendmentCheckpoint,
+    selectedElementIds,
+    canEdit,
+    applyPartialAmendmentAccept,
+  ])
+
+  const declineSelectedAmendments = useCallback(() => {
+    if (!effectivePendingChanges || !amendmentCheckpoint || selectedElementIds.length === 0 || !canEdit)
+      return
+    const remaining = excludeChangesByElements(effectivePendingChanges, selectedElementIds)
+    if (remaining.length === effectivePendingChanges.length) return
+    if (remaining.length === 0) {
+      discardChanges()
+      setSelectedElementIds([])
+      return
+    }
+    const newSlides = applyChangesToSlides(amendmentCheckpoint, remaining)
+    setSlides(newSlides)
+    slidesRef.current = newSlides
+    setPendingChanges(remaining)
+    pendingChangesRef.current = remaining
+    setSelectedElementIds([])
+  }, [effectivePendingChanges, amendmentCheckpoint, selectedElementIds, canEdit, discardChanges])
+
+  const acceptSlideAmendments = useCallback(() => {
+    if (!effectivePendingChanges || !amendmentCheckpoint || !activeSlideId || !canEdit) return
+    const accepted = filterChangesBySlide(effectivePendingChanges, activeSlideId)
+    if (accepted.length === 0) return
+    const remaining = excludeChangesBySlide(effectivePendingChanges, activeSlideId)
+    if (!remaining.length) {
+      commitAmendments({
+        before: amendmentCheckpoint,
+        after: slides,
+        changes: effectivePendingChanges,
+      })
+      return
+    }
+    const newCheckpoint = applyChangesToSlides(amendmentCheckpoint, accepted)
+    setAmendmentCheckpoint(newCheckpoint)
+    setPendingChanges(remaining)
+    pendingChangesRef.current = remaining
+    const newSlides = applyChangesToSlides(newCheckpoint, remaining)
+    setSlides(newSlides)
+    slidesRef.current = newSlides
+    setSelectedElementIds([])
+  }, [
+    effectivePendingChanges,
+    amendmentCheckpoint,
+    activeSlideId,
+    slides,
+    canEdit,
+    commitAmendments,
+  ])
+
+  const declineSlideAmendments = useCallback(() => {
+    if (!effectivePendingChanges || !amendmentCheckpoint || !activeSlideId || !canEdit) return
+    const remaining = excludeChangesBySlide(effectivePendingChanges, activeSlideId)
+    if (remaining.length === effectivePendingChanges.length) return
+    if (remaining.length === 0) {
+      discardChanges()
+      setSelectedElementIds([])
+      return
+    }
+    const newSlides = applyChangesToSlides(amendmentCheckpoint, remaining)
+    setSlides(newSlides)
+    slidesRef.current = newSlides
+    setPendingChanges(remaining)
+    pendingChangesRef.current = remaining
+    setSelectedElementIds([])
+  }, [effectivePendingChanges, amendmentCheckpoint, activeSlideId, canEdit, discardChanges])
+
+  const navigatePendingSlide = useCallback(
+    (direction: -1 | 1) => {
+      if (pendingSlideIds.length === 0) return
+      const currentIdx =
+        activePendingSlideIndex >= 0 ? activePendingSlideIndex : direction === 1 ? -1 : 0
+      const nextIdx =
+        (currentIdx + direction + pendingSlideIds.length) % pendingSlideIds.length
+      const targetId = pendingSlideIds[nextIdx]
+      setActiveSlideId(targetId)
+      setSelectedSlideIds([targetId])
+      setSelectionAnchorId(targetId)
+      setSelectedElementIds([])
+      setEditingElementId(null)
+    },
+    [pendingSlideIds, activePendingSlideIndex]
+  )
 
   // ── Undo last action (incremental, step-by-step like PowerPoint) ──────────────
   const revert = useCallback(() => {
@@ -3256,7 +5379,12 @@ export default function Home() {
     const prev = slideHistory[slideHistory.length - 1]
     setSlides(JSON.parse(JSON.stringify(prev)) as SlideData[])
     setSlideHistory(h => h.slice(0, -1))
+    setAmendmentCheckpoint(null)
+    setAmendmentSource(null)
+    setAgentRunIncomplete(false)
+    incompleteAgentContextRef.current = null
     setPendingChanges(null)
+    pendingChangesRef.current = null
     setPendingSummary('')
     setEditingElementId(null)
   }, [slideHistory])
@@ -3704,13 +5832,21 @@ Return ONE complete "patch" (changes relative to the ORIGINAL slide data provide
         <KnowledgePanel
           layers={knowledgeLayers}
           onChange={handleKnowledgeChange}
-          onClose={() => setShowKnowledge(false)}
+          onClose={() => {
+            setShowKnowledge(false)
+            if (presentationId) void loadDeckElementLinks(presentationId)
+          }}
           branchId={knowledgeBranchId}
           hubName={knowledgeHubName}
           presentationId={presentationId}
           presentationName={presentationSummaries.find(p => p.id === presentationId)?.name ?? null}
           readOnly={!canEdit}
           initialTab={presentationId ? 'graph' : 'sources'}
+          onDeckLinksChange={() => {
+            if (presentationId) void loadDeckElementLinks(presentationId)
+          }}
+          showMappingPins={showKnowledgePins}
+          onShowMappingPinsChange={setShowKnowledgePinsPersisted}
         />
       )}
       {showDesignSystem && (
@@ -3720,6 +5856,10 @@ Return ONE complete "patch" (changes relative to the ORIGINAL slide data provide
           initialFiles={dsFiles}
           onChange={handleDesignSystemChange}
           onClose={closeDesignSystem}
+          slideCount={slides.length}
+          canApplyToDeck={canEdit && !isLoading && !isAgentRunning && !pendingChanges}
+          isApplyingToDeck={isAgentRunning}
+          onApplyToDeck={applyDesignSystemToDeck}
           templatesSlot={
             <TemplateUploader
               templates={templates}
@@ -4179,7 +6319,7 @@ Return ONE complete "patch" (changes relative to the ORIGINAL slide data provide
         <div className="flex-1 overflow-y-auto overflow-x-hidden">
           {leftTab === 'slides' ? (
             <SlidePanel
-              slides={slides}
+              slides={displaySlides}
               activeSlideId={activeSlideId}
               selectedSlideIds={selectedSlideIds}
               pendingSlideIds={pendingSlideIds}
@@ -4188,6 +6328,10 @@ Return ONE complete "patch" (changes relative to the ORIGINAL slide data provide
               onSelectAll={selectAllSlides}
               onReorder={reorderSlides}
               onAddSlide={() => addSlide()}
+              linkedSlideIds={deckLinkIndex.linkedSlideIds}
+              linkedElementIdsBySlide={linkedElementIdsBySlide}
+              knowledgeLinkByElementId={knowledgeLinkByElementId}
+              showKnowledgePins={showKnowledgePins}
             />
           ) : (
             <ElementInspector
@@ -4212,9 +6356,29 @@ Return ONE complete "patch" (changes relative to the ORIGINAL slide data provide
         />
       )}
 
-      {/* Center — canvas + diff bar */}
+      {/* Center — canvas + amendments bar */}
       <div className="flex-1 flex flex-col overflow-hidden min-h-0">
         <div className="flex-1 flex flex-col bg-[#060d1a] min-h-0 overflow-hidden">
+          {effectivePendingChanges && effectivePendingChanges.length > 0 && !isAgentRunning && (
+            <AmendmentsBar
+              changeCount={effectivePendingChanges.length}
+              slideCount={pendingSlideIds.length}
+              summary={pendingSummary}
+              selectedAmendmentCount={selectedPendingAmendmentCount}
+              activeSlideChangeCount={activeSlidePendingCount}
+              activePendingSlideIndex={activePendingSlideIndex}
+              source={amendmentSource ?? 'single'}
+              incomplete={agentRunIncomplete}
+              onAcceptAll={applyChanges}
+              onDeclineAll={() => discardChanges()}
+              onAcceptSelected={acceptSelectedAmendments}
+              onDeclineSelected={declineSelectedAmendments}
+              onAcceptSlide={acceptSlideAmendments}
+              onDeclineSlide={declineSlideAmendments}
+              onPrevPendingSlide={() => navigatePendingSlide(-1)}
+              onNextPendingSlide={() => navigatePendingSlide(1)}
+            />
+          )}
           {(
             <>
               <div ref={canvasOverlayRef} className="relative flex-1 min-h-0 overflow-hidden">
@@ -4231,7 +6395,9 @@ Return ONE complete "patch" (changes relative to the ORIGINAL slide data provide
                 {/* Canvas + drawing overlay (captured to PNG on send) */}
                 <div
                   ref={canvasCaptureRef}
-                  className="relative rounded-lg overflow-hidden shadow-2xl flex-shrink-0 p-3 bg-[#060d1a]/40"
+                  className={`relative rounded-lg shadow-2xl flex-shrink-0 p-3 bg-[#060d1a]/40 ${
+                    effectivePendingChanges?.length ? 'overflow-visible' : 'overflow-hidden'
+                  }`}
                   style={{
                     width: SLIDE_WIDTH * canvasScale + 24,
                     height: SLIDE_HEIGHT * canvasScale + 24,
@@ -4253,8 +6419,26 @@ Return ONE complete "patch" (changes relative to the ORIGINAL slide data provide
                   <SlideCanvas
                     slide={activeSlide}
                     selectedElementIds={selectedElementIds}
+                    highlightedElementIds={pendingHighlightedElementIds}
+                    deletedElementIds={
+                      effectivePendingChanges
+                        ? getDeletedElementIds(effectivePendingChanges, activeSlide.id)
+                        : []
+                    }
+                    highlightColor="green"
+                    showDiffHighlights={!!effectivePendingChanges && effectivePendingChanges.length > 0}
+                    amendmentElementIds={pendingHighlightedElementIds}
+                    compareSlide={
+                      amendmentCheckpoint?.find(s => s.id === activeSlide.id) ?? null
+                    }
+                    amendmentReview={!!effectivePendingChanges?.length}
+                    onAcceptAmendment={acceptAmendmentForElement}
+                    onDeclineAmendment={declineAmendmentForElement}
                     editingElementId={editingElementId}
                     scale={canvasScale}
+                    showKnowledgePins={showKnowledgePins}
+                    knowledgeLinkedElementIds={activeSlideLinkedElementIds}
+                    knowledgeLinkByElementId={knowledgeLinkByElementId}
                     interactive={!annotationMode && !isAgentRunning && canEdit}
                     onElementClick={id =>
                       setSelectedElementIds(prev =>
@@ -4364,9 +6548,12 @@ Return ONE complete "patch" (changes relative to the ORIGINAL slide data provide
                     activeSlideIndex: slides.findIndex(s => s.id === activeSlideId),
                     selectedSlideIds,
                     selectedElementIds,
+                    designSystem,
                   }}
                   onRunQuickAction={runQuickAction}
-                  quickActionsDisabled={isLoading || isAgentRunning}
+                  quickActionsDisabled={isLoading || isAgentRunning || !!pendingChanges}
+                  showKnowledgePins={showKnowledgePins}
+                  onShowKnowledgePinsChange={setShowKnowledgePinsPersisted}
                 />
               </div>
             </>
@@ -4447,10 +6634,13 @@ Return ONE complete "patch" (changes relative to the ORIGINAL slide data provide
             onPickOption={handlePickOption}
             onSubmitAnswers={handleSubmitAnswers}
             onRevert={revertToMessage}
+            onResend={resendMessage}
             draft={chatDraft}
             slides={slides}
-            pendingChanges={pendingChanges}
+            pendingChanges={effectivePendingChanges}
             pendingSummary={pendingSummary}
+            amendmentSource={amendmentSource}
+            amendmentCheckpoint={amendmentCheckpoint}
             onApproveProposal={applyChanges}
             onDeclineProposal={discardChanges}
             onOpenProposal={() => setIsPreviewOpen(true)}
@@ -4466,10 +6656,10 @@ Return ONE complete "patch" (changes relative to the ORIGINAL slide data provide
       </div>
 
       {/* ── Proposal preview overlay (opened from the chat proposal widget) ──── */}
-      {isPreviewOpen && pendingChanges && (
+      {isPreviewOpen && effectivePendingChanges && (
         <ProposalPreviewModal
-          slides={slides}
-          changes={pendingChanges}
+          slides={amendmentCheckpoint ?? slides}
+          changes={effectivePendingChanges}
           summary={pendingSummary}
           onApply={applyChanges}
           onDiscard={discardChanges}

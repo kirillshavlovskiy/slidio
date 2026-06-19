@@ -1,6 +1,6 @@
 'use client'
 import { useRef, useState } from 'react'
-import { GripVertical, CopyCheck, Plus } from 'lucide-react'
+import { GripVertical, CopyCheck, Plus, Paperclip } from 'lucide-react'
 import { SlideData } from '@/lib/types'
 import { SlideSelectModifiers } from '@/lib/slideSelection'
 import SlideCanvas from '@/components/SlideCanvas'
@@ -19,6 +19,12 @@ interface Props {
   onReorder?: (fromIndex: number, toIndex: number) => void
   /** Append a new blank slide to the end of the deck. */
   onAddSlide?: () => void
+  /** Slide ids that have at least one knowledge-graph element link. */
+  linkedSlideIds?: Set<string>
+  /** Element ids per slide linked to the knowledge graph. */
+  linkedElementIdsBySlide?: Map<string, Set<string>>
+  knowledgeLinkByElementId?: Map<string, { knowledgeName: string; knowledgeType: string }>
+  showKnowledgePins?: boolean
 }
 
 function slideLabel(slide: SlideData, index: number): string {
@@ -40,14 +46,23 @@ export default function SlidePanel({
   onSelectAll,
   onReorder,
   onAddSlide,
+  linkedSlideIds,
+  linkedElementIdsBySlide,
+  knowledgeLinkByElementId,
+  showKnowledgePins = false,
 }: Props) {
   const panelRef = useRef<HTMLDivElement>(null)
   const thumbScale = useFitScale(panelRef, { mode: 'width', padding: 36, maxScale: 0.4 })
   const [dragIndex, setDragIndex] = useState<number | null>(null)
   const [overIndex, setOverIndex] = useState<number | null>(null)
+  const [showLinkedOnly, setShowLinkedOnly] = useState(false)
 
   const draggable = !!onReorder
   const allSelected = slides.length > 0 && selectedSlideIds.length === slides.length
+  const linkedCount = linkedSlideIds?.size ?? 0
+  const visibleSlides = showLinkedOnly && linkedSlideIds?.size
+    ? slides.filter(s => linkedSlideIds.has(s.id))
+    : slides
 
   return (
     <div ref={panelRef} className="px-3 py-3 w-full">
@@ -69,14 +84,35 @@ export default function SlidePanel({
         </div>
         <p className="text-[10px] text-[#475569] mt-1 leading-snug">
           Ctrl/⌘ click · Shift click to multi-select · drag to reorder
+          {linkedCount > 0 && (
+            <span className="text-cyan-400/90"> · {linkedCount} slide{linkedCount === 1 ? '' : 's'} linked to KB</span>
+          )}
         </p>
+        {linkedCount > 0 && (
+          <button
+            type="button"
+            onClick={() => setShowLinkedOnly(v => !v)}
+            className={`mt-2 inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[10px] font-semibold transition-colors ${
+              showLinkedOnly
+                ? 'border-cyan-500/60 bg-cyan-500/15 text-cyan-200'
+                : 'border-[#334155] bg-[#112236] text-[#94a3b8] hover:border-cyan-500/40 hover:text-cyan-200'
+            }`}
+            title={showLinkedOnly ? 'Show all slides' : 'Show only slides with knowledge links'}
+          >
+            <Paperclip className="h-3 w-3" />
+            {showLinkedOnly ? 'All slides' : 'Linked slides'}
+          </button>
+        )}
       </div>
       <div className="flex flex-col gap-3">
-      {slides.map((slide, i) => {
+      {visibleSlides.map(slide => {
+        const i = slides.findIndex(s => s.id === slide.id)
         const isActive = activeSlideId === slide.id
         const isSelected = selectedSlideIds.includes(slide.id)
         const hasPending = pendingSlideIds.includes(slide.id)
         const isDeleted = deletedSlideIds.includes(slide.id)
+        const hasKbLinks = showKnowledgePins && (linkedSlideIds?.has(slide.id) ?? false)
+        const slideLinkedElements = linkedElementIdsBySlide?.get(slide.id)
         const label = slideLabel(slide, i)
 
         let buttonClass =
@@ -84,9 +120,15 @@ export default function SlidePanel({
         if (isDeleted) {
           buttonClass += 'bg-[#2a0f0f] border-[#ef4444]/60 opacity-75'
         } else if (isActive) {
-          buttonClass += 'bg-[#1e3a5f] border-[#60a5fa]'
+          buttonClass += hasKbLinks
+            ? 'bg-[#1e3a5f] border-cyan-400'
+            : 'bg-[#1e3a5f] border-[#60a5fa]'
         } else if (isSelected) {
-          buttonClass += 'bg-[#152a45] border-[#60a5fa]/60'
+          buttonClass += hasKbLinks
+            ? 'bg-[#152a45] border-cyan-500/60'
+            : 'bg-[#152a45] border-[#60a5fa]/60'
+        } else if (hasKbLinks) {
+          buttonClass += 'bg-[#112236] border-cyan-500/40 hover:border-cyan-500/60'
         } else {
           buttonClass += 'bg-[#112236] border-transparent hover:border-[#334155]'
         }
@@ -119,7 +161,7 @@ export default function SlidePanel({
               </button>
             )}
             <button
-            draggable={draggable}
+            draggable={draggable && !showLinkedOnly}
             onDragStart={
               draggable
                 ? e => {
@@ -192,11 +234,21 @@ export default function SlidePanel({
                   Del
                 </span>
               )}
+              {hasKbLinks && !isDeleted && (
+                <span
+                  className="flex-shrink-0 inline-flex items-center justify-center w-4 h-4 rounded bg-cyan-500/20 text-cyan-300"
+                  title="Has knowledge graph links"
+                >
+                  <Paperclip className="w-2.5 h-2.5" />
+                </span>
+              )}
               {hasPending && !isDeleted && (
                 <span
-                  className="flex-shrink-0 w-1.5 h-1.5 rounded-full bg-[#4ade80]"
+                  className="flex-shrink-0 text-[9px] font-bold text-[#4ade80] uppercase tracking-wide"
                   title="Has proposed changes"
-                />
+                >
+                  Edits
+                </span>
               )}
             </div>
 
@@ -207,6 +259,8 @@ export default function SlidePanel({
                   scale={thumbScale}
                   showShadow={false}
                   interactive={false}
+                  knowledgeLinkedElementIds={slideLinkedElements}
+                  knowledgeLinkByElementId={knowledgeLinkByElementId}
                 />
               </div>
             </div>

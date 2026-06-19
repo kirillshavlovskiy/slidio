@@ -147,6 +147,41 @@ export function segmentDocumentText(
     }
   }
 
+  if (ft === 'pptx') {
+    const re = /(?:^|\n)--- Slide (\d+) ---\n([\s\S]*?)(?=\n--- Slide \d+ ---|\s*$)/g
+    const parts: { title?: string; text: string; page?: number }[] = []
+    let m: RegExpExecArray | null
+    while ((m = re.exec(text)) !== null) {
+      const slideNum = parseInt(m[1], 10)
+      const body = m[2].trim()
+      if (body) parts.push({ title: `Slide ${slideNum}`, text: body, page: slideNum })
+    }
+    if (parts.length) return packSegments(parts)
+
+    const mdSlides = text.split(/\n## Slide (\d+)\n/)
+    if (mdSlides.length > 2) {
+      const mdParts: { title?: string; text: string; page?: number }[] = []
+      for (let i = 1; i < mdSlides.length; i += 2) {
+        const slideNum = parseInt(mdSlides[i], 10)
+        const body = mdSlides[i + 1]?.trim()
+        if (body) mdParts.push({ title: `Slide ${slideNum}`, text: body, page: slideNum })
+      }
+      if (mdParts.length) return packSegments(mdParts)
+    }
+  }
+
+  if (ft === 'xlsx') {
+    const re = /(?:^|\n)## Sheet:?([^\n]*)\n([\s\S]*?)(?=\n## Sheet:?|\s*$)/g
+    const parts: { title?: string; text: string }[] = []
+    let m: RegExpExecArray | null
+    while ((m = re.exec(text)) !== null) {
+      const name = m[1].trim() || 'Sheet'
+      const body = m[2].trim()
+      if (body) parts.push({ title: name, text: body })
+    }
+    if (parts.length) return packSegments(parts)
+  }
+
   const sections = splitByHeadings(text)
   const parts = sections.flatMap(sec => {
     const paras = splitParagraphs(sec.body)

@@ -2,7 +2,7 @@ import { PrismaClient } from '@prisma/client'
 import { PrismaLibSql } from '@prisma/adapter-libsql'
 
 // Bump when GraphNode / graph schema fields change — busts Next.js dev global singleton.
-const PRISMA_CLIENT_VERSION = 'graph-phase2-2026-06'
+const PRISMA_CLIENT_VERSION = 'editor-session-2026-06'
 
 function createPrismaClient() {
   const url = process.env.DATABASE_URL ?? 'file:./prisma/dev.db'

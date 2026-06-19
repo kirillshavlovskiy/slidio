@@ -25,12 +25,14 @@ import {
   GripVertical,
   Italic,
   LayoutGrid,
+  Layers,
   List,
   ListOrdered,
   Minus,
   MousePointer2,
   Pen,
   Pencil,
+  Paperclip,
   Plus,
   Sparkles,
   SplitSquareHorizontal,
@@ -47,12 +49,14 @@ import { gradientCss, GRADIENT_PRESETS } from '@/lib/slideBackground'
 import { QuickAction, QuickActionContext } from '@/lib/quickActions'
 import { listState, toggleListMode } from '@/lib/textLists'
 import FontFamilySelect from '@/components/FontFamilySelect'
+import AnchoredMenuPanel from '@/components/AnchoredMenuPanel'
 
 // Icons for the AI smart-action rows (resolved by the action's `icon` name).
 const ACTION_ICONS: Record<string, LucideIcon> = {
   SplitSquareHorizontal,
   Combine,
   LayoutGrid,
+  Layers,
   Sparkles,
   BarChart3,
   Table,
@@ -118,6 +122,8 @@ interface Props {
   quickActionCtx: QuickActionContext
   onRunQuickAction: (action: QuickAction) => void
   quickActionsDisabled: boolean
+  showKnowledgePins: boolean
+  onShowKnowledgePinsChange: (show: boolean) => void
 }
 
 function ToolBtn({
@@ -243,8 +249,9 @@ function ColorPopover({
   children: React.ReactNode
 }) {
   const [open, setOpen] = useState(false)
+  const anchorRef = useRef<HTMLDivElement>(null)
   return (
-    <div className="relative flex items-center gap-1 flex-shrink-0">
+    <div ref={anchorRef} className="relative flex items-center gap-1 flex-shrink-0">
       {label && (
         <span className="text-[10px] text-[#64748b] pr-0.5 flex-shrink-0">{label}</span>
       )}
@@ -262,17 +269,14 @@ function ColorPopover({
             : { backgroundColor: `#${(previewColor || 'FFFFFF').replace('#', '')}` }
         }
       />
-      {open && (
-        <>
-          <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
-          <div
-            className="absolute left-0 top-full z-50 mt-1.5 flex w-[164px] flex-wrap items-center gap-1 rounded-lg border border-[#1e3a5f] bg-[#0b1526] p-2 shadow-2xl"
-            onMouseDown={e => e.preventDefault()}
-          >
-            {children}
-          </div>
-        </>
-      )}
+      <AnchoredMenuPanel
+        anchorRef={anchorRef}
+        open={open}
+        onClose={() => setOpen(false)}
+        className="flex w-[164px] flex-wrap items-center gap-1 rounded-lg border border-[#1e3a5f] bg-[#0b1526] p-2 shadow-2xl"
+      >
+        {children}
+      </AnchoredMenuPanel>
     </div>
   )
 }
@@ -320,8 +324,11 @@ export default function CanvasFloatingToolbar({
   quickActionCtx,
   onRunQuickAction,
   quickActionsDisabled,
+  showKnowledgePins,
+  onShowKnowledgePinsChange,
 }: Props) {
   const toolbarRef = useRef<HTMLDivElement>(null)
+  const aiMenuAnchorRef = useRef<HTMLDivElement>(null)
   const [aiOpen, setAiOpen] = useState(false)
   const [pos, setPos] = useState({ x: 12, y: 12 })
   const [toolbarMaxW, setToolbarMaxW] = useState<number>()
@@ -428,7 +435,7 @@ export default function CanvasFloatingToolbar({
   return (
     <div
       ref={toolbarRef}
-      className="absolute z-40 overflow-x-auto overflow-y-hidden overscroll-x-contain rounded-xl border border-[#1e3a5f]/80 bg-[#0d1b2a]/95 backdrop-blur-md shadow-2xl pointer-events-auto"
+      className="absolute z-40 overflow-x-auto overscroll-x-contain rounded-xl border border-[#1e3a5f]/80 bg-[#0d1b2a]/95 backdrop-blur-md shadow-2xl pointer-events-auto"
       style={{ left: pos.x, top: pos.y, maxWidth: toolbarMaxW }}
       onClick={e => e.stopPropagation()}
     >
@@ -469,11 +476,19 @@ export default function CanvasFloatingToolbar({
         </ToolBtn>
       </div>
 
+      <IconBtn
+        title={showKnowledgePins ? 'Hide graph mapping pins' : 'Show graph mapping pins'}
+        active={showKnowledgePins}
+        onClick={() => onShowKnowledgePinsChange(!showKnowledgePins)}
+      >
+        <Paperclip className="w-3.5 h-3.5" />
+      </IconBtn>
+
       {/* Smart AI actions — contextual to the current slide/element selection */}
       {!annotationMode && (
         <>
           <Divider />
-          <div className="relative flex-shrink-0">
+          <div ref={aiMenuAnchorRef} className="relative flex-shrink-0">
             <button
               type="button"
               title="Smart AI actions for this selection"
@@ -489,47 +504,47 @@ export default function CanvasFloatingToolbar({
               <Wand2 className="w-3.5 h-3.5" />
               <span className="hidden md:inline">AI</span>
             </button>
-            {aiOpen && (
-              <>
-                <div className="fixed inset-0 z-40" onClick={() => setAiOpen(false)} />
-                <div className="absolute left-0 top-full z-50 mt-1.5 w-64 overflow-hidden rounded-lg border border-[#2a1f4f] bg-[#0b1526] shadow-2xl">
-                  <p className="border-b border-[#16263b] px-3 py-2 text-[10px] font-bold uppercase tracking-widest text-[#7c6bb0]">
-                    Smart AI actions
-                  </p>
-                  <div className="py-1">
-                    {quickActions.map(action => {
-                      const available = action.isAvailable(quickActionCtx)
-                      const Icon = ACTION_ICONS[action.icon] ?? Wand2
-                      return (
-                        <button
-                          key={action.id}
-                          type="button"
-                          disabled={!available || quickActionsDisabled}
-                          onMouseDown={e => e.preventDefault()}
-                          onClick={() => {
-                            setAiOpen(false)
-                            onRunQuickAction(action)
-                          }}
-                          className="flex w-full items-start gap-2.5 px-3 py-2 text-left transition-colors hover:bg-[#1a1338] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
-                        >
-                          <Icon className="mt-0.5 h-4 w-4 flex-shrink-0 text-violet-300" />
-                          <span className="min-w-0">
-                            <span className="block text-xs font-medium text-slate-100">
-                              {action.label}
-                            </span>
-                            <span className="block text-[11px] leading-snug text-slate-400">
-                              {!available && action.unavailableHint
-                                ? action.unavailableHint
-                                : action.description}
-                            </span>
-                          </span>
-                        </button>
-                      )
-                    })}
-                  </div>
-                </div>
-              </>
-            )}
+            <AnchoredMenuPanel
+              anchorRef={aiMenuAnchorRef}
+              open={aiOpen}
+              onClose={() => setAiOpen(false)}
+              className="w-72 rounded-lg border border-[#2a1f4f] bg-[#0b1526] shadow-2xl"
+            >
+              <p className="border-b border-[#16263b] px-3 py-2 text-[10px] font-bold uppercase tracking-widest text-[#7c6bb0]">
+                Smart AI actions
+              </p>
+              <div className="max-h-[min(60vh,22rem)] overflow-y-auto py-1">
+                {quickActions.map(action => {
+                  const available = action.isAvailable(quickActionCtx)
+                  const Icon = ACTION_ICONS[action.icon] ?? Wand2
+                  return (
+                    <button
+                      key={action.id}
+                      type="button"
+                      disabled={!available || quickActionsDisabled}
+                      onMouseDown={e => e.preventDefault()}
+                      onClick={() => {
+                        setAiOpen(false)
+                        onRunQuickAction(action)
+                      }}
+                      className="flex w-full items-start gap-2.5 px-3 py-2 text-left transition-colors hover:bg-[#1a1338] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
+                    >
+                      <Icon className="mt-0.5 h-4 w-4 flex-shrink-0 text-violet-300" />
+                      <span className="min-w-0">
+                        <span className="block text-xs font-medium text-slate-100">
+                          {action.label}
+                        </span>
+                        <span className="block text-[11px] leading-snug text-slate-400">
+                          {!available && action.unavailableHint
+                            ? action.unavailableHint
+                            : action.description}
+                        </span>
+                      </span>
+                    </button>
+                  )
+                })}
+              </div>
+            </AnchoredMenuPanel>
           </div>
         </>
       )}
@@ -717,6 +732,8 @@ export default function CanvasFloatingToolbar({
         <>
           <Divider />
           <FontFamilySelect
+            className="w-28 flex-shrink-0"
+            menuPortal
             value={single.style.fontFace}
             onChange={fontFace => onUpdateElement(single.id, { style: { fontFace } })}
           />
@@ -904,6 +921,8 @@ export default function CanvasFloatingToolbar({
         <>
           <Divider />
           <FontFamilySelect
+            className="w-28 flex-shrink-0"
+            menuPortal
             value={textSelected[0]?.style.fontFace}
             onChange={fontFace => applyStyleToSelection({ fontFace })}
           />

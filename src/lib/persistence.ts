@@ -1,4 +1,5 @@
 import { ConversationMessage, DecisionRecord, SlideData, SlideVersion } from './types'
+import type { EditorSession } from './editorSession'
 
 export async function savePresentation(
   id: string,
@@ -7,12 +8,20 @@ export async function savePresentation(
     conversationHistory?: ConversationMessage[]
     activeSlideId?: string
     name?: string
+    editorSession?: EditorSession | null
   }
 ): Promise<void> {
+  const body: Record<string, unknown> = { id, ...data }
+  if (data.editorSession !== undefined) {
+    body.editorSession =
+      data.editorSession && Object.keys(data.editorSession).length > 0
+        ? data.editorSession
+        : null
+  }
   await fetch('/api/presentations', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ id, ...data }),
+    body: JSON.stringify(body),
   })
 }
 

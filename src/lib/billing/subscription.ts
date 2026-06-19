@@ -48,6 +48,8 @@ export async function getBillingState(userId: string): Promise<BillingState> {
 
 /**
  * Returns the Stripe customer id for a user, creating the customer on first use.
+ * If the stored id is missing in the current Stripe mode (e.g. live customer id
+ * after switching to sk_test_), clears stale billing fields and creates a new one.
  */
 export async function ensureStripeCustomer(user: {
   id: string;
@@ -55,9 +57,20 @@ export async function ensureStripeCustomer(user: {
   name?: string | null;
 }): Promise<string> {
   const record = await prisma.user.findUnique({ where: { id: user.id } });
-  if (record?.stripeCustomerId) return record.stripeCustomerId;
-
   const stripe = getStripe();
+
+  if (record?.stripeCustomerId) {
+    try {
+      const existing = await stripe.customers.retrieve(record.stripeCustomerId);
+      if (!("deleted" in existing && existing.deleted)) {
+        return record.stripeCustomerId;
+      }
+    } catch (err) {
+      const code = (err as { code?: string }).code;
+      if (code !== "resource_missing") throw err;
+    }
+  }
+
   const customer = await stripe.customers.create({
     email: user.email ?? undefined,
     name: user.name ?? undefined,
@@ -66,7 +79,15 @@ export async function ensureStripeCustomer(user: {
 
   await prisma.user.update({
     where: { id: user.id },
-    data: { stripeCustomerId: customer.id },
+    data: {
+      stripeCustomerId: customer.id,
+      // Drop subscription state tied to the old (often live-mode) customer.
+      subscriptionId: null,
+      subscriptionStatus: null,
+      currentPeriodStart: null,
+      currentPeriodEnd: null,
+      plan: "free",
+    },
   });
   return customer.id;
 }

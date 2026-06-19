@@ -1,4 +1,7 @@
 import { SlideData } from './types'
+import { LAYOUT_GRID } from './layoutGrid'
+import type { DesignSystem } from './designSystem'
+import { buildApplyDesignSystemToDeckInstruction, buildApplyDesignSystemScopedInstruction } from './designSystem'
 
 /** Token-spend / model tier the action should run at (see /api router & modelFor). */
 export type QuickActionEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
@@ -12,6 +15,8 @@ export interface QuickActionContext {
   selectedSlideIds: string[]
   /** Ids of elements selected on the active slide (drives element-scoped actions). */
   selectedElementIds: string[]
+  /** Active design system (when uploaded) — used by deck-wide styling actions. */
+  designSystem?: DesignSystem | null
 }
 
 /**
@@ -38,6 +43,8 @@ export interface QuickAction {
   unavailableHint?: string
   /** Build the natural-language instruction handed to the agent. */
   buildInstruction: (ctx: QuickActionContext) => string
+  /** When true, scope is the whole deck (not the current selection). */
+  deckWide?: boolean
 }
 
 /** 1-based position label for a slide id, used to ground instructions for the agent. */
@@ -75,7 +82,9 @@ const TABLE_SPEC =
   `3. TEXT STAYS INSIDE ITS CELL: Every cell's text must fit fully WITHIN that cell's rectangle with consistent ` +
   `inner padding (~0.06–0.10in on every side). Text must NEVER cross a column or row boundary, sit between cells, ` +
   `or overlap a neighbouring cell, separator line, or the header band. If text is too long, shrink the font ` +
-  `(down to ~9pt) or widen that column and re-snap the whole grid — do NOT let it overflow.\n` +
+  `(down to ~9pt) or widen that column and re-snap the whole grid — do NOT let it overflow. If row/cell boxes were ` +
+  `stretched tall but text looks small with dead space inside each cell, INCREASE style.fontSize (and lineHeight if ` +
+  `needed) so copy fills ~80% of the cell height — geometry alone is not enough.\n` +
   `4. ALIGNMENT: Be consistent per column — left-align text/labels, right-align numbers (so digits line up), ` +
   `and vertically center every cell. Use the same alignment for all cells in a column.\n` +
   `5. HEADER ROW: Make the header clearly visible — a distinct full-width header band rect (accent or darker fill) ` +
@@ -85,9 +94,54 @@ const TABLE_SPEC =
   `(lower z-index than every cell's text) and snapped exactly to the row/column grid lines.\n` +
   `7. BOUNDS & SPACING: Keep the entire table within the slide bounds, clear of the title, with even outer margins. ` +
   `Equalize row heights (unless a row genuinely needs more) and keep spacing uniform.\n` +
+  `9. GRID: Snap all x/y/w/h to a 0.05in grid; use fixed outer margins (0.5in sides, 0.45in top, 0.4in bottom), ` +
+  `${LAYOUT_GRID.rowGutter}in row gutters, ${LAYOUT_GRID.columnGutter}in column gutters, and borderRadius ${LAYOUT_GRID.cornerRadiusPx}px on all cards/rects.\n` +
   `8. PRESERVE: Keep ALL existing data and the slide's color theme — only adjust geometry, alignment, sizing and styling.`
 
+/**
+ * Slide ids a quick action should target.
+ * - 2+ slides selected AND active is among them → intentional multi-select.
+ * - Otherwise → active slide only (canvas focus wins over stale sidebar selection).
+ */
+export function resolveQuickActionTargetSlideIds(ctx: QuickActionContext): string[] {
+  const { activeSlideId, selectedSlideIds } = ctx
+  if (
+    selectedSlideIds.length > 1 &&
+    activeSlideId &&
+    selectedSlideIds.includes(activeSlideId)
+  ) {
+    return [...selectedSlideIds]
+  }
+  if (activeSlideId) return [activeSlideId]
+  if (selectedSlideIds.length > 0) return [...selectedSlideIds]
+  return []
+}
+
+/** Format slide scope for agent instructions — ids only (avoids spurious slide-number parsing). */
+function formatSlideScopeTag(ctx: QuickActionContext, slideIds: string[]): string {
+  return slideIds.map(id => `(id: ${id})`).join(', ')
+}
+
 export const QUICK_ACTIONS: QuickAction[] = [
+  {
+    id: 'apply-design-system',
+    label: 'Apply design system',
+    icon: 'Layers',
+    description: 'Restyle the active slide (or selection) with design system colors and fonts.',
+    effort: 'high',
+    isAvailable: ctx =>
+      ctx.slides.length > 0 && !!ctx.designSystem && ctx.designSystem.files.length > 0,
+    unavailableHint: 'Upload a design system first (Design panel).',
+    buildInstruction: ctx => {
+      const targetIds = resolveQuickActionTargetSlideIds(ctx)
+      const sel = selectedElements(ctx)
+      return buildApplyDesignSystemScopedInstruction(ctx.designSystem!, {
+        slideIds: targetIds.length ? targetIds : [ctx.activeSlideId].filter(Boolean),
+        elementIds: targetIds.length === 1 && sel.length > 0 ? sel.map(e => e.id) : undefined,
+        activeSlideId: ctx.activeSlideId,
+      })
+    },
+  },
   {
     id: 'split-slide',
     label: 'Split slide',
@@ -131,33 +185,38 @@ export const QUICK_ACTIONS: QuickAction[] = [
     },
   },
   {
-    id: 'tidy-layout',
-    label: 'Tidy layout',
+    id: 'fix-layout',
+    label: 'Fix layout',
     icon: 'LayoutGrid',
-    description: 'Fix overlaps, alignment and spacing on the selected slide(s).',
-    effort: 'medium',
+    description: 'Clean up overlaps, spacing, alignment, and margins in one pass.',
+    effort: 'low',
     isAvailable: ctx => ctx.activeSlideIndex >= 0,
     buildInstruction: ctx => {
-      // Slide-scoped action: target every selected slide, falling back to the active one.
-      const targetIds =
-        ctx.selectedSlideIds.length > 0 ? ctx.selectedSlideIds : [ctx.activeSlideId]
-      const labels = targetIds.map(id => `slide ${pos(ctx, id)} (id: ${id})`).join(', ')
+      const targetIds = resolveQuickActionTargetSlideIds(ctx)
+      const scopeTag = formatSlideScopeTag(ctx, targetIds)
       const sel = selectedElements(ctx)
-      // If specific elements are selected on a single slide, tidy just those.
-      if (targetIds.length === 1 && sel.length > 1) {
+      const layoutRules =
+        `Fix ALL layout problems: overlapping elements (especially icon↔text), uneven gaps between siblings, ` +
+        `misalignment, inconsistent margins, and anything overflowing the slide bounds. ` +
+        `Snap to a clean grid, balance outer margins, and equalize spacing where elements are grouped. ` +
+        `When multiple slides are in scope: read them all first, then align title/header icons to the SAME x and y ` +
+        `across those slides (shared icon column) and keep icon↔text gaps consistent. ` +
+        `Keep ALL content and styling — only adjust position, size, and alignment (x, y, w, h). ` +
+        `Do NOT change fontSize or copy to “fill” cells unless geometry alone cannot fix overflow. ` +
+        `Render each affected slide to verify nothing overlaps and the layout looks even.`
+      if (targetIds.length === 1 && sel.length >= 2) {
         const tags = sel.map(elementTag).join('; ')
         return (
-          `On slide ${pos(ctx, targetIds[0])} (id: ${targetIds[0]}), tidy up ONLY these selected elements: ${tags}. ` +
-          `Fix overlaps among them, align their edges, even out spacing, and keep them within the slide bounds. ` +
-          `Do NOT move or restyle other elements. Render to verify they look clean and aligned.`
+          `On the active slide ${scopeTag}, fix layout for ONLY these selected elements: ${tags}. ` +
+          layoutRules +
+          ` Do NOT move or restyle other elements on the slide.`
         )
       }
-      return (
-        `Tidy up the layout of ${labels}. ` +
-        `Fix overlapping elements, misalignment, inconsistent spacing/margins, and anything overflowing the slide bounds. ` +
-        `Keep ALL content and styling — only adjust position, size and alignment for a clean, balanced result. ` +
-        `Render each affected slide to verify nothing overlaps and the grid feels even.`
-      )
+      const scopeLabel =
+        targetIds.length === 1
+          ? `the active slide ${scopeTag}`
+          : `these ${targetIds.length} slides: ${scopeTag}`
+      return `Fix the layout of ${scopeLabel}. ${layoutRules}`
     },
   },
   {

@@ -120,6 +120,7 @@ model Presentation {
   name                String           @default("Untitled Presentation")
   slides              String // JSON string
   conversationHistory String         @default("[]") // JSON: ConversationMessage[]
+  editorSession       String         @default("{}") // JSON: unfinished amendments / agent state
   activeSlideId       String?
   createdAt           DateTime       @default(now())
   updatedAt           DateTime       @updatedAt

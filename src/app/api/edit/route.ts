@@ -13,27 +13,19 @@ import {
   usageTokens,
   QuotaExceededError,
 } from '@/lib/billing/usage'
+import {
+  type Effort,
+  modelForEffort,
+  modelForLayoutReview,
+  REVIEW_MODEL,
+} from '@/lib/agent/models'
 
 const client = new Anthropic()
 
-/**
- * Two-tier model selection to control cost. Routine edits (low/medium effort) run
- * on the cheap model (Haiku 4.5 — $1/$5); genuine creation / redesign (high+) runs
- * on the smart model (Sonnet 4.6 — $3/$15). Both overridable via env.
- */
-const SMART_MODEL = process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6'
-const CHEAP_MODEL = process.env.ANTHROPIC_CHEAP_MODEL || 'claude-haiku-4-5'
-
 /** Effort levels accepted by output_config.effort — soft control over token spend. */
-type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 const VALID_EFFORTS: Effort[] = ['low', 'medium', 'high', 'xhigh', 'max']
 function coerceEffort(e: unknown, fallback: Effort): Effort {
   return typeof e === 'string' && (VALID_EFFORTS as string[]).includes(e) ? (e as Effort) : fallback
-}
-
-/** Low/medium = routine → cheap model; high/xhigh/max = creation/redesign → smart model. */
-function modelFor(effort: Effort): string {
-  return effort === 'low' || effort === 'medium' ? CHEAP_MODEL : SMART_MODEL
 }
 
 /**
@@ -163,7 +155,10 @@ A "fact" = any number, percentage, statistic, date, price, financial figure (exp
 - Append a trailing "*" to EVERY invented/illustrative/unverified value or label (e.g. "Expected Δ: 0.45*", "% notional: 5%*", "Vega: TBD*"). Prefer "TBD*" / "e.g. …*" over a fake precise number.
 - Add EXACTLY ONE small footnote text element near the bottom of each affected slide (fontSize ≈9–10, color "94A3B8") with content "* Placeholder data — not from your knowledge base. Verify and replace with real figures before use." (one per slide, no duplicates).
 - For CHART elements built from unverifiable data, put "(illustrative*)" in the chart title and add the same footnote — never present invented chart numbers as real.
-- In "summary", explicitly list which values are placeholders. If the user clearly expects REAL figures and you have none, return a "clarification" asking for the data instead of inventing it.
+- In "summary", explicitly list which values are placeholders. If the user clearly expects REAL figures and you have none IN CONTEXT (no knowledge graph, no uploaded documents, no slide data), return a "clarification" asking for the data instead of inventing it.
+
+### Applying hub knowledge (KNOWLEDGE GRAPH / SEMANTIC EDIT PLAN in context)
+When the context includes "## KNOWLEDGE GRAPH" with claims/metrics/topics OR a "SEMANTIC EDIT PLAN" block, the user is asking you to APPLY that material — NOT to ask them to list claims again. Select relevant items by matching the instruction and slide content; return a patch that integrates them. For candidate (unverified) claims, still use them but append "*" per the placeholder rules above. NEVER return a clarification like "which claims should I use?" or "please share the specific claims" when claims are already listed in context — that is wrong. If graph context is empty but uploaded document text exists in the knowledge layers, use that document text as the source of truth instead.
 
 You have two response modes:
 
@@ -264,6 +259,15 @@ Return this shape:
 Options are optional — omit them if you need a free-form text answer.
 Use clarification when: instruction targets multiple possible elements, change is subjective,
 you need to know a specific value, or the user's intent is unclear.
+NEVER ask a second clarification for the same task — if the user already answered your question
+(e.g. they named slide numbers like "14 and 15", picked an option, or gave element names), return a
+patch or needs_agent immediately. Do NOT ask them to confirm or repeat.
+
+#### FOLLOW-UP ANSWERS — act, never re-ask
+If the conversation shows you previously asked which slides/elements to fix and the user's latest
+message gives slide numbers (e.g. "14 and 15"), slide names, or a short direct answer, treat it as
+a CHANGE: return a patch targeting those slides, or needs_agent for overlap/layout fixes across
+multiple slides. NEVER return another clarification asking them to confirm.
 
 #### MODE 2b — STRUCTURED MULTI-QUESTION CLARIFICATION (PREFERRED when you need SEVERAL inputs)
 When you would otherwise ask the user 2+ separate questions (e.g. scope AND content source AND
@@ -311,8 +315,10 @@ hand off by returning:
 }
 Hand off when the task: requires visually MATCHING/MIRRORING a reference image or another slide;
 asks to redesign / restyle / convert the WHOLE deck or many slides to a design system; depends on
-seeing the rendered pixels to get right (fine-grained alignment, "until it looks good"); or is a
-large multi-step layout overhaul. For a normal scoped edit you can reason about directly, just
+seeing the rendered pixels to get right (fine-grained alignment, "until it looks good"); is a
+large multi-step layout overhaul; OR asks to update/integrate research claims, metrics, or hub
+knowledge across one or more slides (you need the agent's knowledge planner + iterative apply).
+For a normal scoped edit you can reason about directly, just
 return the patch — do NOT over-escalate.
 
 ## Layout & alignment — treat every change as a comprehensive slide revision
@@ -659,7 +665,7 @@ ${knowledgeContext}
   let response: Anthropic.Message
   try {
     response = await client.messages.create({
-      model: useSmartForChart ? SMART_MODEL : modelFor(effort),
+      model: useSmartForChart ? REVIEW_MODEL : modelForEffort(effort),
       max_tokens: maxOutputTokens,
       // Cache the large, constant system prompt so repeat edits pay ~10% for it.
       system: [
@@ -785,6 +791,9 @@ the user's intent BUT resolves every problem above:
   so the whole slide stays balanced and aligned.
 - Keep everything inside the slide bounds (10 × 7.5 inches).
 - Preserve alignment with existing elements (consistent margins, column widths, gutters).
+- Equal top/bottom and left/right margins on the content block; even vertical gaps between
+  stacked elements; even horizontal gutters between columns — stretch or redistribute so
+  the layout fills the slide without lopsided dead space.
 - Keep all element IDs stable; only change geometry/content as needed.
 
 ORIGINAL SLIDE DATA:
@@ -795,13 +804,11 @@ Respond with ONLY the corrected JSON object.`
     let reviewResp: Anthropic.Message
     try {
       reviewResp = await client.messages.create({
-        model: useSmartForChart ? SMART_MODEL : modelFor(effort),
+        model: modelForLayoutReview(),
         max_tokens: maxOutputTokens,
         system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
         messages: [{ role: 'user', content: reviewInstruction }],
-        ...(useSmartForChart
-          ? { thinking: { type: 'enabled' as const, budget_tokens: 4000 } }
-          : reasoningFor(effort)),
+        thinking: { type: 'enabled' as const, budget_tokens: 4000 },
       })
     } catch (err) {
       editLog(reqId, 'review pass model call failed:', err instanceof Error ? err.message : err)

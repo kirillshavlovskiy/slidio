@@ -35,8 +35,34 @@ export async function POST(request: NextRequest) {
 
   try {
     const stripe = getStripe();
+    let customerId = record.stripeCustomerId;
+    try {
+      const existing = await stripe.customers.retrieve(customerId);
+      if ("deleted" in existing && existing.deleted) throw new Error("deleted");
+    } catch (err) {
+      const code = (err as { code?: string }).code;
+      if (code === "resource_missing" || err instanceof Error && err.message === "deleted") {
+        await prisma.user.update({
+          where: { id: user.id },
+          data: {
+            stripeCustomerId: null,
+            subscriptionId: null,
+            subscriptionStatus: null,
+            currentPeriodStart: null,
+            currentPeriodEnd: null,
+            plan: "free",
+          },
+        });
+        return NextResponse.json(
+          { error: "Billing account was reset after switching Stripe modes. Upgrade again." },
+          { status: 400 }
+        );
+      }
+      throw err;
+    }
+
     const portal = await stripe.billingPortal.sessions.create({
-      customer: record.stripeCustomerId,
+      customer: customerId,
       return_url: `${appOrigin(request)}/app`,
     });
     return NextResponse.json({ url: portal.url });

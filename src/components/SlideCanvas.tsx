@@ -1,9 +1,11 @@
 'use client'
 import { useRef, useState } from 'react'
+import { Paperclip, Check, X } from 'lucide-react'
 import { SlideData, SlideElement, ElementStyle } from '@/lib/types'
 import { elementFillHex, elementTextHex, isFillElement } from '@/lib/elementStyle'
 import { slideBackgroundStyle, gradientCss } from '@/lib/slideBackground'
 import { fontFamilyCss } from '@/lib/fonts'
+import { knowledgeSnapTargets } from '@/lib/deckKnowledgeLinks'
 import ElementTextEditor from '@/components/ElementTextEditor'
 import ChartElement from '@/components/ChartElement'
 import { getIcon } from '@/lib/icons'
@@ -35,6 +37,20 @@ interface Props {
   onCanvasDoubleClick?: () => void
   /** Called while/after dragging a marquee over empty canvas; receives ids inside the rect. */
   onMarqueeSelect?: (ids: string[]) => void
+  /** Element ids linked to the knowledge graph on this slide (deck mapping). */
+  knowledgeLinkedElementIds?: Set<string>
+  /** Tooltip metadata for knowledge-linked elements. */
+  knowledgeLinkByElementId?: Map<string, { knowledgeName: string; knowledgeType: string }>
+  /** Show knowledge-link pin badges on elements (no surrounding box). */
+  showKnowledgePins?: boolean
+  /** Per-change review: element ids with pending amendments on this slide. */
+  amendmentElementIds?: string[]
+  /** Checkpoint slide (before amendments) — renders amber ghost boxes at prior geometry. */
+  compareSlide?: SlideData | null
+  /** Review mode: allow selection + per-element controls but block drag/resize. */
+  amendmentReview?: boolean
+  onAcceptAmendment?: (elementId: string) => void
+  onDeclineAmendment?: (elementId: string) => void
   interactive?: boolean
 }
 
@@ -430,6 +446,14 @@ export default function SlideCanvas({
   onCanvasClick,
   onCanvasDoubleClick,
   onMarqueeSelect,
+  knowledgeLinkedElementIds,
+  knowledgeLinkByElementId,
+  showKnowledgePins = true,
+  amendmentElementIds = [],
+  compareSlide = null,
+  amendmentReview = false,
+  onAcceptAmendment,
+  onDeclineAmendment,
   interactive = true,
 }: Props) {
   const colors = HIGHLIGHT_COLORS[highlightColor]
@@ -444,6 +468,18 @@ export default function SlideCanvas({
   )
   // Active smart-guide lines (in inches) drawn while dragging / resizing.
   const [guides, setGuides] = useState<Guides>(NO_GUIDES)
+  const [guidesKnowledge, setGuidesKnowledge] = useState(false)
+
+  const linkedOnSlide = showKnowledgePins ? (knowledgeLinkedElementIds ?? new Set<string>()) : new Set<string>()
+
+  const snapSiblingsFor = (movingIds: string[]) => {
+    const others = slide.elements.filter(s2 => !movingIds.includes(s2.id))
+    const knowledgeTargets = showKnowledgePins
+      ? knowledgeSnapTargets(others, movingIds, linkedOnSlide)
+      : []
+    const useKnowledge = showKnowledgePins && knowledgeTargets.length > 0 && knowledgeTargets.length < others.length
+    return { siblings: useKnowledge ? knowledgeTargets : others, useKnowledge }
+  }
 
   const elementsInRect = (m: { x0: number; y0: number; x1: number; y1: number }) => {
     const minX = Math.min(m.x0, m.x1)
@@ -463,6 +499,7 @@ export default function SlideCanvas({
 
   // Drag an element (or the whole multi-selection) by its body to reposition it.
   const startElementDrag = (el: SlideElement, e: React.MouseEvent) => {
+    if (amendmentReview) return
     if (!interactive || e.button !== 0 || editingElementId === el.id || !onElementResize) return
     e.stopPropagation()
     const isSelected = selectedElementIds.includes(el.id)
@@ -476,7 +513,8 @@ export default function SlideCanvas({
     const startY = e.clientY
     const pxPerInch = SCALE * scale
     const primaryInit = inits.get(el.id) ?? { x: el.x, y: el.y, w: el.w, h: el.h }
-    const lines = snapLinesFrom(slide.elements.filter(s2 => !groupIds.includes(s2.id)))
+    const { siblings: snapSiblings, useKnowledge } = snapSiblingsFor(groupIds)
+    const lines = snapLinesFrom(snapSiblings)
     let moved = false
     let started = false
 
@@ -489,6 +527,7 @@ export default function SlideCanvas({
         started = true
         onElementResizeStart?.()
         if (!isSelected) onElementClick?.(el.id)
+        setGuidesKnowledge(useKnowledge)
       }
       const dx = (ev.clientX - startX) / pxPerInch
       const dy = (ev.clientY - startY) / pxPerInch
@@ -531,7 +570,7 @@ export default function SlideCanvas({
         const ny = Math.max(0, Math.min(init.y + dy + snapDY, SLIDE_H_IN - init.h))
         onElementResize(id, { x: nx, y: ny, w: init.w, h: init.h })
       })
-      const snapSibs = slide.elements.filter(s2 => !groupIds.includes(s2.id))
+      const snapSibs = snapSiblings
       const pfx = Math.max(0, Math.min(primaryInit.x + dx + snapDX, SLIDE_W_IN - primaryInit.w))
       const pfy = Math.max(0, Math.min(primaryInit.y + dy + snapDY, SLIDE_H_IN - primaryInit.h))
       setGuides({
@@ -544,6 +583,7 @@ export default function SlideCanvas({
       window.removeEventListener('mouseup', onUp)
       document.body.style.userSelect = ''
       setGuides(NO_GUIDES)
+      setGuidesKnowledge(false)
       if (moved) suppressClickRef.current = true
     }
     document.body.style.userSelect = 'none'
@@ -614,31 +654,84 @@ export default function SlideCanvas({
           boxShadow: showShadow ? '0 8px 40px rgba(0,0,0,0.6)' : undefined,
           transform: scale !== 1 ? `scale(${scale})` : undefined,
           transformOrigin: 'top left',
-          cursor: interactive ? 'crosshair' : undefined,
+          cursor: interactive || amendmentReview ? 'crosshair' : undefined,
+          overflow: amendmentReview ? 'visible' : undefined,
         }}
       >
+        {showDiffHighlights &&
+          compareSlide?.elements.map(oldEl => {
+            if (!amendmentElementIds.includes(oldEl.id)) return null
+            const newEl = slide.elements.find(e => e.id === oldEl.id)
+            if (!newEl) return null
+            const moved =
+              oldEl.x !== newEl.x ||
+              oldEl.y !== newEl.y ||
+              oldEl.w !== newEl.w ||
+              oldEl.h !== newEl.h
+            if (!moved) return null
+            return (
+              <div
+                key={`ghost-${oldEl.id}`}
+                style={{
+                  position: 'absolute',
+                  left: oldEl.x * SCALE,
+                  top: oldEl.y * SCALE,
+                  width: oldEl.w * SCALE,
+                  height: oldEl.h * SCALE,
+                  border: '2px dashed #fbbf24',
+                  background: 'rgba(251,191,36,0.12)',
+                  boxShadow: '0 0 12px rgba(251,191,36,0.35)',
+                  pointerEvents: 'none',
+                  zIndex: 8,
+                }}
+                title="Previous position"
+              />
+            )
+          })}
         {slide.elements.map(el => {
           const diffHighlighted = highlightedElementIds.includes(el.id)
           const deleted = deletedElementIds.includes(el.id)
           const showDiff = showDiffHighlights && (diffHighlighted || deleted)
           const isEditing = editingElementId === el.id
           const editable = isTextEditable(el)
+          const isKbLinked = showKnowledgePins && linkedOnSlide.has(el.id)
+          const kbLink = knowledgeLinkByElementId?.get(el.id)
+          const kbTitle = kbLink
+            ? `Linked to ${kbLink.knowledgeName} (${kbLink.knowledgeType})`
+            : isKbLinked
+              ? 'Linked to knowledge graph'
+              : undefined
+          const hasAmendment = amendmentElementIds.includes(el.id)
+          const showAmendmentControls =
+            showDiffHighlights &&
+            hasAmendment &&
+            !!onAcceptAmendment &&
+            !!onDeclineAmendment &&
+            !isEditing
 
           return (
             <div
               key={el.id}
               style={{
                 ...elementStyle(el),
-                cursor: interactive ? (isEditing ? 'text' : 'move') : 'default',
+                cursor:
+                  interactive || amendmentReview
+                    ? isEditing
+                      ? 'text'
+                      : amendmentReview
+                        ? 'pointer'
+                        : 'move'
+                    : 'default',
                 opacity: deleted && showDiffHighlights ? 0.55 : 1,
-                zIndex: isEditing ? 100 : showDiff ? 15 : undefined,
-                overflow: isEditing ? 'visible' : 'hidden',
+                zIndex: isEditing ? 100 : showDiff ? 15 : showAmendmentControls ? 20 : undefined,
+                overflow: isEditing || showAmendmentControls || (diffHighlighted && showDiffHighlights) ? 'visible' : 'hidden',
+                boxShadow: undefined,
               }}
               onMouseDown={
-                interactive && !isEditing ? e => startElementDrag(el, e) : undefined
+                interactive && !isEditing && !amendmentReview ? e => startElementDrag(el, e) : undefined
               }
               onClick={
-                interactive && onElementClick && !isEditing
+                (interactive || amendmentReview) && onElementClick && !isEditing
                   ? e => {
                       e.stopPropagation()
                       if (suppressClickRef.current) {
@@ -657,8 +750,86 @@ export default function SlideCanvas({
                     }
                   : undefined
               }
-              title={editable ? `${el.id} — double-click to edit` : el.id}
+              title={kbTitle ?? (editable ? `${el.id} — double-click to edit` : el.id)}
             >
+              {showAmendmentControls && (
+                <div
+                  style={{
+                    position: 'absolute',
+                    top: -30,
+                    right: 0,
+                    zIndex: 60,
+                    display: 'flex',
+                    gap: 4,
+                    pointerEvents: 'auto',
+                  }}
+                  onClick={e => e.stopPropagation()}
+                  onMouseDown={e => e.stopPropagation()}
+                >
+                  <button
+                    type="button"
+                    title="Accept this change"
+                    onClick={() => onAcceptAmendment!(el.id)}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      width: 26,
+                      height: 26,
+                      borderRadius: 6,
+                      border: '1px solid rgba(34,197,94,0.65)',
+                      background: 'rgba(20,83,45,0.95)',
+                      color: '#86efac',
+                      cursor: 'pointer',
+                      boxShadow: '0 2px 8px rgba(0,0,0,0.35)',
+                    }}
+                  >
+                    <Check style={{ width: 14, height: 14 }} strokeWidth={2.5} />
+                  </button>
+                  <button
+                    type="button"
+                    title="Decline this change"
+                    onClick={() => onDeclineAmendment!(el.id)}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      width: 26,
+                      height: 26,
+                      borderRadius: 6,
+                      border: '1px solid rgba(239,68,68,0.65)',
+                      background: 'rgba(69,10,10,0.95)',
+                      color: '#fca5a5',
+                      cursor: 'pointer',
+                      boxShadow: '0 2px 8px rgba(0,0,0,0.35)',
+                    }}
+                  >
+                    <X style={{ width: 14, height: 14 }} strokeWidth={2.5} />
+                  </button>
+                </div>
+              )}
+              {isKbLinked && (
+                <div
+                  style={{
+                    position: 'absolute',
+                    top: 2,
+                    right: 2,
+                    zIndex: 22,
+                    pointerEvents: 'none',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    width: 16,
+                    height: 16,
+                    borderRadius: 4,
+                    background: 'rgba(6, 182, 212, 0.92)',
+                    boxShadow: '0 1px 3px rgba(0,0,0,0.35)',
+                  }}
+                  title={kbTitle}
+                >
+                  <Paperclip style={{ width: 10, height: 10, color: '#fff' }} strokeWidth={2.5} />
+                </div>
+              )}
               {deleted && showDiffHighlights && (
                 <div
                   style={{
@@ -674,10 +845,11 @@ export default function SlideCanvas({
                 <div
                   style={{
                     position: 'absolute',
-                    inset: 0,
+                    inset: -2,
                     border: `2px dashed ${colors.border}`,
+                    boxShadow: `0 0 0 1px rgba(0,0,0,0.45), 0 0 14px ${colors.glow}`,
                     pointerEvents: 'none',
-                    zIndex: 10,
+                    zIndex: 12,
                   }}
                 />
               )}
@@ -760,21 +932,29 @@ export default function SlideCanvas({
         {interactive &&
           slide.elements
             .filter(el => selectedElementIds.includes(el.id) && editingElementId !== el.id)
-            .map(el => (
+            .map(el => {
+              const { siblings: resizeSiblings, useKnowledge: resizeKnowledge } = snapSiblingsFor([el.id])
+              return (
               <SelectionOverlay
                 key={`selection-${el.id}`}
                 element={el}
                 scale={scale}
                 color={HIGHLIGHT_COLORS.blue.border}
                 showHandles={!!onElementResize && selectedElementIds.length === 1}
-                siblings={slide.elements.filter(s2 => s2.id !== el.id)}
+                siblings={resizeSiblings}
                 onResize={
                   onElementResize ? geom => onElementResize(el.id, geom) : undefined
                 }
-                onResizeStart={onElementResizeStart}
-                onGuides={setGuides}
+                onResizeStart={() => {
+                  setGuidesKnowledge(resizeKnowledge)
+                  onElementResizeStart?.()
+                }}
+                onGuides={g => {
+                  setGuides(g)
+                  if (g.x.length === 0 && g.y.length === 0) setGuidesKnowledge(false)
+                }}
               />
-            ))}
+            )})}
         {(guides.x.length > 0 || guides.y.length > 0) && (
           <>
             {guides.x.map((g, i) => (
@@ -786,7 +966,7 @@ export default function SlideCanvas({
                   top: Math.max(0, g.start * SCALE),
                   width: 0,
                   height: (Math.min(720, g.end * SCALE) - Math.max(0, g.start * SCALE)),
-                  borderLeft: '1px dashed #ef4444',
+                  borderLeft: `1px dashed ${guidesKnowledge ? '#22d3ee' : '#ef4444'}`,
                   pointerEvents: 'none',
                   zIndex: 80,
                 }}
@@ -801,7 +981,7 @@ export default function SlideCanvas({
                   top: g.pos * SCALE,
                   width: (Math.min(960, g.end * SCALE) - Math.max(0, g.start * SCALE)),
                   height: 0,
-                  borderTop: '1px dashed #ef4444',
+                  borderTop: `1px dashed ${guidesKnowledge ? '#22d3ee' : '#ef4444'}`,
                   pointerEvents: 'none',
                   zIndex: 80,
                 }}

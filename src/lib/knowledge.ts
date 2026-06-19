@@ -78,7 +78,13 @@ export function buildKnowledgeContext(
   opts: KnowledgeContextOptions = {}
 ): string {
   const recentOnly = opts.recentOnly ?? true
-  const enabled = layers.filter(l => l.enabled)
+  const rawEnabled = layers.filter(l => l.enabled)
+  // When a design system is loaded, drop generic manual style layers (e.g. the
+  // default FX palette) so they don't contradict the user's selected schema.
+  const hasDesignSystem = rawEnabled.some(l => l.source === 'designSystem')
+  const enabled = hasDesignSystem
+    ? rawEnabled.filter(l => !(l.type === 'style' && l.source === 'manual'))
+    : rawEnabled
   if (enabled.length === 0 && decisions.length === 0) return ''
 
   const parts: string[] = []
@@ -87,6 +93,7 @@ export function buildKnowledgeContext(
   // overlap with the instruction + active slide, always keep global guidance
   // (style/stakeholder), truncate long layers, and respect a total budget. ──
   const PER_LAYER_CHARS = 1200
+  const DESIGN_SYSTEM_CHARS = 10000
   const totalBudget = opts.charBudget ?? 6000
   const DOC_CHARS = opts.documentCharCap ?? PER_LAYER_CHARS
   const DOC_TOTAL = opts.documentTotalCap ?? Math.max(DOC_CHARS, totalBudget)
@@ -132,9 +139,10 @@ export function buildKnowledgeContext(
       docUsed += piece.length
       return
     }
-    const piece = truncate(l.content, PER_LAYER_CHARS)
-    // Always-include layers bypass the budget gate; others must fit.
-    if (!ALWAYS.has(l.type) && used + piece.length > totalBudget) return
+    const isDs = l.source === 'designSystem'
+    const piece = truncate(l.content, isDs ? DESIGN_SYSTEM_CHARS : PER_LAYER_CHARS)
+    // Always-include and design-system layers bypass the budget gate; others must fit.
+    if (!ALWAYS.has(l.type) && !isDs && used + piece.length > totalBudget) return
     selected.push({ ...l, content: piece })
     used += piece.length
   })
@@ -323,6 +331,53 @@ export async function fetchGraphKnowledgeContext(opts: {
     return data.context?.trim() ?? ''
   } catch {
     return ''
+  }
+}
+
+/** Phase 3 — Knowledge Planner: semantic edit plan before the agent loop. */
+export async function fetchAgentPlan(opts: {
+  branchId: string | null | undefined
+  presentationId?: string | null
+  instruction: string
+  targetSlideIds: string[]
+}): Promise<import('@/lib/agent/types').AgentPlanResponse | null> {
+  if (!opts.branchId?.trim()) return null
+  try {
+    const res = await fetch('/api/agent/plan', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        branchId: opts.branchId,
+        presentationId: opts.presentationId ?? null,
+        instruction: opts.instruction,
+        targetSlideIds: opts.targetSlideIds,
+      }),
+    })
+    if (!res.ok) return null
+    return (await res.json()) as import('@/lib/agent/types').AgentPlanResponse
+  } catch {
+    return null
+  }
+}
+
+/** Phase 3 — Review Agent: rule-based validation after apply_changes. */
+export async function reviewAgentChanges(opts: {
+  instruction: string
+  semanticEditPlan: import('@/lib/agent/types').SemanticEditPlan | null
+  changes: import('@/lib/types').Change[]
+  slidesAfter: import('@/lib/types').SlideData[]
+  approvalRequired?: boolean
+}): Promise<import('@/lib/agent/types').ValidationResult | null> {
+  try {
+    const res = await fetch('/api/agent/review', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(opts),
+    })
+    if (!res.ok) return null
+    return (await res.json()) as import('@/lib/agent/types').ValidationResult
+  } catch {
+    return null
   }
 }
 

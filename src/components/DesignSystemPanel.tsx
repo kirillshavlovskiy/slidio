@@ -6,7 +6,10 @@ import {
   DSCategory,
   DSFile,
   DesignSystem,
+  DESIGN_SYSTEM_PRESETS,
   buildDesignSystem,
+  buildPresetDesignSystem,
+  type DesignSystemPresetId,
   isTextCategory,
 } from '@/lib/designSystem'
 
@@ -18,6 +21,10 @@ interface Props {
   onClose: () => void
   /** Optional extra section (e.g. the .pptx/.pdf reference-template uploader). */
   templatesSlot?: React.ReactNode
+  slideCount?: number
+  canApplyToDeck?: boolean
+  isApplyingToDeck?: boolean
+  onApplyToDeck?: () => void
 }
 
 interface SectionDef {
@@ -67,6 +74,10 @@ export default function DesignSystemPanel({
   onChange,
   onClose,
   templatesSlot,
+  slideCount = 0,
+  canApplyToDeck = false,
+  isApplyingToDeck = false,
+  onApplyToDeck,
 }: Props) {
   const [name, setName] = useState(initialName)
   const [files, setFiles] = useState<DSFile[]>(initialFiles)
@@ -105,6 +116,11 @@ export default function DesignSystemPanel({
 
   const removeFile = (id: string) => commit(name, files.filter(f => f.id !== id))
 
+  const applyPreset = (presetId: DesignSystemPresetId) => {
+    const next = buildPresetDesignSystem(dsId, presetId)
+    commit(next.name, next.files)
+  }
+
   const palette = ds.tokens.palette.slice(0, 24)
 
   return (
@@ -119,7 +135,7 @@ export default function DesignSystemPanel({
             <div>
               <p className="text-sm font-bold text-white">Design System</p>
               <p className="text-xs text-[#64748B] mt-0.5">
-                Upload each file into its section · the AI follows this system when building slides
+                Upload files or pick a built-in sample — the AI follows this system on every slide
               </p>
             </div>
           </div>
@@ -133,6 +149,47 @@ export default function DesignSystemPanel({
 
         {/* Body */}
         <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
+          {/* Built-in samples */}
+          <div>
+            <label className="text-[11px] font-bold tracking-wider uppercase text-amber-400">
+              Sample design systems
+            </label>
+            <p className="text-[11px] text-[#64748B] mt-1">
+              One-click light or dark themes — no upload required. Replaces current stylesheet/rules.
+            </p>
+            <div className="mt-2 grid grid-cols-2 gap-3">
+              {DESIGN_SYSTEM_PRESETS.map(preset => (
+                <button
+                  key={preset.id}
+                  type="button"
+                  onClick={() => applyPreset(preset.id)}
+                  className="rounded-lg border border-[#1e3a5f] bg-[#0a1422] overflow-hidden text-left
+                             hover:border-amber-400/60 hover:bg-[#0f1a2e] transition-colors"
+                >
+                  <div
+                    className="h-14 px-3 flex items-center justify-between border-b border-[#1e3a5f]"
+                    style={{ background: `#${preset.previewBg}` }}
+                  >
+                    <span
+                      className="text-lg font-semibold"
+                      style={{ color: `#${preset.previewText}`, fontFamily: 'Calibri, sans-serif' }}
+                    >
+                      Aa
+                    </span>
+                    <span
+                      className="w-10 h-1.5 rounded-full"
+                      style={{ background: `#${preset.previewAccent}` }}
+                    />
+                  </div>
+                  <div className="px-3 py-2">
+                    <p className="text-xs font-semibold text-white">{preset.name}</p>
+                    <p className="text-[10px] text-[#64748B] mt-0.5">{preset.tagline}</p>
+                  </div>
+                </button>
+              ))}
+            </div>
+          </div>
+
           {/* Name */}
           <div>
             <label className="text-[11px] font-bold tracking-wider uppercase text-amber-400">
@@ -297,18 +354,38 @@ export default function DesignSystemPanel({
         </div>
 
         {/* Footer */}
-        <div className="px-5 py-3 border-t border-[#1e3a5f] flex items-center justify-between flex-shrink-0">
+        <div className="px-5 py-3 border-t border-[#1e3a5f] flex items-center justify-between gap-3 flex-shrink-0">
           <p className="text-[11px] text-[#64748B]">
             {files.length} file{files.length !== 1 ? 's' : ''} ·{' '}
             {ds.tokens.palette.length} colors · {ds.tokens.fontFamilies.length} fonts
           </p>
-          <button
-            onClick={onClose}
-            className="px-3 py-1.5 bg-amber-500 text-[#0d1b2a] rounded text-sm font-bold
-                       hover:bg-amber-400 transition-colors"
-          >
-            Done
-          </button>
+          <div className="flex items-center gap-2">
+            {onApplyToDeck && (
+              <button
+                type="button"
+                onClick={onApplyToDeck}
+                disabled={!canApplyToDeck || files.length === 0 || slideCount === 0}
+                title={
+                  files.length === 0
+                    ? 'Pick a sample design system or upload a stylesheet first'
+                    : slideCount === 0
+                      ? 'Open a presentation with slides first'
+                      : `Restyle all ${slideCount} slide${slideCount !== 1 ? 's' : ''} to match this design system`
+                }
+                className="px-3 py-1.5 rounded text-sm font-semibold border border-amber-500/40 text-amber-300
+                           hover:bg-amber-500/10 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                {isApplyingToDeck ? 'Applying…' : 'Apply to all slides'}
+              </button>
+            )}
+            <button
+              onClick={onClose}
+              className="px-3 py-1.5 bg-amber-500 text-[#0d1b2a] rounded text-sm font-bold
+                         hover:bg-amber-400 transition-colors"
+            >
+              Done
+            </button>
+          </div>
         </div>
       </div>
     </div>

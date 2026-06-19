@@ -1,5 +1,7 @@
 import JSZip from 'jszip'
 import { extractPdfPlainText } from '@/lib/parsePdfTemplate'
+import { extractPptxText } from '@/lib/ooxmlTextExtract'
+import { extractTextWithSkill, needsSkillExtract } from '@/lib/graph/skillExtract'
 
 export const TEXT_EXTENSIONS = [
   '.txt', '.md', '.markdown', '.csv', '.tsv', '.json', '.yaml', '.yml',
@@ -35,10 +37,22 @@ export function fileTypeFromName(filename: string): string {
   const lower = filename.toLowerCase()
   if (lower.endsWith('.pdf')) return 'pdf'
   if (lower.endsWith('.docx')) return 'docx'
+  if (lower.endsWith('.pptx') || lower.endsWith('.pptm')) return 'pptx'
+  if (lower.endsWith('.xlsx') || lower.endsWith('.xlsm') || lower.endsWith('.xls')) return 'xlsx'
   for (const ext of TEXT_EXTENSIONS) {
     if (lower.endsWith(ext)) return ext.slice(1)
   }
   return 'unknown'
+}
+
+async function parseWithSkillFallback(
+  buffer: Buffer,
+  filename: string,
+  localText: string
+): Promise<string> {
+  if (localText.trim()) return localText
+  if (!needsSkillExtract(filename)) return localText
+  return extractTextWithSkill(buffer, filename)
 }
 
 export async function parseBufferToText(buffer: Buffer, filename: string): Promise<string> {
@@ -46,13 +60,24 @@ export async function parseBufferToText(buffer: Buffer, filename: string): Promi
   let text = ''
 
   if (lower.endsWith('.pdf')) {
-    text = extractPdfPlainText(buffer)
+    text = await parseWithSkillFallback(buffer, filename, extractPdfPlainText(buffer))
   } else if (lower.endsWith('.docx')) {
-    text = await extractDocxText(buffer)
+    text = await parseWithSkillFallback(buffer, filename, await extractDocxText(buffer))
+  } else if (lower.endsWith('.pptx') || lower.endsWith('.pptm')) {
+    try {
+      text = await extractPptxText(buffer)
+    } catch {
+      text = ''
+    }
+    text = await parseWithSkillFallback(buffer, filename, text)
+  } else if (lower.endsWith('.xlsx') || lower.endsWith('.xlsm') || lower.endsWith('.xls')) {
+    text = await extractTextWithSkill(buffer, filename)
   } else if (TEXT_EXTENSIONS.some(ext => lower.endsWith(ext))) {
     text = buffer.toString('utf-8')
   } else {
-    throw new Error('Unsupported file type. Use PDF, DOCX, TXT, MD, CSV, JSON, YAML, HTML or XML.')
+    throw new Error(
+      'Unsupported file type. Use PDF, DOCX, PPTX, XLSX, TXT, MD, CSV, JSON, YAML, HTML or XML.'
+    )
   }
 
   text = text.trim()

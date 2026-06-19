@@ -106,7 +106,7 @@ Single chunk: a JSON array of objects with fields:
 - type: "Topic" | "Claim" | "Metric"
 - name, description, confidence (0–1)
 - evidenceText: exact substring from the chunk (required for Claim/Metric)
-- topicName: optional for Claim
+- topicName: optional for Claim/Metric
 
 Multiple chunks: { "chunks": [ { "items": [ ...same objects... ] }, ... ] } — one entry per chunk in order.
 

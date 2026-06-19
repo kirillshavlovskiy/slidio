@@ -1,5 +1,10 @@
 import Anthropic from '@anthropic-ai/sdk'
 import { NextRequest, NextResponse } from 'next/server'
+import {
+  isKnowledgeBasedEditRequest,
+  isLayoutAuditChangeRequest,
+} from '@/lib/agent/routingHeuristics'
+import { PLANNING_MODEL } from '@/lib/agent/models'
 
 const client = new Anthropic()
 
@@ -7,7 +12,7 @@ const client = new Anthropic()
 // Routing is a trivial 64-token classification, so use the cheap model (Haiku 4.5,
 // 3× cheaper than Sonnet) by default. Override via env if needed.
 const ROUTER_MODEL =
-  process.env.ANTHROPIC_ROUTER_MODEL || process.env.ANTHROPIC_CHEAP_MODEL || 'claude-haiku-4-5'
+  process.env.ANTHROPIC_ROUTER_MODEL || PLANNING_MODEL
 
 type Mode = 'ask' | 'single' | 'agent'
 type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
@@ -91,6 +96,22 @@ function isCreateDeckIntent(instruction: string): boolean {
 }
 
 /**
+ * User wants to apply hub research / extracted claims — needs the agent loop
+ * (reads slides, applies knowledge graph plan, validates). Never one-shot.
+ */
+function isKnowledgeBasedEdit(instruction: string): boolean {
+  return isKnowledgeBasedEditRequest(instruction)
+}
+
+/** Deck-wide scope when the message names the deck/presentation explicitly. */
+const DECK_WIDE =
+  /\b(the\s+)?(whole\s+)?(deck|presentation|slideshow|pitch\s+deck|investor\s+deck)\b|\b(all|every)\s+slides?\b/i
+
+function isDeckWide(instruction: string): boolean {
+  return DECK_WIDE.test(instruction)
+}
+
+/**
  * Heuristic "this is a question, not a command" guard. Used only to SUPPRESS the
  * create-deck escalation (so a question that happens to mention building isn't
  * turned into an edit). It never forces editing — at worst a real command that
@@ -169,6 +190,56 @@ Return the routing JSON now.`
       if (mode === 'single' && isCreateDeckIntent(instruction) && !isQuestionLike(instruction)) {
         mode = 'agent'
         if (effort === 'low' || effort === 'medium') effort = 'high'
+      }
+
+      // Deck-wide knowledge integration (many slides) → agent. Single-slide claim
+      // updates can stay on single-shot (semantic plan is injected in callApi).
+      if (
+        mode === 'single' &&
+        isKnowledgeBasedEdit(instruction) &&
+        isDeckWide(instruction) &&
+        !isQuestionLike(instruction) &&
+        ctx.totalSlides > 1
+      ) {
+        mode = 'agent'
+        if (effort === 'low') effort = 'medium'
+      }
+
+      // "Update the deck …" without an explicit slide target → whole deck.
+      if (mode !== 'ask' && isDeckWide(instruction) && scope === 'active' && ctx.totalSlides > 1) {
+        scope = 'deck'
+      }
+
+      // Layout audit / fix (incl. clarification options like "full-audit") is always
+      // an agent CHANGE — never answer-only, even if the label says "provide data".
+      if (isLayoutAuditChangeRequest(instruction)) {
+        mode = 'agent'
+        if (ctx.totalSlides > 1 && (isDeckWide(instruction) || scope === 'active')) {
+          scope = 'deck'
+        }
+        // Geometry passes: medium execute (no deep thinking) — high/xhigh causes step-1 timeouts.
+        effort = 'medium'
+      }
+
+      // Short slide-number answer during a layout fix (e.g. "14 and 15") → agent edit.
+      const slideNums = [...instruction.matchAll(/\b(?:slide\s*)?(\d{1,2})\b/gi)]
+        .map(m => parseInt(m[1], 10))
+        .filter(n => n >= 1 && n <= ctx.totalSlides)
+      const uniqueNums = [...new Set(slideNums)]
+      const remainder = instruction
+        .replace(/\b(?:slide\s*)?\d{1,2}\b/gi, '')
+        .replace(/\b(and|or|&,|to|-|–|only|just|slides?)\b/gi, '')
+        .replace(/[^\w\s]/g, '')
+        .trim()
+      if (
+        uniqueNums.length > 0 &&
+        remainder.length < 50 &&
+        !isQuestionLike(instruction) &&
+        mode === 'ask'
+      ) {
+        mode = 'agent'
+        scope = uniqueNums.length > 1 ? 'selected' : 'active'
+        effort = 'medium'
       }
 
       return NextResponse.json({ mode, effort, scope })

@@ -243,10 +243,111 @@ export function getChangeDetails(slides: SlideData[], changes: Change[]): Change
 }
 
 export function getAffectedElementIds(changes: Change[], slideId: string): string[] {
-  return changes
+  const ids = changes
     .filter(c => c.slideId === slideId && c.op !== 'delete')
     .map(c => (c.op === 'add' ? c.element?.id : c.elementId))
     .filter((id): id is string => !!id)
+  return Array.from(new Set(ids))
+}
+
+function elementPatchDelta(
+  before: SlideElement,
+  after: SlideElement
+): (Partial<SlideElement> & { style?: ElementStyle }) | null {
+  const patch: Partial<SlideElement> & { style?: ElementStyle } = {}
+  if (before.x !== after.x) patch.x = after.x
+  if (before.y !== after.y) patch.y = after.y
+  if (before.w !== after.w) patch.w = after.w
+  if (before.h !== after.h) patch.h = after.h
+  if ((before.content || '') !== (after.content || '')) patch.content = after.content
+  if (before.icon !== after.icon) patch.icon = after.icon
+  if (before.src !== after.src) patch.src = after.src
+  if (JSON.stringify(before.chart) !== JSON.stringify(after.chart)) patch.chart = after.chart
+
+  const bs = before.style || {}
+  const as = after.style || {}
+  const styleKeys = new Set([...Object.keys(bs), ...Object.keys(as)])
+  const stylePatch: ElementStyle = {}
+  for (const key of styleKeys) {
+    const k = key as keyof ElementStyle
+    if (JSON.stringify(bs[k]) !== JSON.stringify(as[k])) {
+      stylePatch[k] = as[k] as never
+    }
+  }
+  if (Object.keys(stylePatch).length) patch.style = stylePatch
+
+  return Object.keys(patch).length ? patch : null
+}
+
+/** Collapse cumulative agent micro-patches into one net change per element/slide. */
+export function buildNetChangesFromSnapshots(before: SlideData[], after: SlideData[]): Change[] {
+  const changes: Change[] = []
+  const beforeById = new Map(before.map(s => [s.id, s]))
+  const afterById = new Map(after.map(s => [s.id, s]))
+
+  for (const afterSlide of after) {
+    const beforeSlide = beforeById.get(afterSlide.id)
+    if (!beforeSlide) {
+      changes.push({ slideId: afterSlide.id, op: 'add', slide: JSON.parse(JSON.stringify(afterSlide)) })
+      continue
+    }
+
+    const slidePatch: Partial<SlideData> = {}
+    if (beforeSlide.bg !== afterSlide.bg) slidePatch.bg = afterSlide.bg
+    if (JSON.stringify(beforeSlide.bgGradient) !== JSON.stringify(afterSlide.bgGradient)) {
+      slidePatch.bgGradient = afterSlide.bgGradient
+    }
+    if (Object.keys(slidePatch).length) {
+      changes.push({ slideId: afterSlide.id, slidePatch })
+    }
+
+    const beforeEls = new Map(beforeSlide.elements.map(e => [e.id, e]))
+    const afterEls = new Map(afterSlide.elements.map(e => [e.id, e]))
+
+    for (const el of afterSlide.elements) {
+      const old = beforeEls.get(el.id)
+      if (!old) {
+        changes.push({
+          slideId: afterSlide.id,
+          op: 'add',
+          element: JSON.parse(JSON.stringify(el)) as SlideElement,
+        })
+        continue
+      }
+      const patch = elementPatchDelta(old, el)
+      if (patch) {
+        changes.push({ slideId: afterSlide.id, elementId: el.id, op: 'update', patch })
+      }
+    }
+
+    for (const el of beforeSlide.elements) {
+      if (!afterEls.has(el.id)) {
+        changes.push({ slideId: afterSlide.id, elementId: el.id, op: 'delete' })
+      }
+    }
+  }
+
+  for (const beforeSlide of before) {
+    if (!afterById.has(beforeSlide.id)) {
+      changes.push({ slideId: beforeSlide.id, op: 'delete' })
+    }
+  }
+
+  return changes
+}
+
+/** Prefer net snapshot diff when a checkpoint exists; fall back to raw pending list. */
+export function resolveEffectivePendingChanges(
+  pending: Change[] | null | undefined,
+  checkpoint: SlideData[] | null | undefined,
+  current: SlideData[]
+): Change[] | null {
+  if (!pending?.length) return null
+  if (checkpoint) {
+    const net = buildNetChangesFromSnapshots(checkpoint, current)
+    if (net.length) return net
+  }
+  return pending
 }
 
 export function getDeletedElementIds(changes: Change[], slideId: string): string[] {
@@ -257,4 +358,43 @@ export function getDeletedElementIds(changes: Change[], slideId: string): string
 
 export function hasSlideLevelChange(changes: Change[], slideId: string): boolean {
   return changes.some(c => c.slideId === slideId && c.slidePatch)
+}
+
+/** Element id targeted by a change (add/update/delete/reorder), if any. */
+export function changeElementId(c: Change): string | undefined {
+  if (c.op === 'add' && c.element?.id) return c.element.id
+  return c.elementId
+}
+
+export function changeTargetsElements(c: Change, elementIds: Set<string>): boolean {
+  const id = changeElementId(c)
+  return !!id && elementIds.has(id)
+}
+
+export function filterChangesByElements(changes: Change[], elementIds: string[]): Change[] {
+  if (elementIds.length === 0) return []
+  const set = new Set(elementIds)
+  return changes.filter(c => changeTargetsElements(c, set))
+}
+
+export function excludeChangesByElements(changes: Change[], elementIds: string[]): Change[] {
+  if (elementIds.length === 0) return changes
+  const set = new Set(elementIds)
+  return changes.filter(c => !changeTargetsElements(c, set))
+}
+
+export function getPendingSlideIds(changes: Change[]): string[] {
+  return Array.from(new Set(changes.map(c => c.slideId).filter(Boolean)))
+}
+
+export function filterChangesBySlide(changes: Change[], slideId: string): Change[] {
+  return changes.filter(c => c.slideId === slideId)
+}
+
+export function excludeChangesBySlide(changes: Change[], slideId: string): Change[] {
+  return changes.filter(c => c.slideId !== slideId)
+}
+
+export function countChangesBySlide(changes: Change[], slideId: string): number {
+  return filterChangesBySlide(changes, slideId).length
 }

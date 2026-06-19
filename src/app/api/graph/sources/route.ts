@@ -140,7 +140,7 @@ export async function POST(req: NextRequest) {
     const fileType = fileTypeFromName(file.name)
     if (fileType === 'unknown') {
       return NextResponse.json(
-        { error: 'Unsupported file type. Use PDF, DOCX, TXT, MD, CSV, JSON, YAML, HTML or XML.' },
+        { error: 'Unsupported file type. Use PDF, DOCX, PPTX, XLSX, TXT, MD, CSV, JSON, YAML, HTML or XML.' },
         { status: 400 }
       )
     }
