@@ -342,11 +342,11 @@ export function resolveEffectivePendingChanges(
   checkpoint: SlideData[] | null | undefined,
   current: SlideData[]
 ): Change[] | null {
-  if (!pending?.length) return null
   if (checkpoint) {
     const net = buildNetChangesFromSnapshots(checkpoint, current)
     if (net.length) return net
   }
+  if (!pending?.length) return null
   return pending
 }
 
@@ -397,4 +397,17 @@ export function excludeChangesBySlide(changes: Change[], slideId: string): Chang
 
 export function countChangesBySlide(changes: Change[], slideId: string): number {
   return filterChangesBySlide(changes, slideId).length
+}
+
+/** True when edits only move/resize/style elements — no copy or new substantive content. */
+export function changesAreGeometryOnly(changes: Change[]): boolean {
+  if (!changes.length) return true
+  for (const c of changes) {
+    if (c.op === 'delete') continue
+    if (c.op === 'add' && c.slide) return false
+    if (c.op === 'add' && c.element?.content?.trim()) return false
+    if (c.patch?.content !== undefined && String(c.patch.content).trim()) return false
+    if (c.element?.content?.trim()) return false
+  }
+  return true
 }

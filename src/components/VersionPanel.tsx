@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import {
   History, GitBranch, Tag, RotateCcw, CheckCircle2, XCircle,
   Clock, ChevronRight, ChevronDown, Bot, X, AlertTriangle,
@@ -8,11 +8,40 @@ import {
 } from 'lucide-react'
 import type { SlideVersion, DecisionRecord, SlideData, VersionBranch } from '@/lib/types'
 import { summarizeDeckChanges } from '@/lib/versionDiff'
+import { versionChangeKind } from '@/lib/actorInfo'
+import ActorAttribution from '@/components/ActorAttribution'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { cn } from '@/lib/utils'
 
 const MAIN_BRANCH_ID = 'main'
+
+function branchOf(v: SlideVersion) {
+  return v.branchId ?? MAIN_BRANCH_ID
+}
+
+function versionLabelOnBranch(versions: SlideVersion[], branchId: string, versionId: string): string {
+  const onBranch = versions.filter(v => branchOf(v) === branchId)
+  const i = onBranch.findIndex(v => v.id === versionId)
+  return i >= 0 ? `v${i + 1}` : ''
+}
+
+function forkSourceLabel(
+  branch: VersionBranch,
+  versions: SlideVersion[],
+  branchNames: Record<string, string>
+): string | null {
+  if (!branch.forkedFromVersionId || branch.id === MAIN_BRANCH_ID) return null
+  const parent = versions.find(v => v.id === branch.forkedFromVersionId)
+  if (!parent) return null
+  const parentBranchId = branchOf(parent)
+  const parentBranchName =
+    parent.branchLabel ??
+    branchNames[parentBranchId] ??
+    (parentBranchId === MAIN_BRANCH_ID ? 'Main' : 'Branch')
+  const parentLabel = versionLabelOnBranch(versions, parentBranchId, parent.id)
+  return parentLabel ? `${parentBranchName} · ${parentLabel}` : parentBranchName
+}
 
 interface Props {
   versions: SlideVersion[]
@@ -27,6 +56,7 @@ interface Props {
   onRestoreSlide: (slideId: string, fromVersion: SlideVersion) => void
   onNameVersion: (id: string, label: string) => void
   onClose: () => void
+  readOnly?: boolean
 }
 
 export default function VersionPanel({
@@ -42,22 +72,31 @@ export default function VersionPanel({
   onRestoreSlide,
   onNameVersion,
   onClose,
+  readOnly = false,
 }: Props) {
   const [tab, setTab]               = useState<'versions' | 'decisions'>('versions')
+  const [viewBranchId, setViewBranchId] = useState(currentBranchId)
   const [namingId, setNamingId]     = useState<string | null>(null)
   const [nameInput, setNameInput]   = useState('')
   const [expandedId, setExpandedId] = useState<string | null>(null)
   const [confirmId, setConfirmId]   = useState<string | null>(null)
 
+  useEffect(() => {
+    setViewBranchId(currentBranchId)
+  }, [currentBranchId, currentVersionId])
+
   const decisionsSorted  = [...decisions].reverse()
   const acceptedCount    = decisions.filter(d => d.status === 'accepted').length
 
   // ── Branch grouping ──
-  const branchOf = (v: SlideVersion) => v.branchId ?? MAIN_BRANCH_ID
   // Branch list: prefer the supplied list; otherwise derive from the versions.
   const branchList: VersionBranch[] =
     branches.length > 0
-      ? branches
+      ? [...branches].sort((a, b) => {
+          if (a.id === MAIN_BRANCH_ID) return -1
+          if (b.id === MAIN_BRANCH_ID) return 1
+          return a.createdAt - b.createdAt
+        })
       : Array.from(new Set(versions.map(branchOf))).map(id => ({
           id,
           name: id === MAIN_BRANCH_ID ? 'Main' : 'Branch',
@@ -68,6 +107,14 @@ export default function VersionPanel({
   const visibleBranches = branchList.filter(
     b => b.id === MAIN_BRANCH_ID || versions.some(v => branchOf(v) === b.id)
   )
+  const branchNameById = Object.fromEntries(
+    visibleBranches.map(b => [b.id, b.name])
+  ) as Record<string, string>
+  const viewBranch =
+    visibleBranches.find(b => b.id === viewBranchId) ?? visibleBranches[0]
+  const viewBranchVersions = [...versions]
+    .reverse()
+    .filter(v => branchOf(v) === (viewBranch?.id ?? MAIN_BRANCH_ID))
   // The latest (head) snapshot on the active branch.
   const latestOnCurrent = [...versions].reverse().find(v => branchOf(v) === currentBranchId)?.id ?? null
   // The version the deck ACTUALLY reflects right now (restore moves this back).
@@ -75,12 +122,8 @@ export default function VersionPanel({
   // True when we're viewing a restored older version (current ≠ latest).
   const viewingOlder = !!effectiveCurrentId && !!latestOnCurrent && effectiveCurrentId !== latestOnCurrent
   // Human label (v-number within branch) for a version id, for the remark.
-  const labelFor = (vid: string | null) => {
-    if (!vid) return ''
-    const onBranch = versions.filter(v => branchOf(v) === currentBranchId)
-    const i = onBranch.findIndex(v => v.id === vid)
-    return i >= 0 ? `v${i + 1}` : ''
-  }
+  const labelFor = (vid: string | null) =>
+    versionLabelOnBranch(versions, currentBranchId, vid ?? '')
 
   // The snapshot a version was built on top of — its explicit parent, else the
   // previous snapshot on the same branch. Used to compute the per-version diff.
@@ -172,14 +215,81 @@ export default function VersionPanel({
                 <div className="text-center py-10">
                   <History className="w-8 h-8 text-[#1e3a5f] mx-auto mb-2" />
                   <p className="text-xs text-[#334155] italic">
-                    No versions yet. Apply a change to create your first snapshot.
+                    No versions yet. Accept agent edits or make manual changes to create your first snapshot.
                   </p>
                 </div>
               )}
 
+              {versions.length > 0 && visibleBranches.length > 0 && (
+                <>
+                  <p className="text-[11px] text-[#64748b] leading-relaxed">
+                    Each <span className="text-amber-300 font-medium">timeline</span> is independent.
+                    Reverting a chat message creates a <span className="text-amber-300 font-medium">fork</span> — it
+                    does not delete Main history. Switch timelines to compare or continue on a different line.
+                  </p>
+
+                  {/* Branch tabs — one timeline at a time (not stacked under Main) */}
+                  <div className="flex flex-wrap gap-1.5">
+                    {visibleBranches.map(branch => {
+                      const count = versions.filter(v => branchOf(v) === branch.id).length
+                      const isViewing = branch.id === viewBranch?.id
+                      const isEditing = branch.id === currentBranchId
+                      return (
+                        <button
+                          key={branch.id}
+                          type="button"
+                          onClick={() => setViewBranchId(branch.id)}
+                          className={cn(
+                            'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border transition-colors',
+                            isViewing
+                              ? 'bg-[#1e3a5f] border-blue-400/60 text-white'
+                              : 'bg-[#112236] border-[#1e3a5f] text-[#94a3b8] hover:border-[#2a4a6f] hover:text-white'
+                          )}
+                        >
+                          <GitBranch className={cn('w-3 h-3', isEditing ? 'text-amber-400' : 'text-[#64748b]')} />
+                          {branch.name}
+                          <span className="text-[10px] text-[#64748b] tabular-nums">({count})</span>
+                          {isEditing && (
+                            <span className="text-[9px] font-bold text-amber-300 uppercase tracking-wide">
+                              editing
+                            </span>
+                          )}
+                        </button>
+                      )
+                    })}
+                  </div>
+
+                  {viewBranch && viewBranch.id !== MAIN_BRANCH_ID && (
+                    <div className="flex items-start gap-2 rounded-lg border border-[#334155] bg-[#0f1c2e] px-3 py-2">
+                      <GitBranch className="w-3.5 h-3.5 text-amber-400 flex-shrink-0 mt-0.5" />
+                      <div className="min-w-0">
+                        <p className="text-[11px] text-[#e2e8f0] font-medium">
+                          {viewBranch.name} — separate timeline
+                        </p>
+                        <p className="text-[10px] text-[#64748b] mt-0.5 leading-relaxed">
+                          {forkSourceLabel(viewBranch, versions, branchNameById)
+                            ? `Forked from ${forkSourceLabel(viewBranch, versions, branchNameById)}. Main history is unchanged — switch the Main tab to see it.`
+                            : 'Created when you reverted to an earlier chat message and kept editing.'}
+                        </p>
+                        {viewBranch.id !== currentBranchId && onSwitchBranch && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="mt-2"
+                            onClick={() => onSwitchBranch(viewBranch.id)}
+                          >
+                            <GitBranch className="w-3 h-3" /> Work on this timeline
+                          </Button>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
+
               {/* Amber remark: we're viewing a RESTORED older version (no new snapshot
                   was created); the latest version is still ahead. */}
-              {viewingOlder && (
+              {viewingOlder && viewBranch?.id === currentBranchId && (
                 <div className="flex items-start gap-2 rounded-lg border border-amber-500/50 bg-amber-500/10 px-3 py-2">
                   <AlertTriangle className="w-3.5 h-3.5 text-amber-400 flex-shrink-0 mt-0.5" />
                   <p className="text-[11px] text-amber-200 leading-relaxed">
@@ -191,48 +301,29 @@ export default function VersionPanel({
                 </div>
               )}
 
-              {visibleBranches.map(branch => {
-                const branchVersions = [...versions]
-                  .reverse()
-                  .filter(v => branchOf(v) === branch.id)
-                if (branchVersions.length === 0) return null
-                const isActiveBranch = branch.id === currentBranchId
-                return (
-                  <div key={branch.id} className="space-y-2">
-                    {/* Branch header */}
-                    <div className="flex items-center gap-2">
-                      <GitBranch
-                        className={cn('w-3.5 h-3.5', isActiveBranch ? 'text-amber-400' : 'text-[#475569]')}
-                      />
-                      <span
-                        className={cn('text-xs font-bold', isActiveBranch ? 'text-amber-300' : 'text-[#94a3b8]')}
-                      >
-                        {branch.name}
-                      </span>
-                      <Badge variant="muted">{branchVersions.length}</Badge>
-                      {isActiveBranch ? (
-                        <Badge variant="info" className="font-bold">ACTIVE</Badge>
-                      ) : (
-                        onSwitchBranch && (
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            className="ml-auto"
-                            onClick={() => onSwitchBranch(branch.id)}
-                          >
-                            <GitBranch className="w-3 h-3" /> Switch
-                          </Button>
-                        )
-                      )}
-                    </div>
+              {viewBranch && (
+                <div className="space-y-2">
+                  <div className="flex items-center gap-2 px-0.5">
+                    <History className="w-3.5 h-3.5 text-blue-400" />
+                    <span className="text-xs font-bold text-white">{viewBranch.name}</span>
+                    <Badge variant="muted">{viewBranchVersions.length} snapshot{viewBranchVersions.length !== 1 ? 's' : ''}</Badge>
+                    {viewBranch.id === currentBranchId && (
+                      <Badge variant="info" className="font-bold">YOU ARE HERE</Badge>
+                    )}
+                  </div>
 
-                    {branchVersions.map((v, idx) => {
+                  {viewBranchVersions.length === 0 && (
+                    <p className="text-xs text-[#334155] italic px-1">No snapshots on this timeline yet.</p>
+                  )}
+
+                  {viewBranchVersions.map((v, idx) => {
                       const isCurrent  = v.id === effectiveCurrentId  // deck reflects this one
                       const isLatest   = v.id === latestOnCurrent     // newest on the branch
                       const isExpanded = expandedId === v.id
                       const isNaming   = namingId === v.id
                       const linked     = decisions.find(d => d.id === v.decisionId)
-                      const labelNum   = branchVersions.length - idx
+                      const labelNum   = viewBranchVersions.length - idx
+                      const isForkRoot = !!v.isBranchRoot
 
                 return (
                   <div
@@ -285,14 +376,28 @@ export default function VersionPanel({
                           </div>
                         ) : (
                           <p className="text-xs font-semibold text-white truncate flex items-center gap-1.5">
+                            {isForkRoot && (
+                              <Badge variant="warning" className="text-[9px] py-0">FORK START</Badge>
+                            )}
                             {v.label && <Milestone className="w-3 h-3 text-amber-400 flex-shrink-0" />}
-                            {v.label ? v.label : v.changeLog}
+                            {v.label ? v.label : isForkRoot ? v.changeLog : v.changeLog}
                           </p>
                         )}
-                        {v.label && (
-                          <p className="text-[10px] text-[#64748B] truncate">{v.changeLog}</p>
+                        {(v.label || isForkRoot) && (
+                          <p className="text-[10px] text-[#64748B] truncate">
+                            {isForkRoot && !v.label
+                              ? 'Checkpoint from before the forked message — edits after this build on this timeline.'
+                              : v.changeLog}
+                          </p>
                         )}
                         <div className="flex items-center gap-3 mt-1 flex-wrap">
+                          {(v.actorName || v.actorId) && (
+                            <ActorAttribution
+                              name={v.actorName}
+                              image={v.actorImage}
+                              kind={versionChangeKind(v)}
+                            />
+                          )}
                           <span className="flex items-center gap-1 text-[10px] text-[#334155]">
                             <Clock className="w-2.5 h-2.5" />{fmt(v.timestamp)}
                           </span>
@@ -324,7 +429,7 @@ export default function VersionPanel({
                         {isLatest && !isCurrent && (
                           <Badge variant="info">LATEST</Badge>
                         )}
-                        {!isCurrent && (
+                        {!isCurrent && !readOnly && (
                           <>
                             <Button
                               variant="ghost"
@@ -419,7 +524,7 @@ export default function VersionPanel({
                       )
                     })()}
 
-                    {isExpanded && v.changedSlideIds.length > 0 && (
+                    {isExpanded && v.changedSlideIds.length > 0 && !readOnly && (
                       <div className="px-3 pb-3 border-t border-[#1e3a5f] pt-2">
                         <p className="text-[10px] text-[#475569] mb-2">
                           Changed slides — restore individually:
@@ -454,10 +559,9 @@ export default function VersionPanel({
                     )}
                   </div>
                 )
-                    })}
-                  </div>
-                )
-              })}
+                  })}
+                </div>
+              )}
             </div>
           )}
 
@@ -484,6 +588,13 @@ export default function VersionPanel({
                       </p>
                       <p className="text-[10px] text-[#64748B] mt-0.5">{d.proposedSummary}</p>
                       <div className="flex items-center gap-3 mt-1 flex-wrap">
+                        {(d.actorName || d.actorId) && (
+                          <ActorAttribution
+                            name={d.actorName}
+                            image={d.actorImage}
+                            kind="ai"
+                          />
+                        )}
                         <span className="flex items-center gap-1 text-[9px] text-[#334155]">
                           <Clock className="w-2 h-2" />{fmt(d.timestamp)}
                         </span>

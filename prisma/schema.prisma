@@ -54,6 +54,7 @@ model User {
   currentPeriodStart DateTime?
   currentPeriodEnd   DateTime?
   usageRecords       UsageRecord[]
+  deckComments       DeckComment[]
   createdAt       DateTime          @default(now())
   updatedAt       DateTime          @updatedAt
 }
@@ -126,6 +127,7 @@ model Presentation {
   updatedAt           DateTime       @updatedAt
   versions            SlideVersion[]
   decisions           DecisionRecord[]
+  comments            DeckComment[]
 }
 
 model SlideVersion {
@@ -189,6 +191,27 @@ model DecisionRecord {
   snapshotBefore     String? // JSON string
   actorId            String? // which user made this decision (audit trail)
   createdAt          DateTime     @default(now())
+}
+
+// Collaborator feedback on a deck — scoped to the whole deck, a slide, or an element.
+// Included in LLM knowledge context so agents honor team notes.
+model DeckComment {
+  id             String       @id @default(cuid())
+  presentationId String
+  presentation   Presentation @relation(fields: [presentationId], references: [id], onDelete: Cascade)
+  userId         String
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  slideId        String?
+  elementId      String?
+  /** Pin position on slide canvas (0–960 × 0–720 px). */
+  pinX           Float?
+  pinY           Float?
+  content        String
+  resolved       Boolean      @default(false)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@index([presentationId])
 }
 
 // ── Knowledge graph (Phase 0–1) ───────────────────────────────────────────────

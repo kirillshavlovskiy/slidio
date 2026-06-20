@@ -1,6 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk'
 import type { BetaMessage } from '@anthropic-ai/sdk/resources/beta/messages/messages'
 import { toFile } from '@anthropic-ai/sdk/uploads'
+import { agentModel } from '@/lib/agent/models'
 import { fileTypeFromName } from '@/lib/parseDocumentServer'
 
 const client = new Anthropic()
@@ -11,7 +12,7 @@ const SKILL_BETAS = [
   'skills-2025-10-02',
 ] as const
 
-const MODEL = process.env.ANTHROPIC_CHEAP_MODEL || 'claude-haiku-4-5'
+const MODEL = agentModel()
 const EXTRACT_MAX_TOKENS = 16_000
 const API_TIMEOUT_MS = 120_000
 

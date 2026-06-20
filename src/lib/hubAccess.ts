@@ -2,16 +2,27 @@ import { prisma } from './prisma'
 
 /**
  * Hub (KnowledgeBranch) collaboration roles, ordered by capability.
- *   owner  — manage members + settings, edit, delete
- *   editor — full read/write (AI edits, apply, versions, knowledge)
- *   viewer — read-only
+ *   owner     — manage members + settings, edit decks & knowledge
+ *   editor    — full read/write (AI edits, apply, versions, knowledge)
+ *   moderator — knowledge management + comments; read-only on decks/chat/versions
+ *   viewer    — read-only
  */
-export type HubRole = 'owner' | 'editor' | 'viewer'
+export type HubRole = 'owner' | 'editor' | 'moderator' | 'viewer'
 
-const RANK: Record<HubRole, number> = { viewer: 1, editor: 2, owner: 3 }
+const RANK: Record<HubRole, number> = { viewer: 1, moderator: 2, editor: 3, owner: 4 }
 
 export function roleAtLeast(role: HubRole | null, min: HubRole): boolean {
   return !!role && RANK[role] >= RANK[min]
+}
+
+/** Edit slides, chat, versions, and design system. */
+export function canEditPresentation(role: HubRole | null): boolean {
+  return role === null || roleAtLeast(role, 'editor')
+}
+
+/** Edit knowledge layers, documents, and graph (not deck timelines). */
+export function canModerateKnowledge(role: HubRole | null): boolean {
+  return role === null || roleAtLeast(role, 'moderator')
 }
 
 const SUPERUSER_EMAILS = new Set(
@@ -174,10 +185,10 @@ export async function canAccessKnowledgeLayer(
   }
   const role = await getHubRole(userId, layer.branchId)
   if (!role) return { ok: false, role: null, readOnly: true }
-  return { ok: true, role, readOnly: role === 'viewer' }
+  return { ok: true, role, readOnly: !canModerateKnowledge(role) }
 }
 
-/** Hub-scoped graph access — viewer can read; editor+ can write. */
+/** Hub-scoped graph access — viewer can read; moderator+ can write knowledge graph ops. */
 export async function canAccessGraph(
   userId: string,
   branchId: string,
@@ -186,5 +197,5 @@ export async function canAccessGraph(
   const role = await getHubRole(userId, branchId)
   if (!role) return { ok: false, role: null, readOnly: true }
   const ok = roleAtLeast(role, minRole)
-  return { ok, role, readOnly: role === 'viewer' }
+  return { ok, role, readOnly: !canModerateKnowledge(role) }
 }

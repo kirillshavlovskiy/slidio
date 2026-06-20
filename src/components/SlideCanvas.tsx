@@ -5,6 +5,14 @@ import { SlideData, SlideElement, ElementStyle } from '@/lib/types'
 import { elementFillHex, elementTextHex, isFillElement } from '@/lib/elementStyle'
 import { slideBackgroundStyle, gradientCss } from '@/lib/slideBackground'
 import { fontFamilyCss } from '@/lib/fonts'
+import { CANVAS_PX_PER_IN } from '@/lib/slideDimensions'
+import {
+  textBodyStyle,
+  textSpanStyle,
+  displayTextContent,
+  textInnerPaddingPx,
+  canvasFontSizePx,
+} from '@/lib/textRender'
 import { knowledgeSnapTargets } from '@/lib/deckKnowledgeLinks'
 import ElementTextEditor from '@/components/ElementTextEditor'
 import ChartElement from '@/components/ChartElement'
@@ -54,7 +62,7 @@ interface Props {
   interactive?: boolean
 }
 
-const SCALE = 96
+const SCALE = CANVAS_PX_PER_IN
 const SLIDE_W_IN = 10
 const SLIDE_H_IN = 7.5
 
@@ -357,6 +365,23 @@ function isTextEditable(el: SlideElement) {
   return el.type === 'text' || el.type === 'chip'
 }
 
+function elementPaddingPx(el: SlideElement, s: ElementStyle) {
+  const isBar = el.type === 'bar'
+  const isImage = el.type === 'image'
+  const isChart = el.type === 'chart'
+  const isIcon = el.type === 'icon'
+  const isText = isTextEditable(el)
+  if (isBar || isImage || isChart || isIcon || isText) {
+    return { padLeftPx: 0, padRightPx: 0, padTopPx: 0, padBottomPx: 0 }
+  }
+  return {
+    padLeftPx: s.padLeft != null ? s.padLeft * SCALE : 0,
+    padRightPx: s.padRight != null ? s.padRight * SCALE : 0,
+    padTopPx: s.padTop != null ? s.padTop * SCALE : 0,
+    padBottomPx: s.padBottom != null ? s.padBottom * SCALE : 0,
+  }
+}
+
 // An image src that's still a name reference (e.g. "logo:Deel") means the asset
 // wasn't found — render a visible placeholder instead of a broken <img>.
 const UNRESOLVED_ASSET_REF = /^@?(asset|image|img|media|logo|photo|pic|icon)\s*:/i
@@ -373,15 +398,11 @@ function elementStyle(el: SlideElement): React.CSSProperties {
   const isChart = el.type === 'chart'
   const isIcon = el.type === 'icon'
 
-  // Text insets. Defaults give ~6px horizontal / ~2px vertical breathing room,
-  // but the AI / user can override per-side (in inches) via style.padLeft etc.
-  // This is what creates space between a left accent bar and the text content.
-  const padLeftPx = s.padLeft != null ? s.padLeft * SCALE : 6
-  const padRightPx = s.padRight != null ? s.padRight * SCALE : 6
-  const padTopPx = s.padTop != null ? s.padTop * SCALE : 2
-  const padBottomPx = s.padBottom != null ? s.padBottom * SCALE : 2
+  // Text insets — only when explicitly set on the element (see elementPaddingPx).
+  const { padLeftPx, padRightPx, padTopPx, padBottomPx } = elementPaddingPx(el, s)
 
   const hasBorder = s.borderWidth != null && s.borderWidth > 0
+  const isText = isTextEditable(el)
 
   return {
     position: 'absolute',
@@ -390,10 +411,14 @@ function elementStyle(el: SlideElement): React.CSSProperties {
     width: el.w * SCALE,
     height: el.h * SCALE,
     boxSizing: 'border-box',
-    fontSize: (s.fontSize || 12) * 1.2,
-    fontFamily: fontFamilyCss(s.fontFace),
-    fontWeight: s.fontWeight ?? (s.bold ? 700 : 400),
-    fontStyle: s.italic ? 'italic' : 'normal',
+    ...(isText
+      ? {}
+      : {
+          fontSize: canvasFontSizePx(s.fontSize || 12),
+          fontFamily: fontFamilyCss(s.fontFace),
+          fontWeight: s.fontWeight ?? (s.bold ? 700 : 400),
+          fontStyle: s.italic ? 'italic' : 'normal',
+        }),
     color: el.type === 'bar' ? 'transparent' : `#${elementTextHex(el)}`,
     // Honor an explicit style.bg on ANY element (e.g. zebra-striped text rows),
     // not just shapes — otherwise text-row backgrounds silently disappear.
@@ -408,15 +433,10 @@ function elementStyle(el: SlideElement): React.CSSProperties {
     backgroundImage: s.bgGradient ? gradientCss(s.bgGradient) : undefined,
     textAlign: (s.align as React.CSSProperties['textAlign']) || 'left',
     letterSpacing: s.charSpacing ? `${s.charSpacing * 0.06}em` : undefined,
-    display: 'flex',
-    alignItems: s.valign === 'top' ? 'flex-start' : s.valign === 'bottom' ? 'flex-end' : 'center',
-    justifyContent: s.align === 'center' ? 'center' : s.align === 'right' ? 'flex-end' : 'flex-start',
-    padding: isBar || isImage || isChart || isIcon
+    padding: isBar || isImage || isChart || isIcon || isText
       ? 0
       : `${padTopPx}px ${padRightPx}px ${padBottomPx}px ${padLeftPx}px`,
-    whiteSpace: 'pre-wrap',
-    lineHeight: s.lineHeight ?? 1.25,
-    overflow: 'hidden',
+    overflow: isText ? 'visible' : 'hidden',
     cursor: 'pointer',
     borderRadius: s.borderRadius != null ? s.borderRadius : el.type === 'chip' ? 2 : 0,
     border: hasBorder
@@ -708,6 +728,7 @@ export default function SlideCanvas({
             !!onAcceptAmendment &&
             !!onDeclineAmendment &&
             !isEditing
+          const s = el.style || {}
 
           return (
             <div
@@ -724,7 +745,9 @@ export default function SlideCanvas({
                     : 'default',
                 opacity: deleted && showDiffHighlights ? 0.55 : 1,
                 zIndex: isEditing ? 100 : showDiff ? 15 : showAmendmentControls ? 20 : undefined,
-                overflow: isEditing || showAmendmentControls || (diffHighlighted && showDiffHighlights) ? 'visible' : 'hidden',
+                overflow: isEditing || showAmendmentControls || (diffHighlighted && showDiffHighlights) || editable
+                  ? 'visible'
+                  : 'hidden',
                 boxShadow: undefined,
               }}
               onMouseDown={
@@ -921,6 +944,32 @@ export default function SlideCanvas({
                     </span>
                   </div>
                 )
+              ) : isTextEditable(el) ? (
+                (() => {
+                  const displayed = displayTextContent(el.content ?? '')
+                  const boxW = el.w * SCALE
+                  const boxH = el.h * SCALE
+                  const basePx = canvasFontSizePx(s.fontSize ?? 12)
+                  const innerPad = textInnerPaddingPx(el, s, basePx)
+                  const innerW = Math.max(1, boxW - innerPad.left - innerPad.right)
+                  const innerH = Math.max(1, boxH - innerPad.top - innerPad.bottom)
+                  return (
+                    <div style={textBodyStyle(el, s, innerPad)}>
+                      <span
+                        style={{
+                          ...textSpanStyle(el, s, {
+                            innerWidthPx: innerW,
+                            innerHeightPx: innerH,
+                            displayedContent: displayed,
+                          }),
+                          fontFamily: fontFamilyCss(s.fontFace),
+                        }}
+                      >
+                        {displayed}
+                      </span>
+                    </div>
+                  )
+                })()
               ) : (
                 <span style={{ position: 'relative', zIndex: 1, pointerEvents: 'none' }}>
                   {el.content}

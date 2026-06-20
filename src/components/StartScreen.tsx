@@ -20,6 +20,8 @@ import {
   Mail,
 } from 'lucide-react'
 import { KnowledgeBranch, MyHubInvite, PresentationSummary } from '@/lib/types'
+import { canEditPresentation, canModerateKnowledge } from '@/lib/hubAccess'
+import HubMemberAvatars from '@/components/HubMemberAvatars'
 import ShareHubDialog from '@/components/ShareHubDialog'
 import { IMPORT_ACCEPT } from '@/lib/importDeck'
 import {
@@ -475,7 +477,8 @@ export default function StartScreen({
             {branches.map(branch => {
               const decks = byBranch.get(branch.id) || []
               const isOwner = branch.isOwner || branch.role === 'owner'
-              const canWriteHub = branch.role !== 'viewer'
+              const canWriteHub = canEditPresentation(branch.role ?? null)
+              const canModerate = canModerateKnowledge(branch.role ?? null)
               return (
                 <section
                   key={branch.id}
@@ -516,6 +519,9 @@ export default function StartScreen({
                           <span className="text-[11px] text-[#64748B] shrink-0">
                             {decks.length} deck{decks.length !== 1 ? 's' : ''}
                           </span>
+                          {(branch.members?.length ?? 0) > 0 && (
+                            <HubMemberAvatars members={branch.members!} className="ml-1" />
+                          )}
                           {isOwner && (
                             <button
                               onClick={() => {
@@ -544,7 +550,7 @@ export default function StartScreen({
                       >
                         <Users className="w-3.5 h-3.5" /> Share
                       </button>
-                      {onOpenDesign && (
+                      {onOpenDesign && canWriteHub && (
                         <button
                           onClick={() => onOpenDesign(branch.id)}
                           title="Open the Design System for this hub"
@@ -556,7 +562,7 @@ export default function StartScreen({
                           </span>
                         </button>
                       )}
-                      {onOpenKnowledge && (
+                      {onOpenKnowledge && canModerate && (
                         <button
                           onClick={() => onOpenKnowledge(branch.id)}
                           title="Documents, knowledge graph, and text layers for this hub"

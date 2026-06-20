@@ -4,6 +4,15 @@ import { useEffect, useRef, useState } from 'react'
 import { SlideElement, ElementStyle } from '@/lib/types'
 import { elementTextHex } from '@/lib/elementStyle'
 import { fontFamilyCss } from '@/lib/fonts'
+import { CANVAS_PX_PER_IN } from '@/lib/slideDimensions'
+import {
+  displayTextContent,
+  effectiveLineHeight,
+  effectiveTextValign,
+  fittedCanvasFontSizePx,
+  textInnerPaddingPx,
+  canvasFontSizePx,
+} from '@/lib/textRender'
 
 interface Props {
   element: SlideElement
@@ -14,7 +23,7 @@ interface Props {
 export default function ElementTextEditor({ element, onUpdate, onEnd }: Props) {
   const [draft, setDraft] = useState(element.content ?? '')
   const textareaRef = useRef<HTMLTextAreaElement>(null)
-  const s = element.style
+  const s = element.style ?? {}
 
   useEffect(() => {
     const ta = textareaRef.current
@@ -23,8 +32,6 @@ export default function ElementTextEditor({ element, onUpdate, onEnd }: Props) {
     ta.select()
   }, [])
 
-  // Keep the draft in sync when the content is changed from the floating
-  // toolbar (e.g. toggling a bulleted/numbered list) while editing.
   useEffect(() => {
     setDraft(element.content ?? '')
   }, [element.content])
@@ -36,10 +43,23 @@ export default function ElementTextEditor({ element, onUpdate, onEnd }: Props) {
     onEnd()
   }
 
-  const fontSize = s.fontSize ?? 12
+  const displayed = displayTextContent(draft)
+  const basePx = canvasFontSizePx(s.fontSize ?? 12)
+  const innerPad = textInnerPaddingPx(element, s, basePx)
+  const innerW = Math.max(1, element.w * CANVAS_PX_PER_IN - innerPad.left - innerPad.right)
+  const innerH = Math.max(1, element.h * CANVAS_PX_PER_IN - innerPad.top - innerPad.bottom)
+  const fontSizePx = fittedCanvasFontSizePx(s, innerW, innerH, displayed)
+  const lineCount = Math.max(1, displayed.split('\n').length)
+  const valign = effectiveTextValign(element, s)
+  const justify =
+    valign === 'top' ? 'flex-start' : valign === 'bottom' ? 'flex-end' : 'center'
 
   return (
-    <div className="absolute inset-0 z-50 flex flex-col" onClick={e => e.stopPropagation()}>
+    <div
+      className="absolute inset-0 z-50 flex flex-col"
+      style={{ justifyContent: justify, overflow: 'visible' }}
+      onClick={e => e.stopPropagation()}
+    >
       <textarea
         ref={textareaRef}
         value={draft}
@@ -56,16 +76,22 @@ export default function ElementTextEditor({ element, onUpdate, onEnd }: Props) {
             commit()
           }
         }}
-        className="w-full h-full resize-none bg-transparent border-2 border-[#60a5fa] rounded-sm outline-none p-1"
+        className="w-full h-full resize-none bg-transparent border-2 border-[#60a5fa] rounded-sm outline-none"
         style={{
-          fontSize: fontSize * 1.2,
+          boxSizing: 'border-box',
+          padding: `${innerPad.top}px ${innerPad.right}px ${innerPad.bottom}px ${innerPad.left}px`,
+          fontSize: fontSizePx,
           fontFamily: fontFamilyCss(s.fontFace),
           fontWeight: s.fontWeight ?? (s.bold ? 700 : 400),
           fontStyle: s.italic ? 'italic' : 'normal',
           color: `#${elementTextHex(element)}`,
           textAlign: s.align || 'left',
           letterSpacing: s.charSpacing ? `${s.charSpacing * 0.06}em` : undefined,
-          lineHeight: s.lineHeight ?? 1.25,
+          lineHeight: effectiveLineHeight(s, lineCount),
+          textWrap: lineCount >= 2 ? 'balance' : undefined,
+          wordBreak: 'normal',
+          overflowWrap: 'break-word',
+          overflow: 'visible',
         }}
       />
     </div>

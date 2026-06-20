@@ -79,7 +79,7 @@ export default function CanvasZoomControls({
         type="button"
         onClick={zoomOut}
         disabled={zoom <= min}
-        title="Zoom out (Ctrl + scroll)"
+        title="Zoom out (pinch or Ctrl + scroll)"
         className="p-1.5 rounded text-[#94a3b8] hover:text-white hover:bg-[#1e3a5f] disabled:opacity-30 transition-colors"
       >
         <Minus className="w-3.5 h-3.5" />
@@ -96,7 +96,7 @@ export default function CanvasZoomControls({
         type="button"
         onClick={zoomIn}
         disabled={zoom >= max}
-        title="Zoom in (Ctrl + scroll)"
+        title="Zoom in (pinch or Ctrl + scroll)"
         className="p-1.5 rounded text-[#94a3b8] hover:text-white hover:bg-[#1e3a5f] disabled:opacity-30 transition-colors"
       >
         <Plus className="w-3.5 h-3.5" />

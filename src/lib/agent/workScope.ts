@@ -3,7 +3,10 @@ import {
   findOverlapIssues,
   findSpacingIssues,
   findGeometryIssues,
+  findLayoutFixIssues,
+  findLayoutIssues,
   filterGeometryLayoutIssues,
+  filterLayoutFixIssues,
   formatLayoutIssues,
   type LayoutIssue,
 } from '@/lib/layout'
@@ -32,6 +35,27 @@ export function describeSlidePosition(slides: SlideData[], slideId: string): str
   return i >= 0 ? `slide ${i + 1} (${slideId})` : slideId
 }
 
+/** Slides that still have overlap / clipping / out-of-bounds after a prior patch. */
+export function slidesWithGeometryIssues(slides: SlideData[], slideIds: string[]): string[] {
+  return slideIds.filter(id => {
+    const slide = slides.find(s => s.id === id)
+    return slide ? findLayoutFixIssues(slide).length > 0 : false
+  })
+}
+
+/** On CONTINUE, move "patched" slides back into scope when geometry checks still fail. */
+export function reopenFailedLayoutPatches(
+  slides: SlideData[],
+  ctx: { modifiedSlideIds: string[]; targetSlideIds: string[] }
+): { modifiedSlideIds: string[]; targetSlideIds: string[] } {
+  const broken = slidesWithGeometryIssues(slides, ctx.modifiedSlideIds)
+  if (!broken.length) return ctx
+  return {
+    modifiedSlideIds: ctx.modifiedSlideIds.filter(id => !broken.includes(id)),
+    targetSlideIds: [...new Set([...ctx.targetSlideIds, ...broken, ...ctx.modifiedSlideIds])],
+  }
+}
+
 export function scanSlidesForLayoutIssues(
   slides: SlideData[],
   candidateIds?: string[],
@@ -43,7 +67,7 @@ export function scanSlidesForLayoutIssues(
   const issuesBySlide = new Map<string, LayoutIssue[]>()
   for (const s of pool) {
     const issues = geometryOnly
-      ? findGeometryIssues(s)
+      ? findLayoutFixIssues(s)
       : [...findOverlapIssues(s), ...findSpacingIssues(s)]
     if (issues.length) issuesBySlide.set(s.id, issues)
   }
@@ -147,7 +171,7 @@ export function resolveAgentWorkScope(input: {
       geometryOnly
     )
     for (const [id, issues] of issuesBySlide) {
-      const filtered = geometryOnly ? filterGeometryLayoutIssues(issues) : issues
+      const filtered = geometryOnly ? filterLayoutFixIssues(issues) : issues
       if (filtered.length) issueBySlideId[id] = filtered.slice(0, 5)
     }
   } else if (layoutAudit && deckWide && !targetSlideIds.length) {
@@ -158,12 +182,37 @@ export function resolveAgentWorkScope(input: {
     )
     targetSlideIds = slideIds
     for (const [id, issues] of issuesBySlide) {
-      const filtered = geometryOnly ? filterGeometryLayoutIssues(issues) : issues
+      const filtered = geometryOnly ? filterLayoutFixIssues(issues) : issues
       if (filtered.length) issueBySlideId[id] = filtered.slice(0, 5)
     }
   }
 
   const remainingSlideIds = targetSlideIds.filter(id => !done.has(id))
+
+  if (layoutAudit && input.alreadyDoneSlideIds?.length) {
+    const doneInScope = input.alreadyDoneSlideIds.filter(
+      id => targetSlideIds.includes(id) || targetSlideIds.length === 0
+    )
+    const brokenDone = slidesWithGeometryIssues(input.slides, doneInScope)
+    for (const id of brokenDone) {
+      if (!remainingSlideIds.includes(id)) remainingSlideIds.push(id)
+      const slide = input.slides.find(s => s.id === id)
+      if (!slide) continue
+      const issues = geometryOnly
+        ? findLayoutFixIssues(slide)
+        : findLayoutIssues(slide).filter(
+            i =>
+              i.kind === 'overlap' ||
+              i.kind === 'out-of-bounds' ||
+              i.kind === 'text-overflow' ||
+              i.kind === 'misalignment' ||
+              i.kind === 'uneven-spacing'
+          )
+      if (issues.length) {
+        issueBySlideId[id] = (geometryOnly ? filterLayoutFixIssues(issues) : issues).slice(0, 5)
+      }
+    }
+  }
 
   return {
     targetSlideIds,
@@ -200,7 +249,7 @@ export function formatAgentWorkScopeBlock(
 
   if (isContinuation && scope.alreadyDoneSlideIds.length) {
     lines.push(
-      `COMPLETED — do NOT re-read or re-patch (unless a quick render verify): ${scope.alreadyDoneSlideIds
+      `COMPLETED (re-open if geometry checks still fail) — ${scope.alreadyDoneSlideIds
         .map(id => describeSlidePosition(slides, id))
         .join(', ')}`
     )
@@ -223,7 +272,9 @@ export function formatAgentWorkScopeBlock(
       )
     }
   } else if (isContinuation) {
-    lines.push('Scope complete — render 1–2 slides to verify, then finish.')
+    lines.push(
+      'Scope complete — render 1–2 slides, then finish ONLY when LAYOUT CHECK is clean (no overlaps, misalignment, or clipped text).'
+    )
   }
 
   const issueEntries = Object.entries(scope.issueBySlideId).filter(([id]) =>

@@ -1,9 +1,11 @@
 import Anthropic from '@anthropic-ai/sdk'
+import { agentModel } from '@/lib/agent/models'
 import type { SlideData } from '@/lib/types'
 import { elementDisplayText, slideTitle } from './project'
 
 const client = new Anthropic()
-const MODEL = process.env.ANTHROPIC_CHEAP_MODEL || 'claude-haiku-4-5'
+
+const MODEL = agentModel()
 const MAX_OUTPUT_TOKENS = 2048
 const API_TIMEOUT_MS = 55_000
 

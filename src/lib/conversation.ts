@@ -23,6 +23,9 @@ export function conversationToDisplay(history: ConversationMessage[]): DisplayMe
         ...(msg.imageDataUrls && msg.imageDataUrls.length > 0
           ? { imageUrls: msg.imageDataUrls }
           : {}),
+        ...(msg.userId ? { userId: msg.userId } : {}),
+        ...(msg.userName ? { userName: msg.userName } : {}),
+        ...(msg.userImage !== undefined ? { userImage: msg.userImage } : {}),
       }
     }
 

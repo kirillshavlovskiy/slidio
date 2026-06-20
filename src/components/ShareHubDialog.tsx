@@ -1,8 +1,9 @@
 'use client'
 
 import { useEffect, useState, useCallback } from 'react'
-import { X, UserPlus, Crown, Pencil, Eye, Loader2, Mail, Trash2 } from 'lucide-react'
+import { X, UserPlus, Crown, Pencil, Eye, Loader2, Mail, Trash2, Shield } from 'lucide-react'
 import type { HubRole, HubMemberInfo, HubInviteInfo } from '@/lib/types'
+import { actorDisplayName } from '@/lib/actorInfo'
 import { Button } from '@/components/ui/button'
 
 interface Props {
@@ -14,6 +15,7 @@ interface Props {
 const ROLE_META: Record<HubRole, { label: string; Icon: React.ComponentType<{ className?: string }>; desc: string }> = {
   owner: { label: 'Owner', Icon: Crown, desc: 'Manage members + edit' },
   editor: { label: 'Editor', Icon: Pencil, desc: 'Edit decks & knowledge' },
+  moderator: { label: 'Moderator', Icon: Shield, desc: 'Knowledge + comments only' },
   viewer: { label: 'Viewer', Icon: Eye, desc: 'Read-only' },
 }
 
@@ -140,6 +142,7 @@ export default function ShareHubDialog({ hubId, hubName, onClose }: Props) {
                 className="bg-[#112236] border border-[#1e3a5f] rounded px-2 text-xs text-white outline-none focus:border-violet-500"
               >
                 <option value="editor">Editor</option>
+                <option value="moderator">Moderator</option>
                 <option value="viewer">Viewer</option>
               </select>
               <Button onClick={invite} disabled={busy || !email.trim()} variant="default" size="md">
@@ -166,9 +169,18 @@ export default function ShareHubDialog({ hubId, hubName, onClose }: Props) {
                 const Meta = ROLE_META[m.role]
                 return (
                   <div key={m.id} className="flex items-center gap-3 rounded-lg border border-[#1e3a5f] bg-[#112236] px-3 py-2">
-                    <div className="w-7 h-7 rounded-full bg-violet-500/20 border border-violet-500/30 flex items-center justify-center text-xs font-bold text-violet-300">
-                      {(m.name || m.email || '?').charAt(0).toUpperCase()}
-                    </div>
+                    {m.image ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img
+                        src={m.image}
+                        alt=""
+                        className="w-7 h-7 rounded-full border border-violet-500/30 object-cover shrink-0"
+                      />
+                    ) : (
+                      <div className="w-7 h-7 rounded-full bg-violet-500/20 border border-violet-500/30 flex items-center justify-center text-xs font-bold text-violet-300">
+                        {actorDisplayName(m.name, m.email).charAt(0).toUpperCase()}
+                      </div>
+                    )}
                     <div className="min-w-0 flex-1">
                       <p className="text-xs font-semibold text-white truncate">
                         {m.name || m.email}{m.isMe && <span className="text-[#64748B] font-normal"> (you)</span>}
@@ -183,6 +195,7 @@ export default function ShareHubDialog({ hubId, hubName, onClose }: Props) {
                       >
                         <option value="owner">Owner</option>
                         <option value="editor">Editor</option>
+                        <option value="moderator">Moderator</option>
                         <option value="viewer">Viewer</option>
                       </select>
                     ) : (

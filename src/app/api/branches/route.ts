@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { auth } from '@/lib/auth'
 import { prisma } from '@/lib/prisma'
 import { getHubRole } from '@/lib/hubAccess'
+import { fetchHubMemberSummaries } from '@/lib/hubMembers'
 
 const branchInclude = {
   _count: { select: { presentations: true } },
@@ -73,6 +74,7 @@ export async function GET() {
         enabled: l.enabled,
         source: l.source,
       })),
+      members: await fetchHubMemberSummaries(b.id, b.userId),
       role: await getHubRole(session.user!.id, b.id),
       isOwner: b.userId === session.user!.id,
       createdAt: new Date(b.createdAt).getTime(),

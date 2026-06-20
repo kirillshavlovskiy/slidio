@@ -6,7 +6,7 @@ import { getHubRole, type HubRole } from '@/lib/hubAccess'
 
 type Ctx = { params: { id: string } }
 
-const ROLES: HubRole[] = ['owner', 'editor', 'viewer']
+const ROLES: HubRole[] = ['owner', 'editor', 'moderator', 'viewer']
 const coerceRole = (r: unknown): HubRole =>
   ROLES.includes(r as HubRole) ? (r as HubRole) : 'editor'
 

@@ -1,8 +1,13 @@
 'use client'
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { ChevronDown } from 'lucide-react'
-import { DEFAULT_FONT, FONT_OPTIONS, fontFamilyCss } from '@/lib/fonts'
+import {
+  DEFAULT_FONT,
+  FONT_GROUPS,
+  extraFontsForPicker,
+  fontFamilyCss,
+} from '@/lib/fonts'
 import { useDesignTokens } from '@/components/DesignTokensProvider'
 import AnchoredMenuPanel from '@/components/AnchoredMenuPanel'
 
@@ -12,6 +17,8 @@ interface Props {
   className?: string
   /** Render the menu in a body portal so it escapes overflow-hidden ancestors. */
   menuPortal?: boolean
+  /** Additional families to surface (e.g. fonts already used on the deck). */
+  deckFonts?: string[]
 }
 
 // A custom dropdown (not a native <select>) so each option renders in its own
@@ -21,12 +28,18 @@ export default function FontFamilySelect({
   onChange,
   className = '',
   menuPortal = false,
+  deckFonts = [],
 }: Props) {
   const current = value || DEFAULT_FONT
   const tokens = useDesignTokens()
   const dsFonts = tokens?.fonts ?? []
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
+
+  const inDeckOnly = useMemo(
+    () => extraFontsForPicker(Object.values(FONT_GROUPS).flat(), deckFonts, dsFonts, value ? [value] : []),
+    [deckFonts, dsFonts, value]
+  )
 
   useEffect(() => {
     if (!open || menuPortal) return
@@ -56,6 +69,37 @@ export default function FontFamilySelect({
     </button>
   )
 
+  const menuBody = (
+    <>
+      {dsFonts.length > 0 && (
+        <>
+          <p className="px-2 py-1 text-[9px] font-bold uppercase tracking-wider text-amber-400/80">
+            Design System
+          </p>
+          {dsFonts.map(Item)}
+          <div className="my-1 h-px bg-[#16263b]" />
+        </>
+      )}
+      {inDeckOnly.length > 0 && (
+        <>
+          <p className="px-2 py-1 text-[9px] font-bold uppercase tracking-wider text-emerald-400/80">
+            In deck
+          </p>
+          {inDeckOnly.map(Item)}
+          <div className="my-1 h-px bg-[#16263b]" />
+        </>
+      )}
+      {Object.entries(FONT_GROUPS).map(([group, fonts]) => (
+        <div key={group}>
+          <p className="px-2 py-1 text-[9px] font-bold uppercase tracking-wider text-[#475569]">
+            {group}
+          </p>
+          {fonts.map(Item)}
+        </div>
+      ))}
+    </>
+  )
+
   return (
     <div ref={ref} className={`relative ${className}`}>
       <button
@@ -76,37 +120,13 @@ export default function FontFamilySelect({
             anchorRef={ref}
             open={open}
             onClose={() => setOpen(false)}
-            className="max-h-64 min-w-[160px] overflow-y-auto rounded-md border border-[#1e3a5f] bg-[#0d1b2a] py-1 shadow-2xl"
+            className="max-h-72 min-w-[180px] overflow-y-auto rounded-md border border-[#1e3a5f] bg-[#0d1b2a] py-1 shadow-2xl"
           >
-            {dsFonts.length > 0 && (
-              <>
-                <p className="px-2 py-1 text-[9px] font-bold uppercase tracking-wider text-amber-400/80">
-                  Design System
-                </p>
-                {dsFonts.map(Item)}
-                <div className="my-1 h-px bg-[#16263b]" />
-              </>
-            )}
-            <p className="px-2 py-1 text-[9px] font-bold uppercase tracking-wider text-[#475569]">
-              All fonts
-            </p>
-            {FONT_OPTIONS.map(Item)}
+            {menuBody}
           </AnchoredMenuPanel>
         ) : (
-          <div className="absolute left-0 z-[60] mt-1 max-h-64 min-w-[160px] w-full overflow-y-auto rounded-md border border-[#1e3a5f] bg-[#0d1b2a] py-1 shadow-2xl">
-            {dsFonts.length > 0 && (
-              <>
-                <p className="px-2 py-1 text-[9px] font-bold uppercase tracking-wider text-amber-400/80">
-                  Design System
-                </p>
-                {dsFonts.map(Item)}
-                <div className="my-1 h-px bg-[#16263b]" />
-              </>
-            )}
-            <p className="px-2 py-1 text-[9px] font-bold uppercase tracking-wider text-[#475569]">
-              All fonts
-            </p>
-            {FONT_OPTIONS.map(Item)}
+          <div className="absolute left-0 z-[60] mt-1 max-h-72 min-w-[180px] w-full overflow-y-auto rounded-md border border-[#1e3a5f] bg-[#0d1b2a] py-1 shadow-2xl">
+            {menuBody}
           </div>
         ))}
     </div>

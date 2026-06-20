@@ -18,11 +18,19 @@ export const LAYOUT_AUDIT_OPTION_IDS = new Set([
 
 /** User picked or typed a deck-wide layout audit / fix (not an information request). */
 export const LAYOUT_AUDIT_CHANGE =
-  /\b(full-?audit|audit\s+(all|every|the\s+whole|each|\d+)|layout\s+audit|fix\s+(all\s+)?layout|align(ment)?\s+(and\s+)?(fix|spacing)|fix\s+(alignment|spacing|margins?|gutters?|layouts?|vertical\s+rhythm)|all\s+\d+\s+slides?)\b|\bOption\s+[\w-]+:\s*.*\b(audit|fix\s+all)\b/i
+  /\b(full-?audit|audit\s+(all|every|the\s+whole|each|\d+)|layout\s+audit|fix\s+(the\s+)?layout|fix\s+(all\s+)?layout|fix\b[^.\n]{0,40}\blayout\b|\blayout\b[^.\n]{0,40}\bfix\b|align(ment)?\s+(and\s+)?(fix|spacing)|fix\s+(alignment|spacing|margins?|gutters?|layouts?|vertical\s+rhythm)|all\s+\d+\s+slides?)\b|\bOption\s+[\w-]+:\s*.*\b(audit|fix\s+all)\b/i
 
 /** Single-slide / quick-action geometry fixes (tidy, overlaps, spacing) — not content edits. */
 export const LAYOUT_GEOMETRY_CHANGE =
-  /\b(tidy\s+(up\s+)?(the\s+)?layout|fix\s+overlaps?(?:\s+and\s+(?:uneven\s+)?gaps?)?|overlapping\s+elements|uneven\s+gaps?|misalign(?:ed|ment)?|inconsistent\s+spacing(?:\/margins?)?|even\s+(out\s+)?spacing|within\s+(the\s+)?slide\s+bounds|clean[,\s]+balanced|grid\s+feels\s+even|icon[↔\s]*text\s+overlap|separat(?:e|ing)\s+icon)\b/i
+  /\b(tidy\s+(up\s+)?(the\s+)?layout|fix\s+(the\s+)?layout|fix\b[^.\n]{0,40}\blayout\b|\blayout\b[^.\n]{0,40}\bfix\b|fix\s+overlaps?(?:\s+and\s+(?:uneven\s+)?gaps?)?|overlapping\s+elements|uneven\s+gaps?|misalign(?:ed|ment)?|inconsistent\s+spacing(?:\/margins?)?|even\s+(out\s+)?spacing|within\s+(the\s+)?slide\s+bounds|clean[,\s]+balanced|grid\s+feels\s+even|icon[↔\s]*text\s+overlap|separat(?:e|ing)\s+icon|text[↔\s]*text\s+overlap|clipped\s+text|text\s+overflow|broken\s+layout|layout\s+(is\s+)?(broken|wrong|bad|off|messed)|(?:slide\s+)?(?:title\/header|title|header|headline).*(?:top|first|above|before|then)|(?:content|body|bullets?|columns?).*(?:below|under|after|beneath).*(?:title|header)|(?:title\/header|title|header).*(?:then|first).*(?:content|body|below|after|rest)|master\s+title|slide[\s-]wide\s+title)\b/i
+
+/** User wants slide-wide title/header first, body content below — structure/layout only. */
+export const SLIDE_STRUCTURE_LAYOUT =
+  /\b(?:(?:slide\s+)?(?:title\/header|title|header|headline).*(?:top|first|above|at\s+the\s+top|then|before)|(?:content|body|bullets?|columns?).*(?:below|under|after|beneath).*(?:title\/header|title|header)|(?:title\/header|title|header).*(?:then|first).*(?:content|body|below|after|rest)|put\s+(?:the\s+)?(?:title\/header|title|header)|(?:title\/header|title|header)\s+first|master\s+title|slide[\s-]wide\s+title)\b/i
+
+export function isSlideStructureLayoutRequest(instruction: string): boolean {
+  return SLIDE_STRUCTURE_LAYOUT.test(instruction.trim())
+}
 
 export function isLayoutAuditChangeRequest(instruction: string): boolean {
   const t = instruction.trim()
@@ -33,13 +41,75 @@ export function isLayoutAuditChangeRequest(instruction: string): boolean {
   return false
 }
 
+/** Simple visual styling — recolor/move/resize existing shapes, underlines, dividers. */
+export const VISUAL_STYLE_CHANGE =
+  /\b(underline|under\s*line|accent\s*bar|divider|recolor|re-?color|match(?:ing)?\s+(?:the\s+)?(?:icon|color)|same\s+(?:width|color|style)|delete\s+(?:the\s+)?(?:blue|divider)|(?:red|green|cyan|teal)\s+(?:line|bar|underline)|line\s+(?:under|below)|(?:left|right)\s+(?:side\s+)?(?:bar|underline)|visual\s+balance|mirror(?:ing)?\s+(?:the\s+)?(?:right|left|other))\b/i
+
+export function isVisualStyleOnlyRequest(instruction: string): boolean {
+  const t = instruction.trim()
+  if (isKnowledgeBasedEditRequest(t)) return false
+  return VISUAL_STYLE_CHANGE.test(t)
+}
+
+/** User wants slide title/header aligned with other deck slides — geometry only. */
+export const TITLE_ALIGNMENT_FIX =
+  /\b(?:align|fix|match|snap|move|need).*(?:title|header|headline|slide\s+title)|(?:title|header|headline|slide\s+title).*(?:align|misalign|not\s+align|wrong|off|match|same|consistent|with\s+(?:other|rest|deck)|to\s+(?:other|deck))|why.*(?:title|header).*(?:not\s+)?align|(?:other|rest\s+of\s+(?:the\s+)?deck).*(?:title|header|slide)|(?:i\s+)?asked.*(?:title|header).*(?:align|fix)|where\s+is\s+(?:the\s+)?align/i
+
+export function isTitleAlignmentFixRequest(instruction: string): boolean {
+  return TITLE_ALIGNMENT_FIX.test(instruction.trim())
+}
+
+/** Strip agent/router wrappers so the chat shows only what the user typed. */
+export function stripUserFacingInstruction(text: string): string {
+  const t = text.trim()
+  const answerOnly = t.match(/\[ANSWER ONLY[^\]]*\][\s\S]*?User question:\s*([\s\S]+)$/i)
+  if (answerOnly) return answerOnly[1].trim()
+
+  const titleAlign = t.match(/\[CHANGE — TITLE\/HEADER ALIGNMENT ONLY\]\n([\s\S]+?)(?:\n\nExecute|\n\n\d+\.|\n*$)/i)
+  if (titleAlign) return titleAlign[1].trim().split('\n')[0].trim()
+
+  const changeReq = t.match(/\[CHANGE REQUEST[^\]]*\]\n([\s\S]+?)(?:\n\n(?:Flow|Prior|Fix|User identified)|\n*$)/i)
+  if (changeReq) return changeReq[1].trim().split('\n')[0].trim()
+
+  const cont = t.match(/\[CONTINUE[^\]]*\][\s\S]*?Original task:\n([\s\S]+?)\n\nProgress/i)
+  if (cont) return cont[1].trim().split('\n')[0].trim()
+
+  const option = t.match(/^Option\s+[\w-]+:\s*(.+)$/i)
+  if (option) return option[1].trim()
+
+  return t
+}
+
+/** Layout/visual/title tasks — skip knowledge plan, graph dumps, claim review. */
+export function isGeometryEditRequest(instruction: string): boolean {
+  if (isKnowledgeBasedEditRequest(instruction)) return false
+  return (
+    isLayoutGeometryOnlyRequest(instruction) ||
+    isTitleAlignmentFixRequest(instruction)
+  )
+}
+
+export function formatTitleAlignmentDirective(instruction: string): string {
+  return (
+    `[CHANGE — TITLE/HEADER ALIGNMENT ONLY]\n${instruction}\n\n` +
+    `Execute on canvas — do NOT answer with prose only.\n` +
+    `1. get_slides for the target slide + 2 other content slides to find the deck-standard title y (usually y≈0.45in).\n` +
+    `2. apply_changes ONCE: patch ONLY the title/header text element (e.g. header-main) — set y (and x if needed) to match other slides.\n` +
+    `3. Do NOT add icons, fix bullets, underlines, or column layout unless the user explicitly asked for those.\n` +
+    `4. render_slide → finish.\n`
+  )
+}
+
 /** Layout pass that only moves/resizes — skip heavy knowledge graph + doc dumps. */
 export function isLayoutGeometryOnlyRequest(instruction: string): boolean {
-  return isLayoutAuditChangeRequest(instruction) && !isKnowledgeBasedEditRequest(instruction)
+  return (
+    (isLayoutAuditChangeRequest(instruction) || isVisualStyleOnlyRequest(instruction)) &&
+    !isKnowledgeBasedEditRequest(instruction)
+  )
 }
 
 export const LAYOUT_AUDIT_CHANGE_DIRECTIVE =
-  '\n\n[CHANGE REQUEST — NOT Q&A:] Layout audit/fix task. You MUST call apply_changes with geometry patches (x, y, w, h, z-order, spacing, padLeft) on every slide that needs fixes — including separating icon/image from overlapping text. Do NOT finish with a text-only deck inventory — the user must see changes on the canvas. Flow: get_slides → apply_changes (batch 2–4 slides per call if needed) → render 1–2 slides to verify → finish with a SHORT summary of fixes applied.'
+  '\n\n[CHANGE REQUEST — NOT Q&A:] Layout audit/fix task. You MUST call apply_changes with geometry patches (x, y, w, h, z-order, spacing, padLeft, style.fontSize when text clips) on every slide that needs fixes — including separating text↔text and icon/image from overlapping text, and fixing text-overflow where fontSize exceeds the box. Do NOT finish with a text-only deck inventory — the user must see changes on the canvas. Flow: get_slides → apply_changes (batch 2–4 slides per call if needed) → render 1–2 slides to verify → finish with a SHORT summary of fixes applied.'
 
 export const LAYOUT_CROSS_SLIDE_ICON_RULE =
   ' When fixing multiple slides: read ALL target slides first, then align title/header icons to the SAME x and y across slides (shared icon column). Keep icon↔text gaps consistent; narrow subtitle width or nudge text right so icons never overlap copy. Geometry only — do not bump fontSize to “fill” cells unless the user asked for typography changes.'
@@ -111,7 +181,12 @@ export function buildAgentContinuationInstruction(
   }
 
   const modified = new Set(ctx.modifiedSlideIds)
-  const scopeTargets = ctx.targetSlideIds.length ? ctx.targetSlideIds : allSlideIds
+  const scopeTargets =
+    ctx.targetSlideIds.length > 0
+      ? ctx.targetSlideIds
+      : ctx.wasLayoutAudit && ctx.modifiedSlideIds.length > 0
+        ? ctx.modifiedSlideIds
+        : allSlideIds
   const remaining = scopeTargets.filter(id => !modified.has(id))
   let block =
     `[CONTINUE — resume the incomplete task below. This is a CHANGE request, NOT a question. ` +
@@ -128,11 +203,15 @@ export function buildAgentContinuationInstruction(
     block +=
       `- Call get_slides with slideIds: [${remaining.map(id => `"${id}"`).join(', ')}] — NOT the full deck.\n`
   } else {
-    block += `- All scoped slides patched — verify 1–2 renders and finish.\n`
+    block += `- All scoped slides patched — run render_slide, then finish ONLY if programmatic checks pass.\n`
+    block +=
+      `- If OVERLAP CHECK / text-overflow issues remain after your prior patch, call apply_changes again on those slides — ` +
+      `do NOT treat "already patched" as done when overlaps or clipped text still exist.\n`
   }
   if (ctx.lastAction) block += `- Last completed action: ${ctx.lastAction}\n`
   block +=
-    `\nYour job: apply_changes ONLY on remaining scoped slides, render 1–2 to verify, finish. ` +
+    `\nYour job: apply_changes on remaining scoped slides (or re-patch if geometry checks still fail), ` +
+    `render 1–2 to verify, finish. ` +
     `Do not re-read slide 1 or re-plan the whole deck.`
   if (ctx.wasLayoutAudit) {
     block += LAYOUT_AUDIT_CHANGE_DIRECTIVE + LAYOUT_CROSS_SLIDE_ICON_RULE

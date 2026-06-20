@@ -7,7 +7,9 @@ import {
   Eye, EyeOff,
   Network, FolderOpen, Sparkles, Link2,
 } from 'lucide-react'
-import type { KnowledgeLayer, KnowledgeLayerType } from '@/lib/types'
+import type { KnowledgeLayer, KnowledgeLayerType, HubMemberSummary } from '@/lib/types'
+import HubMemberAvatars from '@/components/HubMemberAvatars'
+import ActorAttribution from '@/components/ActorAttribution'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Switch } from '@/components/ui/switch'
@@ -156,6 +158,7 @@ const SOURCE_ICONS: Record<string, React.ReactNode> = {
   template: <><FileText className="w-2.5 h-2.5" /><span>from template</span></>,
   inferred: <><Bot className="w-2.5 h-2.5" /><span>inferred</span></>,
   manual:   <><PenLine className="w-2.5 h-2.5" /><span>manual</span></>,
+  comment:  <><PenLine className="w-2.5 h-2.5" /><span>comment</span></>,
   document: <><Paperclip className="w-2.5 h-2.5" /><span>from document</span></>,
 }
 
@@ -210,6 +213,7 @@ export default function KnowledgePanel({
     structureNodes: number
   } | null>(null)
   const [batchInFlight, setBatchInFlight] = useState(false)
+  const [hubMembers, setHubMembers] = useState<HubMemberSummary[]>([])
 
   const [graphNodes, setGraphNodes] = useState<GraphNodeRow[]>([])
   const [graphEdges, setGraphEdges] = useState<GraphEdgeRow[]>([])
@@ -338,6 +342,31 @@ export default function KnowledgePanel({
   useEffect(() => {
     if (branchId) setActiveTab(initialTab ?? 'sources')
   }, [branchId, initialTab])
+
+  useEffect(() => {
+    if (!branchId) {
+      setHubMembers([])
+      return
+    }
+    fetch(`/api/hubs/${branchId}/members`)
+      .then(r => (r.ok ? r.json() : null))
+      .then(data => {
+        if (!data?.members) {
+          setHubMembers([])
+          return
+        }
+        setHubMembers(
+          data.members.map((m: HubMemberSummary) => ({
+            userId: m.userId,
+            name: m.name,
+            email: m.email,
+            image: m.image,
+            role: m.role,
+          }))
+        )
+      })
+      .catch(() => setHubMembers([]))
+  }, [branchId])
 
   useEffect(() => {
     if (!branchId) return
@@ -722,12 +751,15 @@ export default function KnowledgePanel({
               <p className="text-lg font-bold text-white truncate">
                 {hubName || 'Knowledge Hub'}
               </p>
-              <p className="text-xs text-[#64748B] mt-0.5">
+              <p className="text-xs text-[#64748B] mt-0.5 flex items-center gap-2 flex-wrap">
                 {branchId ? (
                   <>
                     <span className="text-violet-400 font-semibold">{sources.length}</span> documents ·{' '}
                     <span className="text-violet-400 font-semibold">{graphKnowledge.length}</span> graph nodes ·{' '}
                     <span className="text-violet-400 font-semibold">{kbTextLayers.filter(l => l.enabled).length}</span> KB text layers
+                    {hubMembers.length > 0 && (
+                      <HubMemberAvatars members={hubMembers} size="sm" className="ml-1" />
+                    )}
                   </>
                 ) : (
                   <>Select a hub — open from the home screen or a deck in this branch</>
@@ -896,6 +928,15 @@ export default function KnowledgePanel({
                                 <span className="inline-flex items-center gap-1 text-[9px] text-red-400 mt-1">
                                   Over limit — Claude will truncate to {TEXT_LAYER_MAX_CHARS} chars
                                 </span>
+                              )}
+                              {layer.updatedByName && (
+                                <div className="mt-1.5">
+                                  <ActorAttribution
+                                    name={layer.updatedByName}
+                                    image={layer.updatedByImage}
+                                    kind={layer.source === 'comment' ? 'manual' : 'manual'}
+                                  />
+                                </div>
                               )}
                             </div>
                             {!readOnly && (

@@ -19,6 +19,7 @@ import {
   Trash2,
   ArrowUp,
   ChevronDown,
+  ChevronRight,
   Square,
   PanelRightClose,
   Pin,
@@ -41,13 +42,16 @@ import {
 } from '@/lib/agent/limitError'
 import SlideCanvas from '@/components/SlideCanvas'
 
-export type ChatMode = 'auto' | 'single' | 'agent'
+export type ChatMode = 'agent'
 
 export interface DisplayMessage {
   role: 'user' | 'assistant'
   text?: string           // user messages
   imageUrl?: string       // optional annotated-slide thumbnail on user messages
   imageUrls?: string[]    // optional user-uploaded reference images on user messages
+  userId?: string
+  userName?: string
+  userImage?: string | null
   response?: ClaudeResponse // assistant messages
   // Resolution state of a patch proposal bubble (drives the inline widget UI).
   patchStatus?: 'pending' | 'approved' | 'declined'
@@ -57,7 +61,11 @@ export interface DisplayMessage {
     label: string
     image?: string
     limitReached?: AgentLimitReached
+    /** Q&A runs: group reasoning/activity for collapsible UI. */
+    processSection?: 'reasoning' | 'activity'
   }
+  /** Clean prose answer for Q&A (no agent step tags). */
+  assistantAnswer?: string
   // Cursor-style checkpoint: deck snapshot taken right before this user message
   // was sent, so we can revert everything this message (and later) changed.
   checkpoint?: SlideData[]
@@ -109,22 +117,10 @@ const MAX_IMAGES = 6
 
 const MODE_OPTIONS: { id: ChatMode; Icon: typeof Bot; label: string; title: string }[] = [
   {
-    id: 'auto',
-    Icon: Sparkles,
-    label: 'Auto',
-    title: 'Auto — picks single-shot vs agent and effort automatically based on the request',
-  },
-  {
-    id: 'single',
-    Icon: Zap,
-    label: 'Single-shot',
-    title: 'Single-shot — one fast proposal you Apply/Discard',
-  },
-  {
     id: 'agent',
     Icon: Bot,
     label: 'Agent',
-    title: 'Agent — inspects, edits, screenshots & verifies autonomously',
+    title: 'Agent — reads slides, reasons about your goal, edits, verifies',
   },
 ]
 
@@ -177,7 +173,7 @@ export default function ChatPanel({
   const modeMenuRef = useRef<HTMLDivElement>(null)
   const [text, setText] = useState('')
   const [images, setImages] = useState<string[]>([])
-  const [mode, setMode] = useState<ChatMode>('auto')
+  const [mode, setMode] = useState<ChatMode>('agent')
   const [modeMenuOpen, setModeMenuOpen] = useState(false)
 
   useEffect(() => {
@@ -233,7 +229,7 @@ export default function ChatPanel({
     const val = text.trim()
     if ((!val && images.length === 0) || isLoading || !canEdit) return
     // When the agent flow isn't wired up, always use single-shot.
-    onSend(val, images, onRunAgent ? mode : 'single')
+    onSend(val, images, 'agent')
     setText('')
     setImages([])
     if (inputRef.current) inputRef.current.style.height = 'auto'
@@ -306,7 +302,18 @@ export default function ChatPanel({
           display.forEach((m, i) => {
             if (m.response?.type === 'patch') lastPatchIdx = i
           })
-          return display.map((msg, i) => {
+          const renderItems = buildChatRenderItems(display)
+          return renderItems.map(item => {
+            if (item.kind === 'process') {
+              return (
+                <AgentProcessPanel
+                  key={`process-${item.index}`}
+                  steps={item.steps}
+                />
+              )
+            }
+            const i = item.index
+            const msg = item.msg
             const isLivePending =
               i === lastPatchIdx &&
               msg.response?.type === 'patch' &&
@@ -319,6 +326,8 @@ export default function ChatPanel({
                     text={msg.text ?? ''}
                     imageUrl={msg.imageUrl}
                     imageUrls={msg.imageUrls}
+                    userName={msg.userName}
+                    userImage={msg.userImage}
                     onRevert={
                       msg.checkpoint && onRevert && canEdit ? () => onRevert(i) : undefined
                     }
@@ -326,11 +335,13 @@ export default function ChatPanel({
                       msg.text?.trim() && onResend && canEdit ? () => onResend(i) : undefined
                     }
                   />
+                ) : msg.assistantAnswer ? (
+                  <AssistantAnswerBubble text={msg.assistantAnswer} />
                 ) : msg.agentStep ? (
                   <AgentStepBubble
                     step={msg.agentStep}
                     canEdit={canEdit}
-                    onContinue={() => onSend('continue', [], 'auto')}
+                    onContinue={() => onSend('continue', [], 'agent')}
                     onNewRequest={() => {
                       setText('')
                       const el = inputRef.current
@@ -445,11 +456,7 @@ export default function ChatPanel({
             placeholder={
               !canEdit
                 ? 'View-only — you cannot edit this hub'
-                : mode === 'agent'
-                  ? 'Agent: describe the goal — it will inspect, edit & verify…'
-                  : mode === 'single'
-                    ? 'Single-shot: describe a scoped edit…'
-                    : 'Plan, build & verify slides… (Shift+Enter for newline)'
+                : 'Describe the goal — agent reads slides, reasons, edits & verifies…'
             }
             disabled={isLoading || !canEdit}
             className="w-full resize-none bg-transparent border-0 px-1 py-1 text-sm
@@ -553,6 +560,101 @@ export default function ChatPanel({
 }
 
 // ── Sub-components ─────────────────────────────────────────────────────────────
+
+type AgentStep = NonNullable<DisplayMessage['agentStep']>
+
+type ChatRenderItem =
+  | { kind: 'single'; index: number; msg: DisplayMessage }
+  | { kind: 'process'; index: number; steps: AgentStep[] }
+
+function buildChatRenderItems(display: DisplayMessage[]): ChatRenderItem[] {
+  const items: ChatRenderItem[] = []
+  let i = 0
+  while (i < display.length) {
+    const msg = display[i]
+    if (msg.role === 'assistant' && msg.agentStep?.processSection) {
+      const start = i
+      const steps: AgentStep[] = []
+      while (i < display.length && display[i].agentStep?.processSection) {
+        const step = display[i].agentStep
+        if (step) steps.push(step)
+        i++
+      }
+      items.push({ kind: 'process', index: start, steps })
+      continue
+    }
+    items.push({ kind: 'single', index: i, msg })
+    i++
+  }
+  return items
+}
+
+function AssistantAnswerBubble({ text }: { text: string }) {
+  return (
+    <div className="flex justify-start">
+      <div className="max-w-[92%] bg-[#112236] border border-[#1e3a5f] rounded-lg rounded-tl-none px-3 py-3">
+        <p className="text-sm text-white whitespace-pre-wrap leading-relaxed">{text}</p>
+      </div>
+    </div>
+  )
+}
+
+function AgentProcessPanel({ steps }: { steps: AgentStep[] }) {
+  const [open, setOpen] = useState(true)
+  const reasoning = steps.filter(s => s.processSection === 'reasoning')
+  const activity = steps.filter(s => s.processSection === 'activity')
+  if (reasoning.length === 0 && activity.length === 0) return null
+
+  return (
+    <div className="flex justify-start">
+      <div className="max-w-[92%] w-full bg-[#0d1b2a] border border-[#1e3a5f] rounded-lg overflow-hidden">
+        <button
+          type="button"
+          onClick={() => setOpen(o => !o)}
+          className="w-full flex items-center gap-1.5 px-2.5 py-1.5 text-left hover:bg-[#13243a] transition-colors"
+        >
+          {open ? (
+            <ChevronDown className="w-3.5 h-3.5 text-[#64748b] flex-shrink-0" />
+          ) : (
+            <ChevronRight className="w-3.5 h-3.5 text-[#64748b] flex-shrink-0" />
+          )}
+          <Brain className="w-3.5 h-3.5 text-[#818cf8] flex-shrink-0" />
+          <span className="text-[10px] font-bold tracking-wider text-[#818cf8]">
+            REASONING & STEPS
+          </span>
+          <span className="text-[10px] text-[#64748b] ml-auto">
+            {reasoning.length} thought{reasoning.length !== 1 ? 's' : ''}
+            {activity.length > 0 ? ` · ${activity.length} step${activity.length !== 1 ? 's' : ''}` : ''}
+          </span>
+        </button>
+        {open && (
+          <div className="px-2.5 pb-2 space-y-2 border-t border-[#1e3a5f]">
+            {reasoning.map((step, idx) => (
+              <p key={`r-${idx}`} className="text-xs text-[#a5b4fc] italic whitespace-pre-wrap leading-relaxed pt-2">
+                {step.label}
+              </p>
+            ))}
+            {activity.map((step, idx) => (
+              <div key={`a-${idx}`} className="text-xs text-[#94a3b8]">
+                <span className="text-[#60a5fa] font-medium">
+                  {step.kind === 'render' ? 'Rendered' : 'Read'}
+                </span>
+                {' — '}
+                {step.label}
+                {step.image && (
+                  <div className="mt-1.5 rounded-md overflow-hidden border border-[#1e3a5f]">
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img src={step.image} alt="Rendered slide" className="w-full block" />
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
 
 function AgentStepBubble({
   step,
@@ -726,15 +828,20 @@ function UserBubble({
   text,
   imageUrl,
   imageUrls,
+  userName,
+  userImage,
   onRevert,
   onResend,
 }: {
   text: string
   imageUrl?: string
   imageUrls?: string[]
+  userName?: string
+  userImage?: string | null
   onRevert?: () => void
   onResend?: () => void
 }) {
+  const label = userName?.trim() || 'You'
   return (
     <div className="flex justify-end items-start gap-1.5 group">
       {(onResend || onRevert) && (
@@ -760,7 +867,17 @@ function UserBubble({
         </div>
       )}
       <div className="max-w-[85%] bg-[#1e3a5f] rounded-lg rounded-tr-none px-3 py-2">
-        <p className="text-xs font-bold text-[#60a5fa] mb-1">YOU</p>
+        <div className="flex items-center gap-1.5 mb-1">
+          {userImage ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img src={userImage} alt="" className="w-4 h-4 rounded-full object-cover" />
+          ) : (
+            <span className="w-4 h-4 rounded-full bg-[#0d1b2a] text-[8px] font-bold flex items-center justify-center text-[#60a5fa]">
+              {label.charAt(0).toUpperCase()}
+            </span>
+          )}
+          <p className="text-xs font-bold text-[#60a5fa] truncate">{label}</p>
+        </div>
         {imageUrl && (
           <div className="mb-2 rounded-md overflow-hidden border border-[#fb7185]/60">
             {/* eslint-disable-next-line @next/next/no-img-element */}

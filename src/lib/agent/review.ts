@@ -1,4 +1,5 @@
 import type { Change, SlideData } from '@/lib/types'
+import { changesAreGeometryOnly } from '@/lib/preview'
 import type { SemanticEditPlan, ValidationIssue, ValidationResult } from './types'
 
 export type ReviewInput = {
@@ -51,6 +52,23 @@ export function validateKnowledgeEdit(input: ReviewInput): ValidationResult {
     /\bcandidate\b.*\b(footnote|\*|asterisk|mark)/i.test(input.instruction)
 
   if (plan) {
+    // Pure geometry/style edits (move, resize, recolor, delete decorative shapes) never
+    // change slide copy — skip claim scanning entirely.
+    if (changesAreGeometryOnly(input.changes)) {
+      return {
+        validation_result: 'pass',
+        scores: {
+          factual_accuracy: 0.95,
+          layout_quality: 0.9,
+          brand_compliance: 0.9,
+          narrative_consistency: 0.9,
+          cognitive_load: 0.9,
+        },
+        issues: [],
+        recommended_action: 'commit',
+      }
+    }
+
     for (const claim of plan.claims_to_use) {
       const nameHit = combinedText.includes(claim.name.toLowerCase().slice(0, 40))
       if (claim.status === 'candidate' && (nameHit || investorFacing)) {

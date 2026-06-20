@@ -22,8 +22,12 @@ type Patch = {
 
 interface Props {
   element: SlideElement | null
+  /** All selected elements on the active slide (for multi-select editing). */
+  elements?: SlideElement[]
   selectedCount: number
   onUpdate: (elementId: string, patch: Patch) => void
+  /** Apply one patch to many elements in a single undo step. */
+  onUpdateMany?: (elementIds: string[], patch: Patch) => void
   /** Open the icon picker for the given element id (icon elements only). */
   onPickIcon?: (elementId: string) => void
   /** Current slide background hex (no leading #). Enables the slide editor when nothing is selected. */
@@ -34,9 +38,25 @@ interface Props {
   slideGradient?: SlideGradient | null
   /** Set or clear the active slide gradient (null = solid). */
   onUpdateSlideGradient?: (g: SlideGradient | null) => void
+  /** Font families already used on the deck (surfaced in the font picker). */
+  deckFonts?: string[]
 }
 
 const WEIGHTS = [100, 200, 300, 400, 500, 600, 700, 800, 900]
+
+function isTextElement(el: SlideElement): boolean {
+  return el.type === 'text' || el.type === 'chip'
+}
+
+function mixedStyle<T extends string | number | undefined>(
+  els: SlideElement[],
+  pick: (s: ElementStyle) => T
+): T | undefined {
+  if (els.length === 0) return undefined
+  const vals = els.map(el => pick(el.style ?? {}))
+  const first = vals[0]
+  return vals.every(v => v === first) ? first : undefined
+}
 
 function hashHex(v?: string): string {
   if (!v) return '#000000'
@@ -610,22 +630,247 @@ function SlideBackgroundSection({
   )
 }
 
+function MultiTextInspector({
+  elements,
+  onUpdateMany,
+  dsColors,
+  dsPalette,
+  dsSizes,
+  deckFonts,
+}: {
+  elements: SlideElement[]
+  onUpdateMany: (ids: string[], patch: Patch) => void
+  dsColors: DSColorToken[]
+  dsPalette: string[]
+  dsSizes: number[]
+  deckFonts?: string[]
+}) {
+  const ids = elements.map(el => el.id)
+  const setStyle = (style: Partial<ElementStyle>) => onUpdateMany(ids, { style })
+
+  const font = mixedStyle(elements, s => s.fontFace || DEFAULT_FONT)
+  const fontSize = mixedStyle(elements, s => s.fontSize)
+  const fontWeight = mixedStyle(elements, s => s.fontWeight ?? (s.bold ? 700 : 400))
+  const color = (() => {
+    if (elements.length === 0) return undefined
+    const vals = elements.map(el => elementTextHex(el))
+    return vals.every(v => v === vals[0]) ? vals[0] : undefined
+  })()
+  const align = mixedStyle(elements, s => s.align ?? 'left')
+  const valign = mixedStyle(elements, s => s.valign ?? 'middle')
+  const lineHeight = mixedStyle(elements, s => s.lineHeight)
+  const charSpacing = mixedStyle(elements, s => s.charSpacing)
+  const opacity = mixedStyle(elements, s => s.opacity ?? 100)
+  const bg = mixedStyle(elements, s => s.bg)
+  const padTop = mixedStyle(elements, s => s.padTop)
+  const padRight = mixedStyle(elements, s => s.padRight)
+  const padBottom = mixedStyle(elements, s => s.padBottom)
+  const padLeft = mixedStyle(elements, s => s.padLeft)
+  const borderWidth = mixedStyle(elements, s => s.borderWidth)
+  const borderStyle = mixedStyle(elements, s => s.borderStyle ?? 'solid')
+  const borderColor = mixedStyle(elements, s => s.borderColor)
+  const borderRadius = mixedStyle(elements, s => s.borderRadius)
+
+  const sizeListId = dsSizes.length > 0 ? 'ds-size-multi' : undefined
+  const mixed = elements.length > 1
+
+  return (
+    <div className="w-full">
+      <div className="px-3 py-2.5 border-b border-[#16263b] flex items-center gap-2">
+        <span className="text-[10px] font-bold uppercase tracking-wider text-[#93c5fd] bg-[#1e3a5f] rounded px-1.5 py-0.5">
+          text ×{elements.length}
+        </span>
+        {mixed && (
+          <span className="text-[10px] text-[#64748b]">Mixed values — changes apply to all</span>
+        )}
+      </div>
+
+      {sizeListId && (
+        <datalist id={sizeListId}>
+          {dsSizes.map(sz => (
+            <option key={sz} value={sz} />
+          ))}
+        </datalist>
+      )}
+
+      <Section title="Typography">
+        <div className="flex items-center gap-2">
+          <span className="text-[10px] text-[#64748b] w-10 flex-shrink-0">Font</span>
+          <FontFamilySelect
+            value={font}
+            onChange={f => setStyle({ fontFace: f })}
+            className="flex-1 min-w-0"
+            deckFonts={deckFonts}
+          />
+        </div>
+        <Row>
+          <Field label="Size">
+            <NumberInput
+              value={fontSize}
+              onCommit={n => setStyle({ fontSize: n })}
+              suffix="pt"
+              listId={sizeListId}
+            />
+          </Field>
+          <Field label="Weight">
+            <SelectInput
+              value={fontWeight !== undefined ? String(fontWeight) : '400'}
+              options={WEIGHTS.map(w => ({ value: String(w), label: String(w) }))}
+              onChange={v => setStyle({ fontWeight: Number(v), bold: Number(v) >= 600 })}
+            />
+          </Field>
+        </Row>
+        <Row>
+          <Field label="Color">
+            <ColorInput hex={color} onChange={c => setStyle({ color: c })} />
+          </Field>
+          <Field label="Align">
+            <SelectInput
+              value={align ?? 'left'}
+              options={[
+                { value: 'left', label: 'start' },
+                { value: 'center', label: 'center' },
+                { value: 'right', label: 'end' },
+              ]}
+              onChange={v => setStyle({ align: v })}
+            />
+          </Field>
+        </Row>
+        <SwatchStrip tokens={dsColors} palette={dsPalette} onPick={c => setStyle({ color: c })} />
+        <Row>
+          <Field label="Line Height">
+            <NumberInput
+              value={lineHeight}
+              onCommit={n => setStyle({ lineHeight: n })}
+              step={0.05}
+              width="w-10"
+            />
+          </Field>
+          <Field label="Tracking">
+            <NumberInput
+              value={charSpacing}
+              onCommit={n => setStyle({ charSpacing: n })}
+              step={0.1}
+              suffix="pt"
+              width="w-10"
+            />
+          </Field>
+        </Row>
+      </Section>
+
+      <Section title="Alignment">
+        <Row>
+          <Field label="Horizontal">
+            <SelectInput
+              value={align ?? 'left'}
+              options={[
+                { value: 'left', label: 'left' },
+                { value: 'center', label: 'center' },
+                { value: 'right', label: 'right' },
+              ]}
+              onChange={v => setStyle({ align: v })}
+            />
+          </Field>
+          <Field label="Vertical">
+            <SelectInput
+              value={valign ?? 'middle'}
+              options={[
+                { value: 'top', label: 'top' },
+                { value: 'middle', label: 'middle' },
+                { value: 'bottom', label: 'bottom' },
+              ]}
+              onChange={v => setStyle({ valign: v })}
+            />
+          </Field>
+        </Row>
+      </Section>
+
+      <Section title="Box">
+        <Field label="Opacity">
+          <NumberInput value={opacity} onCommit={n => setStyle({ opacity: n })} suffix="%" />
+        </Field>
+        <Field label="Fill">
+          <ColorInput hex={bg} onChange={c => setStyle({ bg: c, bgGradient: undefined })} />
+        </Field>
+        <SwatchStrip
+          tokens={dsColors}
+          palette={dsPalette}
+          onPick={c => setStyle({ bg: c, bgGradient: undefined })}
+        />
+        <p className="text-[9px] text-[#475569] mt-0.5">Padding (in)</p>
+        <Row>
+          <Field label="Top">
+            <NumberInput value={padTop} onCommit={n => setStyle({ padTop: n })} step={0.02} width="w-10" />
+          </Field>
+          <Field label="Right">
+            <NumberInput value={padRight} onCommit={n => setStyle({ padRight: n })} step={0.02} width="w-10" />
+          </Field>
+        </Row>
+        <Row>
+          <Field label="Bottom">
+            <NumberInput value={padBottom} onCommit={n => setStyle({ padBottom: n })} step={0.02} width="w-10" />
+          </Field>
+          <Field label="Left">
+            <NumberInput value={padLeft} onCommit={n => setStyle({ padLeft: n })} step={0.02} width="w-10" />
+          </Field>
+        </Row>
+        <Row>
+          <Field label="Border">
+            <NumberInput
+              value={borderWidth}
+              onCommit={n => setStyle({ borderWidth: n })}
+              suffix="px"
+              width="w-9"
+            />
+          </Field>
+          <Field label="Style">
+            <SelectInput
+              value={borderStyle ?? 'solid'}
+              options={[
+                { value: 'solid', label: 'solid' },
+                { value: 'dashed', label: 'dashed' },
+                { value: 'dotted', label: 'dotted' },
+              ]}
+              onChange={v => setStyle({ borderStyle: v })}
+            />
+          </Field>
+        </Row>
+        <Row>
+          <Field label="Border Color">
+            <ColorInput hex={borderColor} onChange={c => setStyle({ borderColor: c })} />
+          </Field>
+        </Row>
+        <Field label="Border Radius">
+          <NumberInput
+            value={borderRadius}
+            onCommit={n => setStyle({ borderRadius: n })}
+            suffix="px"
+          />
+        </Field>
+      </Section>
+    </div>
+  )
+}
+
 export default function ElementInspector({
   element,
+  elements = [],
   selectedCount,
   onUpdate,
+  onUpdateMany,
   onPickIcon,
   slideBg,
   onUpdateSlideBg,
   slideGradient,
   onUpdateSlideGradient,
+  deckFonts = [],
 }: Props) {
   const tokens = useDesignTokens()
   const dsColors = tokens?.colorTokens ?? []
   const dsPalette = tokens?.palette ?? []
   const dsSizes = tokens?.typeScalePt ?? []
 
-  if (selectedCount === 0 || !element) {
+  if (selectedCount === 0) {
     return (
       <div className="w-full">
         {onUpdateSlideBg && (
@@ -650,12 +895,26 @@ export default function ElementInspector({
     )
   }
 
-  if (selectedCount > 1) {
+  const textSelected = elements.filter(isTextElement)
+  if (selectedCount > 1 && textSelected.length > 0 && onUpdateMany) {
+    return (
+      <MultiTextInspector
+        elements={textSelected}
+        onUpdateMany={onUpdateMany}
+        dsColors={dsColors}
+        dsPalette={dsPalette}
+        dsSizes={dsSizes}
+        deckFonts={deckFonts}
+      />
+    )
+  }
+
+  if (selectedCount > 1 || !element) {
     return (
       <div className="flex flex-col items-center justify-center h-full px-6 text-center">
         <p className="text-sm text-[#475569] font-medium">{selectedCount} elements selected</p>
         <p className="text-[11px] text-[#334155] mt-1 leading-relaxed">
-          Select a single element to edit its detailed styling.
+          Select text blocks to edit typography for the whole group, or select a single element for full styling.
         </p>
       </div>
     )
@@ -746,6 +1005,7 @@ export default function ElementInspector({
               value={font}
               onChange={f => setStyle({ fontFace: f })}
               className="flex-1 min-w-0"
+              deckFonts={deckFonts}
             />
           </div>
           <Row>

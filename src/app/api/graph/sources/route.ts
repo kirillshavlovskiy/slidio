@@ -85,9 +85,9 @@ export async function POST(req: NextRequest) {
         )
       }
 
-      const access = await canAccessGraph(session.user.id, branchId, 'editor')
-      if (!access.ok || !roleAtLeast(access.role, 'editor')) {
-        return NextResponse.json({ error: 'Read-only: you are a viewer on this hub' }, { status: 403 })
+      const access = await canAccessGraph(session.user.id, branchId, 'moderator')
+      if (!access.ok || !roleAtLeast(access.role, 'moderator')) {
+        return NextResponse.json({ error: 'Read-only: you cannot edit knowledge on this hub' }, { status: 403 })
       }
 
       const source = await prisma.sourceDocument.create({
@@ -132,9 +132,9 @@ export async function POST(req: NextRequest) {
     if (!file) return NextResponse.json({ error: 'No file uploaded' }, { status: 400 })
     if (!branchId) return NextResponse.json({ error: 'branchId required' }, { status: 400 })
 
-    const access = await canAccessGraph(session.user.id, branchId, 'editor')
-    if (!access.ok || !roleAtLeast(access.role, 'editor')) {
-      return NextResponse.json({ error: 'Read-only: you are a viewer on this hub' }, { status: 403 })
+    const access = await canAccessGraph(session.user.id, branchId, 'moderator')
+    if (!access.ok || !roleAtLeast(access.role, 'moderator')) {
+      return NextResponse.json({ error: 'Read-only: you cannot edit knowledge on this hub' }, { status: 403 })
     }
 
     const fileType = fileTypeFromName(file.name)
@@ -206,9 +206,9 @@ export async function DELETE(req: NextRequest) {
     const source = await prisma.sourceDocument.findUnique({ where: { id: sourceId } })
     if (!source) return NextResponse.json({ error: 'Not found' }, { status: 404 })
 
-    const access = await canAccessGraph(session.user.id, source.branchId, 'editor')
-    if (!access.ok || !roleAtLeast(access.role, 'editor')) {
-      return NextResponse.json({ error: 'Read-only: you are a viewer on this hub' }, { status: 403 })
+    const access = await canAccessGraph(session.user.id, source.branchId, 'moderator')
+    if (!access.ok || !roleAtLeast(access.role, 'moderator')) {
+      return NextResponse.json({ error: 'Read-only: you cannot edit knowledge on this hub' }, { status: 403 })
     }
 
     await deleteSourceDocument(sourceId)

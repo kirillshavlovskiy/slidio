@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { auth } from '@/lib/auth'
 import { prisma } from '@/lib/prisma'
-import { canAccessPresentation } from '@/lib/hubAccess'
+import { canAccessPresentation, canEditPresentation } from '@/lib/hubAccess'
 
 export async function POST(req: NextRequest) {
   const session = await auth()
@@ -21,8 +21,8 @@ export async function POST(req: NextRequest) {
 
   const access = await canAccessPresentation(session.user.id, presentationId)
   if (!access.ok) return NextResponse.json({ error: 'Not found' }, { status: 404 })
-  if (access.role === 'viewer') {
-    return NextResponse.json({ error: 'Read-only: you are a viewer on this hub' }, { status: 403 })
+  if (!canEditPresentation(access.role)) {
+    return NextResponse.json({ error: 'Read-only: you cannot edit decks on this hub' }, { status: 403 })
   }
 
   const createData = {
@@ -64,7 +64,7 @@ export async function PATCH(req: NextRequest) {
   if (!existing) return NextResponse.json({ error: 'Not found' }, { status: 404 })
 
   const access = await canAccessPresentation(session.user.id, existing.presentationId)
-  if (!access.ok || access.role === 'viewer') {
+  if (!access.ok || !canEditPresentation(access.role)) {
     return NextResponse.json({ error: 'Not found' }, { status: 404 })
   }
 

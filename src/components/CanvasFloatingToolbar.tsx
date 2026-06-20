@@ -124,6 +124,8 @@ interface Props {
   quickActionsDisabled: boolean
   showKnowledgePins: boolean
   onShowKnowledgePinsChange: (show: boolean) => void
+  /** Font families already used on the deck (surfaced in the font picker). */
+  deckFonts?: string[]
 }
 
 function ToolBtn({
@@ -326,6 +328,7 @@ export default function CanvasFloatingToolbar({
   quickActionsDisabled,
   showKnowledgePins,
   onShowKnowledgePinsChange,
+  deckFonts = [],
 }: Props) {
   const toolbarRef = useRef<HTMLDivElement>(null)
   const aiMenuAnchorRef = useRef<HTMLDivElement>(null)
@@ -734,6 +737,7 @@ export default function CanvasFloatingToolbar({
           <FontFamilySelect
             className="w-28 flex-shrink-0"
             menuPortal
+            deckFonts={deckFonts}
             value={single.style.fontFace}
             onChange={fontFace => onUpdateElement(single.id, { style: { fontFace } })}
           />
@@ -923,21 +927,80 @@ export default function CanvasFloatingToolbar({
           <FontFamilySelect
             className="w-28 flex-shrink-0"
             menuPortal
+            deckFonts={deckFonts}
             value={textSelected[0]?.style.fontFace}
             onChange={fontFace => applyStyleToSelection({ fontFace })}
           />
-          <IconBtn
-            title="Bold all selected text"
-            onClick={() => applyStyleToSelection({ bold: true })}
-          >
+          <Divider />
+          <IconBtn title="Bold all selected text" onClick={() => applyStyleToSelection({ bold: true })}>
             <Bold className="w-3.5 h-3.5" />
           </IconBtn>
-          <IconBtn
-            title="Align center"
-            onClick={() => applyStyleToSelection({ align: 'center' })}
-          >
+          <IconBtn title="Italic all selected text" onClick={() => applyStyleToSelection({ italic: true })}>
+            <Italic className="w-3.5 h-3.5" />
+          </IconBtn>
+          <IconBtn title="Align left" onClick={() => applyStyleToSelection({ align: 'left' })}>
+            <AlignLeft className="w-3.5 h-3.5" />
+          </IconBtn>
+          <IconBtn title="Align center" onClick={() => applyStyleToSelection({ align: 'center' })}>
             <AlignCenter className="w-3.5 h-3.5" />
           </IconBtn>
+          <IconBtn title="Align right" onClick={() => applyStyleToSelection({ align: 'right' })}>
+            <AlignRight className="w-3.5 h-3.5" />
+          </IconBtn>
+          <Divider />
+          <IconBtn title="Align text top" onClick={() => applyStyleToSelection({ valign: 'top' })}>
+            <ArrowUpToLine className="w-3.5 h-3.5" />
+          </IconBtn>
+          <IconBtn title="Align text middle" onClick={() => applyStyleToSelection({ valign: 'middle' })}>
+            <FoldVertical className="w-3.5 h-3.5" />
+          </IconBtn>
+          <IconBtn title="Align text bottom" onClick={() => applyStyleToSelection({ valign: 'bottom' })}>
+            <ArrowDownToLine className="w-3.5 h-3.5" />
+          </IconBtn>
+          <Divider />
+          <IconBtn
+            title="Smaller text"
+            onClick={() =>
+              textSelected.forEach(el =>
+                onUpdateElement(el.id, {
+                  style: { fontSize: Math.max(6, (el.style.fontSize ?? 12) - 2) },
+                })
+              )
+            }
+          >
+            <Minus className="w-3.5 h-3.5" />
+          </IconBtn>
+          <IconBtn
+            title="Larger text"
+            onClick={() =>
+              textSelected.forEach(el =>
+                onUpdateElement(el.id, {
+                  style: { fontSize: Math.min(96, (el.style.fontSize ?? 12) + 2) },
+                })
+              )
+            }
+          >
+            <Plus className="w-3.5 h-3.5" />
+          </IconBtn>
+          <Divider />
+          <ColorPopover title="Text color" round previewColor={elementTextHex(textSelected[0])}>
+            {TEXT_PRESETS.map(hex => (
+              <button
+                key={hex}
+                type="button"
+                title={`Text #${hex}`}
+                onClick={() => applyStyleToSelection({ color: hex })}
+                className="w-4 h-4 rounded-full border border-[#334155] transition-transform hover:scale-110"
+                style={{ backgroundColor: `#${hex}` }}
+              />
+            ))}
+            <CustomColorButton
+              title="Custom text color"
+              round
+              value={elementTextHex(textSelected[0])}
+              onChange={hex => applyStyleToSelection({ color: hex })}
+            />
+          </ColorPopover>
         </>
       )}
 

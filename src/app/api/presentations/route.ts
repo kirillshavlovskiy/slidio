@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import type { Prisma } from '@prisma/client'
 import { auth } from '@/lib/auth'
 import { prisma } from '@/lib/prisma'
-import { canAccessPresentation, getHubRole } from '@/lib/hubAccess'
+import { canAccessPresentation, getHubRole, canEditPresentation } from '@/lib/hubAccess'
 
 function isUnknownEditorSessionFieldError(err: unknown): boolean {
   return (
@@ -111,8 +111,8 @@ export async function POST(req: NextRequest) {
   if (id) {
     const access = await canAccessPresentation(session.user.id, id)
     if (!access.ok) return NextResponse.json({ error: 'Not found' }, { status: 404 })
-    if (access.role === 'viewer') {
-      return NextResponse.json({ error: 'Read-only: you are a viewer on this hub' }, { status: 403 })
+    if (!canEditPresentation(access.role)) {
+      return NextResponse.json({ error: 'Read-only: you cannot edit decks on this hub' }, { status: 403 })
     }
 
     const presentation = await updatePresentation(id, data)
@@ -123,8 +123,8 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
   }
   const hubRole = branchId ? await getHubRole(session.user.id, branchId) : null
-  if (hubRole === 'viewer') {
-    return NextResponse.json({ error: 'Read-only: you are a viewer on this hub' }, { status: 403 })
+  if (hubRole && !canEditPresentation(hubRole)) {
+    return NextResponse.json({ error: 'Read-only: you cannot edit decks on this hub' }, { status: 403 })
   }
 
   const presentation = await prisma.presentation.create({

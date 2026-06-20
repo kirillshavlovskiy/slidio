@@ -1,4 +1,6 @@
 import { SlideData, SlideElement } from './types'
+import { CANVAS_FONT_SCALE, CANVAS_PX_PER_IN } from './slideDimensions'
+import { effectiveLineHeight, textMetricsPaddingPx } from './textRender'
 
 /**
  * Geometry/layout review for slide elements.
@@ -18,6 +20,8 @@ export const SLIDE_H_IN = 7.5
 const OVERLAP_THRESHOLD = 0.5
 /** Icon/image vs text — even a sliver of overlap reads as a collision. */
 const ICON_TEXT_OVERLAP_THRESHOLD = 0.06
+/** Text vs text — any box intersection hides copy; use a low threshold. */
+const TEXT_TEXT_OVERLAP_THRESHOLD = 0.06
 // Tolerance (inches) for out-of-bounds so borderline rounding doesn't trip it.
 const BOUNDS_TOL = 0.06
 
@@ -29,11 +33,15 @@ export interface LayoutIssue {
     | 'uneven-spacing'
     | 'underfill'
     | 'text-underfill'
+    | 'text-overflow'
+    | 'misalignment'
   elementIds: string[]
   message: string
   slideId?: string
 }
 
+/** Left/top edges in a column/row may differ by at most this much (inches). */
+const EDGE_ALIGN_TOL = 0.06
 /** Minimum edge inset before we expect top/bottom (or left/right) margins to match. */
 const EDGE_IMBALANCE_TOL = 0.15
 /** Gaps between stacked elements may differ by at most this much (inches). */
@@ -46,8 +54,11 @@ const ROW_COL_TOL = 0.18
 const TEXT_FILL_RATIO_MIN = 0.62
 /** Minimum inner vertical dead space (inches) before flagging text underfill. */
 const TEXT_INNER_GAP_MIN = 0.1
+/** Content must exceed box height by at least this much to flag text overflow. */
+const TEXT_OVERFLOW_MIN = 0.04
 const PT_PER_IN = 72
-const DEFAULT_PAD_IN = 6 / 96
+/** Only count padding explicitly set on the element (PPTX boxes are already inset). */
+const DEFAULT_PAD_IN = 0
 
 function isTextElement(el: SlideElement): boolean {
   return el.type === 'text' || el.type === 'chip'
@@ -59,16 +70,18 @@ function isTextElement(el: SlideElement): boolean {
  */
 export function estimateTextBlockHeightIn(el: SlideElement): number {
   const s = el.style || {}
+  const content = (el.content || '').trim()
   const fontSize = s.fontSize || 12
-  const lineHeight = s.lineHeight ?? 1.25
-  const padT = s.padTop ?? DEFAULT_PAD_IN
-  const padB = s.padBottom ?? DEFAULT_PAD_IN
+  const fontSizePx = fontSize * CANVAS_FONT_SCALE
+  const metrics = textMetricsPaddingPx(fontSizePx)
+  const padT = s.padTop ?? metrics.top / CANVAS_PX_PER_IN
+  const padB = s.padBottom ?? metrics.bottom / CANVAS_PX_PER_IN
   const padL = s.padLeft ?? DEFAULT_PAD_IN
   const padR = s.padRight ?? DEFAULT_PAD_IN
-  const content = (el.content || '').trim()
   if (!content) return padT + padB
 
   const lines = content.split('\n')
+  const lineHeight = effectiveLineHeight(s, lines.length)
   const charWidthPt = fontSize * 0.55
   const usableWIn = Math.max(0.08, el.w - padL - padR)
   const charsPerLine = Math.max(4, Math.floor((usableWIn * PT_PER_IN) / charWidthPt))
@@ -83,7 +96,7 @@ export function estimateTextBlockHeightIn(el: SlideElement): number {
     lineCount += Math.max(1, Math.ceil(t.length / charsPerLine))
   }
 
-  const lineHIn = (fontSize * lineHeight) / PT_PER_IN
+  const lineHIn = (fontSize * CANVAS_FONT_SCALE * lineHeight) / PT_PER_IN
   return padT + padB + lineCount * lineHIn
 }
 
@@ -96,6 +109,36 @@ function suggestFontSizeForCell(el: SlideElement): number {
   if (contentH <= 0) return fontSize
   const targetTextH = Math.max(0.08, el.h * 0.82 - padT - padB)
   return Math.min(48, Math.max(fontSize + 1, Math.round(fontSize * (targetTextH / contentH))))
+}
+
+function suggestFontSizeForOverflow(el: SlideElement): number {
+  const fontSize = el.style?.fontSize || 12
+  const contentH = estimateTextBlockHeightIn(el)
+  if (contentH <= el.h) return fontSize
+  const targetH = el.h * 0.95
+  return Math.max(6, Math.round(fontSize * (targetH / contentH)))
+}
+
+function findTextOverflowIssues(slide: SlideData): LayoutIssue[] {
+  const issues: LayoutIssue[] = []
+  for (const el of slide.elements.filter(isTextElement)) {
+    if (!(el.content || '').trim()) continue
+    const contentH = estimateTextBlockHeightIn(el)
+    const overflow = contentH - el.h
+    if (overflow < TEXT_OVERFLOW_MIN) continue
+
+    const fontSize = el.style?.fontSize || 12
+    const suggested = suggestFontSizeForOverflow(el)
+    issues.push({
+      kind: 'text-overflow',
+      elementIds: [el.id],
+      slideId: slide.id,
+      message:
+        `${el.id} text overflows its box (≈${contentH.toFixed(2)}in tall in h ${el.h.toFixed(2)}in box at ${fontSize}pt) — ` +
+        `reduce style.fontSize to ~${suggested}pt and/or increase h, lineHeight, or vertical padding so nothing clips top/bottom`,
+    })
+  }
+  return issues
 }
 
 function findTextFillIssues(slide: SlideData): LayoutIssue[] {
@@ -207,6 +250,142 @@ function groupRows(els: SlideElement[]): SlideElement[][] {
   return groups
 }
 
+function findAlignmentIssues(slide: SlideData): LayoutIssue[] {
+  const issues: LayoutIssue[] = []
+  const layout = slide.elements.filter(isLayoutElement)
+  if (layout.length < 2) return issues
+
+  const alignTargets = layout.filter(
+    e => isTextLike(e) || isIconOrImage(e) || (e.type === 'rect' && e.w < 5.5)
+  )
+  if (alignTargets.length < 2) return issues
+
+  for (const col of groupColumns(alignTargets)) {
+    const textInCol = col.filter(isTextLike)
+    if (textInCol.length < 2) continue
+    const leftXs = textInCol.map(e => e.x)
+    const leftSpread = Math.max(...leftXs) - Math.min(...leftXs)
+    if (leftSpread > EDGE_ALIGN_TOL) {
+      const ids = textInCol.map(e => e.id)
+      issues.push({
+        kind: 'misalignment',
+        elementIds: ids,
+        slideId: slide.id,
+        message:
+          `text left edges misaligned in column (${leftSpread.toFixed(2)}in spread: ${ids.join(', ')}) — ` +
+          `snap text boxes to the same x (icons may stay left of labels)`,
+      })
+    }
+  }
+
+  for (const row of groupRows(alignTargets)) {
+    if (row.length === 2 && row.some(isIconOrImage) && row.some(isTextLike)) continue
+    const textInRow = row.filter(isTextLike)
+    if (textInRow.length < 2) continue
+    const tops = textInRow.map(e => e.y)
+    const topSpread = Math.max(...tops) - Math.min(...tops)
+    if (topSpread > EDGE_ALIGN_TOL) {
+      const ids = textInRow.map(e => e.id)
+      issues.push({
+        kind: 'misalignment',
+        elementIds: ids,
+        slideId: slide.id,
+        message:
+          `text tops misaligned in row (${topSpread.toFixed(2)}in spread: ${ids.join(', ')}) — ` +
+          `snap to the same y`,
+      })
+    }
+  }
+
+  const textCols = groupColumns(alignTargets.filter(e => isTextLike(e)))
+  if (textCols.length === 2) {
+    const leftTexts = [...textCols[0]].sort((a, b) => a.y - b.y)
+    const rightTexts = [...textCols[1]].sort((a, b) => a.y - b.y)
+    const leftTop = leftTexts[0]
+    const rightTop = rightTexts[0]
+    if (leftTop && rightTop && Math.abs(leftTop.y - rightTop.y) > EDGE_ALIGN_TOL) {
+      issues.push({
+        kind: 'misalignment',
+        elementIds: [leftTop.id, rightTop.id],
+        slideId: slide.id,
+        message:
+          `two-column headers at different y (left ${leftTop.y.toFixed(2)}in vs right ${rightTop.y.toFixed(2)}in) — ` +
+          `align ${leftTop.id} and ${rightTop.id} to the same y`,
+      })
+    }
+
+    const leftBody = leftTexts.slice(1)
+    const rightBody = rightTexts.slice(1)
+    const usedRight = new Set<string>()
+    for (const l of leftBody) {
+      const lcy = l.y + l.h / 2
+      let best: SlideElement | null = null
+      let bestDy = ROW_COL_TOL + 1
+      for (const r of rightBody) {
+        if (usedRight.has(r.id)) continue
+        const dy = Math.abs(lcy - (r.y + r.h / 2))
+        if (dy <= ROW_COL_TOL && dy < bestDy) {
+          best = r
+          bestDy = dy
+        }
+      }
+      if (best && Math.abs(l.y - best.y) > EDGE_ALIGN_TOL) {
+        usedRight.add(best.id)
+        issues.push({
+          kind: 'misalignment',
+          elementIds: [l.id, best.id],
+          slideId: slide.id,
+          message:
+            `paired row tops misaligned: ${l.id} y=${l.y.toFixed(2)}in vs ${best.id} y=${best.y.toFixed(2)}in — align tops`,
+        })
+      }
+    }
+
+    const pairs = Math.min(leftBody.length, rightBody.length)
+    for (let i = 0; i < pairs - 1; i++) {
+      const gapL = leftBody[i + 1].y - (leftBody[i].y + leftBody[i].h)
+      const gapR = rightBody[i + 1].y - (rightBody[i].y + rightBody[i].h)
+      if (gapL >= 0 && gapR >= 0 && Math.abs(gapL - gapR) > GAP_EVENNESS_TOL) {
+        issues.push({
+          kind: 'uneven-spacing',
+          elementIds: [leftBody[i].id, leftBody[i + 1].id, rightBody[i].id, rightBody[i + 1].id],
+          slideId: slide.id,
+          message:
+            `uneven vertical rhythm between columns (${gapL.toFixed(2)}in left vs ${gapR.toFixed(2)}in right between rows ${i + 2}–${i + 3}) — ` +
+            `use equal gaps in both columns`,
+        })
+      }
+    }
+  }
+
+  for (const row of groupRows(layout)) {
+    for (const el of row) {
+      if (!isIconOrImage(el)) continue
+      const text = row.find(
+        o =>
+          o.id !== el.id &&
+          isTextLike(o) &&
+          o.x >= el.x - 0.02 &&
+          o.x < el.x + el.w + 0.4
+      )
+      if (!text) continue
+      const iconCy = el.y + el.h / 2
+      const textCy = text.y + text.h / 2
+      if (Math.abs(iconCy - textCy) > EDGE_ALIGN_TOL * 2) {
+        issues.push({
+          kind: 'misalignment',
+          elementIds: [el.id, text.id],
+          slideId: slide.id,
+          message:
+            `icon ${el.id} and text ${text.id} vertically off-center in header (Δcenter ${Math.abs(iconCy - textCy).toFixed(2)}in) — align centers on same y`,
+        })
+      }
+    }
+  }
+
+  return issues
+}
+
 function findSpacingAndFillIssues(slide: SlideData): LayoutIssue[] {
   const issues: LayoutIssue[] = []
   const layout = slide.elements.filter(isLayoutElement)
@@ -281,7 +460,7 @@ function findSpacingAndFillIssues(slide: SlideData): LayoutIssue[] {
   }
 
   for (const col of groupColumns(layout)) {
-    if (col.length < MIN_FOR_GAP_CHECK) continue
+    if (col.length < 2) continue
     const sorted = [...col].sort((a, b) => a.y - b.y)
     const gaps: number[] = []
     for (let i = 0; i < sorted.length - 1; i++) {
@@ -301,7 +480,7 @@ function findSpacingAndFillIssues(slide: SlideData): LayoutIssue[] {
   }
 
   for (const row of groupRows(layout)) {
-    if (row.length < MIN_FOR_GAP_CHECK) continue
+    if (row.length < 2) continue
     const sorted = [...row].sort((a, b) => a.x - b.x)
     const gaps: number[] = []
     for (let i = 0; i < sorted.length - 1; i++) {
@@ -344,6 +523,7 @@ function overlapThresholdForPair(a: SlideElement, b: SlideElement): number {
   ) {
     return ICON_TEXT_OVERLAP_THRESHOLD
   }
+  if (isTextLike(a) && isTextLike(b)) return TEXT_TEXT_OVERLAP_THRESHOLD
   return OVERLAP_THRESHOLD
 }
 
@@ -383,7 +563,10 @@ function formatOverlapMessage(
     )
   }
   if (isTextLike(lower) && isTextLike(upper)) {
-    return `text blocks ${lower.id} and ${upper.id} overlap by ${pct}% (text hidden)`
+    return (
+      `text blocks ${lower.id} and ${upper.id} overlap by ${pct}% — ` +
+      `separate boxes (move/resize x, y, w, h) so they no longer intersect`
+    )
   }
   return `${upper.id} (${upper.type}) is painted over ${lower.id} (${lower.type}) and hides it by ${pct}%`
 }
@@ -397,11 +580,32 @@ function intersectionRatio(a: SlideElement, b: SlideElement): number {
   return inter / minArea
 }
 
-/** Issues that geometry-only layout fixes should act on (overlaps + overflow). */
-export const GEOMETRY_LAYOUT_KINDS = new Set<LayoutIssue['kind']>(['overlap', 'out-of-bounds'])
+/** Issues that layout-fix / quick-action passes must resolve (not full margin polish). */
+export const LAYOUT_FIX_KINDS = new Set<LayoutIssue['kind']>([
+  'overlap',
+  'out-of-bounds',
+  'text-overflow',
+  'misalignment',
+  'uneven-spacing',
+])
+
+/** Overlap + overflow only — styling passes that must not chase spacing. */
+export const GEOMETRY_LAYOUT_KINDS = new Set<LayoutIssue['kind']>([
+  'overlap',
+  'out-of-bounds',
+  'text-overflow',
+])
+
+export function isLayoutFixIssue(issue: LayoutIssue): boolean {
+  return LAYOUT_FIX_KINDS.has(issue.kind)
+}
 
 export function isGeometryLayoutIssue(issue: LayoutIssue): boolean {
   return GEOMETRY_LAYOUT_KINDS.has(issue.kind)
+}
+
+export function filterLayoutFixIssues(issues: LayoutIssue[]): LayoutIssue[] {
+  return issues.filter(isLayoutFixIssue)
 }
 
 export function filterGeometryLayoutIssues(issues: LayoutIssue[]): LayoutIssue[] {
@@ -410,10 +614,17 @@ export function filterGeometryLayoutIssues(issues: LayoutIssue[]): LayoutIssue[]
 
 /** Overlap + out-of-bounds only — skip margin/spacing noise during styling-only passes. */
 export function filterOverlapOnlyLayoutIssues(issues: LayoutIssue[]): LayoutIssue[] {
-  return issues.filter(i => i.kind === 'overlap' || i.kind === 'out-of-bounds')
+  return issues.filter(
+    i => i.kind === 'overlap' || i.kind === 'out-of-bounds' || i.kind === 'text-overflow'
+  )
 }
 
-/** Overlap + out-of-bounds only — for quick-action geometry passes. */
+/** Layout-fix scope: overlaps, clipping, alignment, and even gutters. */
+export function findLayoutFixIssues(slide: SlideData): LayoutIssue[] {
+  return filterLayoutFixIssues(findLayoutIssues(slide))
+}
+
+/** Overlap + out-of-bounds only — for styling-only passes. */
 export function findGeometryIssues(slide: SlideData): LayoutIssue[] {
   return filterGeometryLayoutIssues(findLayoutIssues(slide))
 }
@@ -463,7 +674,7 @@ export function findLayoutIssues(slide: SlideData): LayoutIssue[] {
     }
   }
 
-  return [...issues, ...findSpacingAndFillIssues(slide)]
+  return [...issues, ...findTextOverflowIssues(slide), ...findAlignmentIssues(slide), ...findSpacingAndFillIssues(slide)]
 }
 
 /** Spacing, margin-balance, and fill issues only (for review-phase checks). */
@@ -520,7 +731,14 @@ export function reviewLayoutChange(before: SlideData[], after: SlideData[]): Lay
       issues.push(issue)
       if (!beforeSigs.has(issueSignature(issue))) newIssues.push(issue)
       if (spacingKinds.has(issue.kind)) spacingIssues.push(issue)
-      if (issue.kind === 'overlap') overlapIssues.push(issue)
+      if (
+        issue.kind === 'overlap' ||
+        issue.kind === 'text-overflow' ||
+        issue.kind === 'misalignment' ||
+        issue.kind === 'uneven-spacing'
+      ) {
+        overlapIssues.push(issue)
+      }
     }
   }
 
@@ -532,15 +750,16 @@ export function formatLayoutIssues(issues: LayoutIssue[]): string {
   return issues.map(i => `  - [${i.kind}] ${i.message}`).join('\n')
 }
 
-/** Tool-result block for overlap checks (review phase + layout audits). */
+/** Tool-result block for overlap / alignment / overflow checks (layout fix + review). */
 export function formatOverlapCheck(issues: LayoutIssue[]): string {
   if (issues.length === 0) {
-    return 'OVERLAP CHECK — no content-hiding overlaps detected.'
+    return 'LAYOUT CHECK — no overlaps, misalignment, or clipped text detected.'
   }
   return (
-    `OVERLAP CHECK — fix before finish:\n${formatLayoutIssues(issues)}\n` +
-    `Separate colliding elements: for icon + text pairs, move the icon to the LEFT with a clear gap ` +
-    `and shift text right (or add style.padLeft) so boxes do not intersect.`
+    `LAYOUT CHECK — fix before finish:\n${formatLayoutIssues(issues)}\n` +
+    `Separate colliding elements; snap column/row edges to a clean grid (same x in columns, same y in rows). ` +
+    `Two-column slides: align paired headers and bullet rows across left/right columns with even vertical gaps. ` +
+    `For icon + text headers, snap to the same y. For text-overflow, reduce fontSize and/or increase h.`
   )
 }
 

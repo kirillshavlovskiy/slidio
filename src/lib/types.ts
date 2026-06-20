@@ -200,6 +200,10 @@ export interface ConversationMessage {
   imageDataUrl?: string
   // optional user-uploaded reference images (base64 data URLs) attached to a user message
   imageDataUrls?: string[]
+  /** Who sent this user message (collaboration audit). */
+  userId?: string
+  userName?: string
+  userImage?: string | null
 }
 
 // ── Knowledge Memory Architecture ────────────────────────────────────────────
@@ -220,12 +224,23 @@ export interface KnowledgeLayer {
   enabled: boolean
   createdAt: number
   updatedAt: number
-  source?: 'manual' | 'template' | 'inferred' | 'designSystem' | 'document'  // how it was created
+  source?: 'manual' | 'template' | 'inferred' | 'designSystem' | 'document' | 'comment'  // how it was created
   branchId?: string | null // knowledge branch this layer belongs to
+  userId?: string
+  updatedByName?: string
+  updatedByImage?: string | null
 }
 
 // ── Knowledge Branches ────────────────────────────────────────────────────────
-export type HubRole = 'owner' | 'editor' | 'viewer'
+export type HubRole = 'owner' | 'editor' | 'moderator' | 'viewer'
+
+export interface HubMemberSummary {
+  userId: string
+  name: string | null
+  email: string | null
+  image?: string | null
+  role: HubRole
+}
 
 export interface HubMemberInfo {
   id: string
@@ -270,7 +285,9 @@ export interface KnowledgeBranch {
   presentationCount: number
   /** Knowledge + design layers shared across the hub (style = design system). */
   knowledgeLayers?: KnowledgeLayerSummary[]
-  /** Caller's role on this hub (owner/editor/viewer). */
+  /** Collaborators on this hub (owner + accepted members). */
+  members?: HubMemberSummary[]
+  /** Caller's role on this hub (owner/editor/moderator/viewer). */
   role?: HubRole | null
   isOwner?: boolean
   createdAt: number
@@ -305,6 +322,29 @@ export interface DecisionRecord {
   // optional user-supplied reason a proposal was rejected — turns a blunt
   // "never do this again" into scoped, explainable memory
   rejectionReason?: string
+  actorId?: string | null
+  actorName?: string
+  actorImage?: string | null
+}
+
+// ── Deck comments (collaborator feedback → LLM context) ─────────────────────
+
+export interface DeckComment {
+  id: string
+  presentationId: string
+  userId: string
+  authorName?: string
+  authorEmail?: string | null
+  authorImage?: string | null
+  slideId?: string | null
+  elementId?: string | null
+  pinX?: number | null
+  pinY?: number | null
+  content: string
+  resolved: boolean
+  createdAt: number
+  updatedAt: number
+  isMe?: boolean
 }
 
 // ── Version Control ────────────────────────────────────────────────────────────
@@ -320,6 +360,9 @@ export interface SlideVersion {
   slideCount: number
   // which slides changed vs previous version (element IDs)
   changedSlideIds: string[]
+  actorId?: string | null
+  actorName?: string
+  actorImage?: string | null
   // ── Branching (deck timeline) ──
   // Which branch this snapshot belongs to. Reverting to an earlier message forks a
   // new branch from that point instead of discarding later history.

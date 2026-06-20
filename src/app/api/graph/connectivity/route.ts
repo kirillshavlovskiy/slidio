@@ -15,8 +15,8 @@ export async function POST(req: NextRequest) {
   const branchId = body.branchId?.trim()
   if (!branchId) return NextResponse.json({ error: 'branchId required' }, { status: 400 })
 
-  const access = await canAccessGraph(session.user.id, branchId, 'editor')
-  if (!access.ok || !roleAtLeast(access.role, 'editor')) {
+  const access = await canAccessGraph(session.user.id, branchId, 'moderator')
+  if (!access.ok || !roleAtLeast(access.role, 'moderator')) {
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
   }
 

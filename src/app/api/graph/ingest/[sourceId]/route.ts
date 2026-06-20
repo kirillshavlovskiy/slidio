@@ -43,8 +43,8 @@ export async function POST(
     const source = await prisma.sourceDocument.findUnique({ where: { id: sourceId } })
     if (!source) return NextResponse.json({ error: 'Not found' }, { status: 404 })
 
-    const access = await canAccessGraph(session.user.id, source.branchId, 'editor')
-    if (!access.ok || !roleAtLeast(access.role, 'editor')) {
+    const access = await canAccessGraph(session.user.id, source.branchId, 'moderator')
+    if (!access.ok || !roleAtLeast(access.role, 'moderator')) {
       return NextResponse.json({ error: 'Read-only: you are a viewer on this hub' }, { status: 403 })
     }
 

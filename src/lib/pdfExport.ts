@@ -1,6 +1,8 @@
 import { jsPDF } from 'jspdf'
 import { SlideData, SlideElement, ElementStyle } from './types'
 import { elementFillHex, elementTextHex } from './elementStyle'
+import { CANVAS_FONT_SCALE } from './slideDimensions'
+import { effectiveTextValign, displayTextContent } from './textRender'
 
 /**
  * PDF export. The primary path rasterises each slide from the same canvas DOM
@@ -17,7 +19,6 @@ const SLIDE_H_IN = 7.5
 const PX_PER_IN = 96
 const PT_PER_IN = 72
 /** SlideCanvas renders stored pt sizes at ×1.2 px — mirror that in vector export. */
-const CANVAS_FONT_SCALE = 1.2
 
 /** Convert a hex color (with or without leading #) to an [r,g,b] triple. */
 function hexToRgb(hex?: string): [number, number, number] | null {
@@ -107,7 +108,7 @@ function drawText(doc: jsPDF, el: SlideElement) {
   const innerH = Math.max(0.01, el.h - padT - padB)
 
   // Honour explicit newlines (lists, multi-line titles) then wrap each paragraph.
-  const paragraphs = el.content.split('\n')
+  const paragraphs = displayTextContent(el.content).split('\n')
   const lines: string[] = []
   for (const para of paragraphs) {
     const wrapped = doc.splitTextToSize(para, innerW) as string[]
@@ -120,7 +121,7 @@ function drawText(doc: jsPDF, el: SlideElement) {
   const align = st.align || (el.type === 'text' ? 'left' : 'center')
   const textX = align === 'center' ? innerX + innerW / 2 : align === 'right' ? innerX + innerW : innerX
 
-  const valign = st.valign || 'middle'
+  const valign = st.valign ?? effectiveTextValign(el, st)
   let cursorY =
     valign === 'top' ? innerY : valign === 'bottom' ? innerY + innerH - blockH : innerY + (innerH - blockH) / 2
   if (cursorY < innerY) cursorY = innerY

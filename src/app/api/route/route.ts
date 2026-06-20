@@ -4,64 +4,47 @@ import {
   isKnowledgeBasedEditRequest,
   isLayoutAuditChangeRequest,
 } from '@/lib/agent/routingHeuristics'
-import { PLANNING_MODEL } from '@/lib/agent/models'
+import { agentModel } from '@/lib/agent/models'
 
 const client = new Anthropic()
 
-// A small, fast model decides routing — no brittle keyword/regex heuristics.
-// Routing is a trivial 64-token classification, so use the cheap model (Haiku 4.5,
-// 3× cheaper than Sonnet) by default. Override via env if needed.
-const ROUTER_MODEL =
-  process.env.ANTHROPIC_ROUTER_MODEL || PLANNING_MODEL
+const ROUTER_MODEL = process.env.ANTHROPIC_ROUTER_MODEL || agentModel()
 
-type Mode = 'ask' | 'single' | 'agent'
+type Mode = 'ask' | 'agent'
 type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 type Scope = 'active' | 'selected' | 'deck' | 'ask'
-const MODES: Mode[] = ['ask', 'single', 'agent']
+const MODES: Mode[] = ['ask', 'agent']
 const EFFORTS: Effort[] = ['low', 'medium', 'high', 'xhigh', 'max']
 const SCOPES: Scope[] = ['active', 'selected', 'deck', 'ask']
 
 const ROUTER_SYSTEM = `You route messages for an AI slide-editing assistant. Read the user's LATEST message plus the supplied context, then decide how it should be handled. Respond with ONLY a JSON object — no prose, no markdown, no code fences:
-{"mode":"ask"|"single"|"agent","effort":"low"|"medium"|"high"|"xhigh"|"max","scope":"active"|"selected"|"deck"|"ask"}
+{"mode":"ask"|"agent","effort":"medium"|"high"|"xhigh"|"max","scope":"active"|"selected"|"deck"|"ask"}
 
-MODES
-- "ask": the user is asking a QUESTION or wants analysis/explanation/summary/feedback/an opinion — they do NOT want the deck changed. Use this whenever there is no clear instruction to modify the slides. This INCLUDES questions ABOUT building or content — "what should this deck include?", "how would you structure it?", "which sections do I need?", "what content goes here?", "should I add X?", "can you tell me…", "what do you recommend?". Wanting your OPINION/PLAN on what to build is "ask", NOT "agent". Only choose single/agent when the message is an IMPERATIVE to actually make the change (build it, add it, fix it, restyle it).
+MODES — only two flows exist:
+- "ask": the user wants an ANSWER, explanation, analysis, opinion, or plan — they do NOT want the deck changed right now. Questions about structure/content ("what should this include?") are "ask".
+- "agent": EVERYTHING else — any edit, fix, redo, complaint about a bad edit, visual tweak, layout fix, content change, deck build, or "continue". NEVER return "single" — all edits use the agent loop.
 
-CRITICAL — follow-ups and complaints are EDITS, not questions: A message that reacts to a PREVIOUS edit — e.g. "it's not fixed", "that didn't work", "changes weren't applied", "nothing changed", "still wrong/broken/misaligned", "you didn't do it", "do it again", "redo it", "that's not what I asked", or any frustrated complaint about the result (even if it ends with "?" or contains insults) — is an instruction to FIX/REDO the edit. Route these to "single" (small fix) or "agent" (multi-element/relayout), NEVER to "ask". Only use "ask" for genuine information-seeking questions, not for dissatisfaction with an edit.
-- "single": a small, well-scoped EDIT that can be produced in ONE shot — e.g. change text/color/font/size, move/align/resize a few elements, restyle or add ONE small element on the current slide.
-- "agent": anything that needs an iterative loop: reading one or more slides first, editing MULTIPLE slides, ADDING or INSERTING slides, generating SUBSTANTIAL NEW content (lists of items, several variants, parameters/structures/examples, tables), charts driven by data, full redesign / design-system conversion, "mirror this image/layout", or anything requiring visual verification. When in doubt between single and agent for a content-heavy or multi-step task, choose "agent".
+CRITICAL — complaints and redo requests are ALWAYS "agent": "not fixed", "wrong", "stupid", "redo", "that's not what I asked", insults + fix request → "agent" with "high" effort.
 
-CRITICAL: Judge size by how much NEW CONTENT the message asks you to PRODUCE — NOT by how many elements/slides are selected. A request that asks to "put/add/list different variants / structures / parameters / options / examples / scenarios … etc" produces a LOT of text and MUST be "agent", even if only one slide or a couple of elements are selected. Selecting a few elements does NOT make a content-generation task small.
+EFFORT (never "low" — agent always reasons):
+- "medium": single-slide visual/style fix, small text edit, recolor, move element.
+- "high": multi-element layout, multi-slide, content generation, redesign, deck build.
+- "xhigh"/"max": full deck from scratch (10+ slides).
 
-CONTINUATION: If the message is a resume/continuation of prior work — e.g. "continue", "keep going", "carry on", "finish it", "continue where you left off / finished", "do the rest", "pick up where you stopped" — route to "agent" with at least "medium" effort. These refer to a previous multi-step task that must re-read the slide(s) and finish the outstanding work.
-
-EFFORT (token/thinking budget) — this ALSO picks the model: "low"/"medium" run on a fast, cheap model; "high"/"xhigh"/"max" run on a more powerful model. So effort = how much model horsepower the task deserves. Follow these rules:
-
-CREATE = powerful model (use "high", or "xhigh"/"max" for whole decks):
-- Creating a NEW slide, ADDING/INSERTING slide(s), or generating a NEW presentation/deck → ALWAYS at least "high".
-- Generating substantial NEW content (lists, several variants, parameters/structures/examples, tables), charts driven by data, a full redesign, or a design-system conversion → "high".
-- A large, deck-wide build or redesign across many slides → "high". Reserve "xhigh"/"max" only for a full deck build from scratch (10+ slides of new content) — each agent step must finish within ~4 minutes on the server.
-
-UPDATE existing slide:
-- SIMPLE update to one existing slide — edit/replace text, change color/font/size, move/align/resize, tweak or restyle a single element → "low" (one tiny mechanical tweak) or "medium" (normal single-slide edit). These run on the cheap fast model.
-- COMPLEX update — restructuring a slide's layout, reflowing/repositioning many elements, adding multiple new elements or a chart, redesigning the slide, or any update that needs careful reasoning → "high" so it runs on the powerful model.
-
-Rule of thumb: anything that CREATES new slides/decks, or a COMPLEX slide change, deserves the powerful model ("high"+). A routine update to an existing slide stays cheap ("low"/"medium").
-
-If the user attached an image/annotation, an edit usually needs "single" (the multi-slide loop can't see images) unless they're only asking a question ("ask").
-
-SCOPE — which slides the edit targets (decide from the message + context, NO keyword matching):
-- "active": the change applies to the CURRENT slide only — "this slide", "here", a tweak with no other target, or any single-slide edit when nothing else is indicated.
-- "selected": the user refers to "these/those slides", "the selected ones", or otherwise means the slides they've already multi-selected. Use this ONLY when selected slides > 1.
-- "deck": the change spans the WHOLE presentation — "all slides", "every slide", "the whole deck", a deck-wide restyle/redesign/design-system conversion, or building/continuing a multi-slide deck.
-- "ask": genuinely AMBIGUOUS scope — a broad content/style change on a multi-slide deck (total slides > 1) with NO element/slide selection and no explicit target, where applying it to just the current slide vs the whole deck would differ materially. We will then ask the user which they meant.
-Guidance: if mode is "ask" (a question), scope doesn't matter — return "active". If exactly one slide context and the edit is clearly local, use "active". Only return scope "ask" when totalSlides > 1 AND there's no selection AND the target is truly unclear; otherwise pick the best of active/selected/deck.`
+SCOPE:
+- "active": current slide only.
+- "selected": multi-selected slides (selectedSlideCount > 1).
+- "deck": whole presentation.
+- "ask": ambiguous scope on multi-slide deck — we will ask user.`
 
 function coerceMode(v: unknown): Mode | null {
+  if (v === 'single' || v === 'agent') return 'agent'
   return typeof v === 'string' && (MODES as string[]).includes(v) ? (v as Mode) : null
 }
 function coerceEffort(v: unknown): Effort {
-  return typeof v === 'string' && (EFFORTS as string[]).includes(v) ? (v as Effort) : 'medium'
+  const e =
+    typeof v === 'string' && (EFFORTS as string[]).includes(v) ? (v as Effort) : 'medium'
+  return e === 'low' ? 'medium' : e
 }
 function coerceScope(v: unknown): Scope {
   return typeof v === 'string' && (SCOPES as string[]).includes(v) ? (v as Scope) : 'active'
@@ -172,53 +155,20 @@ Return the routing JSON now.`
       }
 
       let effort = coerceEffort(parsed?.effort)
-      // Deterministic complexity floor: the cheap Haiku router sometimes labels a
-      // genuinely complex SINGLE-SLIDE edit (layout rebalance, overlap fixing,
-      // redesign, multi-element/grid restructure, adding a chart/table) as
-      // low/medium → which would run it on Haiku. Such work needs the smart model,
-      // so when these signals are present we raise the floor to "high" (→ Sonnet)
-      // regardless of slide count. Questions are never bumped.
-      if (mode !== 'ask' && (effort === 'low' || effort === 'medium') && isComplexEdit(instruction)) {
+      if (mode !== 'ask' && effort === 'medium' && isComplexEdit(instruction)) {
         effort = 'high'
       }
 
-      // Hard floor: a build/populate-a-deck request must run on the AGENT (never the
-      // one-shot editor). The cheap router occasionally labels "create slides …" as
-      // "single"; force it to the agent at high effort so big builds aren't one-shot.
-      // BUT never escalate a QUESTION (even one that mentions building) — that would
-      // turn "what should I create?" into an unwanted edit.
-      if (mode === 'single' && isCreateDeckIntent(instruction) && !isQuestionLike(instruction)) {
-        mode = 'agent'
-        if (effort === 'low' || effort === 'medium') effort = 'high'
-      }
-
-      // Deck-wide knowledge integration (many slides) → agent. Single-slide claim
-      // updates can stay on single-shot (semantic plan is injected in callApi).
-      if (
-        mode === 'single' &&
-        isKnowledgeBasedEdit(instruction) &&
-        isDeckWide(instruction) &&
-        !isQuestionLike(instruction) &&
-        ctx.totalSlides > 1
-      ) {
-        mode = 'agent'
-        if (effort === 'low') effort = 'medium'
-      }
-
-      // "Update the deck …" without an explicit slide target → whole deck.
       if (mode !== 'ask' && isDeckWide(instruction) && scope === 'active' && ctx.totalSlides > 1) {
         scope = 'deck'
       }
 
-      // Layout audit / fix (incl. clarification options like "full-audit") is always
-      // an agent CHANGE — never answer-only, even if the label says "provide data".
       if (isLayoutAuditChangeRequest(instruction)) {
         mode = 'agent'
         if (ctx.totalSlides > 1 && (isDeckWide(instruction) || scope === 'active')) {
           scope = 'deck'
         }
-        // Geometry passes: medium execute (no deep thinking) — high/xhigh causes step-1 timeouts.
-        effort = 'medium'
+        if (effort === 'medium') effort = 'high'
       }
 
       // Short slide-number answer during a layout fix (e.g. "14 and 15") → agent edit.

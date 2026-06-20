@@ -10,6 +10,8 @@
     "db:push": "NODE_OPTIONS=--experimental-require-module prisma db push",
     "db:push:turso": "node scripts/push-turso.mjs",
     "db:migrate:collaboration": "node scripts/migrate-collaboration.mjs",
+    "db:migrate:comments": "node scripts/migrate-comments.mjs",
+    "db:migrate:comments:local": "DATABASE_URL=\"file:./prisma/dev.db\" DATABASE_AUTH_TOKEN= node scripts/migrate-comments.mjs",
     "db:migrate:graph": "node scripts/migrate-graph.mjs",
     "db:migrate:graph:local": "DATABASE_URL=\"file:./prisma/dev.db\" DATABASE_AUTH_TOKEN= node scripts/migrate-graph.mjs",
     "users": "node scripts/list-users.mjs"
@@ -19,6 +21,7 @@
   },
   "dependencies": {
     "@adobe/pdfservices-node-sdk": "^4.1.0",
+    "@anthropic-ai/claude-agent-sdk": "^0.3.183",
     "@anthropic-ai/sdk": "^0.104.1",
     "@auth/prisma-adapter": "^2.11.2",
     "@libsql/client": "^0.17.3",
@@ -42,6 +45,7 @@
     "lucide-react": "^1.17.0",
     "next": "^14.2.35",
     "next-auth": "^5.0.0-beta.31",
+    "openai": "^4.104.0",
     "pdf-parse": "^1.1.1",
     "pdfjs-dist": "^4.8.69",
     "postcss": "^8.4.38",
@@ -53,6 +57,13 @@
     "stripe": "^22.2.1",
     "tailwind-merge": "^3.6.0",
     "tailwindcss": "^3.4.1",
-    "typescript": "^5"
+    "typescript": "^5",
+    "zod": "^4.4.3"
+  },
+  "optionalDependencies": {
+    "@anthropic-ai/claude-agent-sdk-darwin-arm64": "^0.3.183",
+    "@anthropic-ai/claude-agent-sdk-darwin-x64": "^0.3.183",
+    "@anthropic-ai/claude-agent-sdk-linux-x64": "^0.3.183",
+    "@anthropic-ai/claude-agent-sdk-linux-arm64": "^0.3.183"
   }
 }

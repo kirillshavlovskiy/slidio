@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { SlideData, ElementStyle, ChartSpec, ChartSeries } from '@/lib/types'
+import { SlideData, ElementStyle, ChartSpec, ChartSeries, SlideElement } from '@/lib/types'
 import { elementFillHex, elementTextHex } from '@/lib/elementStyle'
 import { SLIDE_W_IN, SLIDE_H_IN } from '@/lib/layout'
+import { effectiveTextValign, displayTextContent } from '@/lib/textRender'
 
 // ── Unit helpers ────────────────────────────────────────────────────────────
 // Canvas styles mix units; PPTX wants inches (geometry), points (line width,
@@ -270,13 +271,13 @@ export async function POST(req: NextRequest) {
           ...(radius > 0 ? { rectRadius: radius } : {}),
         })
         if (el.content) {
-          s.addText(el.content, {
+          s.addText(displayTextContent(el.content), {
             x: el.x, y: el.y, w: el.w, h: el.h,
             fontSize: st.fontSize || 10,
             bold: st.bold,
             color: elementTextHex(el),
             align: (st.align as any) || 'center',
-            valign: (st.valign as any) || 'middle',
+            valign: (st.valign as any) || effectiveTextValign(el as SlideElement, st),
             fontFace: st.fontFace || 'Calibri',
             charSpacing: st.charSpacing,
             margin: marginOf(st),
@@ -338,14 +339,14 @@ export async function POST(req: NextRequest) {
       } else {
         // text
         if (el.content) {
-          s.addText(el.content, {
+          s.addText(displayTextContent(el.content), {
             x: el.x, y: el.y, w: el.w, h: el.h,
             fontSize: st.fontSize || 12,
             bold: st.bold,
             italic: st.italic,
             color: elementTextHex(el),
             align: (st.align as any) || 'left',
-            valign: (st.valign as any) || 'middle',
+            valign: (st.valign as any) || effectiveTextValign(el as SlideElement, st),
             fontFace: st.fontFace || 'Calibri',
             charSpacing: st.charSpacing,
             // Keep a text-row background (e.g. zebra striping) in the export.

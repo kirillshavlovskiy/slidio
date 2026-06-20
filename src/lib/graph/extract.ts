@@ -1,8 +1,10 @@
 import Anthropic from '@anthropic-ai/sdk'
+import { agentModel } from '@/lib/agent/models'
 import type { ExtractedItem } from './validate'
 
 const client = new Anthropic()
-const MODEL = process.env.ANTHROPIC_CHEAP_MODEL || 'claude-haiku-4-5'
+
+const MODEL = agentModel()
 export const BATCH_SIZE = Math.max(1, Number(process.env.GRAPH_EXTRACT_BATCH_SIZE) || 2)
 export const BATCH_DELAY_MS = Math.max(0, Number(process.env.GRAPH_EXTRACT_DELAY_MS) || 6500)
 const MAX_OUTPUT_TOKENS = 1024

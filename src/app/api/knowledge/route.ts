@@ -1,8 +1,40 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { auth } from '@/lib/auth'
 import { prisma } from '@/lib/prisma'
-import { accessibleHubIds, canAccessKnowledgeLayer, getHubRole, roleAtLeast } from '@/lib/hubAccess'
+import { accessibleHubIds, canAccessKnowledgeLayer, getHubRole, canModerateKnowledge } from '@/lib/hubAccess'
+import { actorDisplayName } from '@/lib/actorInfo'
 import { clampTextLayerContent, isKbTextLayerType, TEXT_LAYER_MAX_CHARS } from '@/lib/knowledge'
+
+const layerUserSelect = { select: { name: true, email: true, image: true } } as const
+
+function mapLayer(layer: {
+  id: string
+  userId: string
+  branchId: string | null
+  type: string
+  name: string
+  content: string
+  enabled: boolean
+  source: string | null
+  createdAt: Date
+  updatedAt: Date
+  user?: { name: string | null; email: string | null; image: string | null }
+}) {
+  return {
+    id: layer.id,
+    userId: layer.userId,
+    branchId: layer.branchId,
+    type: layer.type,
+    name: layer.name,
+    content: layer.content,
+    enabled: layer.enabled,
+    source: layer.source,
+    updatedByName: layer.user ? actorDisplayName(layer.user.name, layer.user.email) : undefined,
+    updatedByImage: layer.user?.image ?? null,
+    createdAt: new Date(layer.createdAt).getTime(),
+    updatedAt: new Date(layer.updatedAt).getTime(),
+  }
+}
 
 export async function GET(req: NextRequest) {
   const session = await auth()
@@ -15,14 +47,9 @@ export async function GET(req: NextRequest) {
     const layers = await prisma.knowledgeLayer.findMany({
       where: { branchId },
       orderBy: { createdAt: 'asc' },
+      include: { user: layerUserSelect },
     })
-    return NextResponse.json(
-      layers.map(layer => ({
-        ...layer,
-        createdAt: new Date(layer.createdAt).getTime(),
-        updatedAt: new Date(layer.updatedAt).getTime(),
-      }))
-    )
+    return NextResponse.json(layers.map(mapLayer))
   }
 
   const hubIds = await accessibleHubIds(session.user.id)
@@ -31,14 +58,9 @@ export async function GET(req: NextRequest) {
       OR: [{ userId: session.user.id, branchId: null }, { branchId: { in: hubIds } }],
     },
     orderBy: { createdAt: 'asc' },
+    include: { user: layerUserSelect },
   })
-  return NextResponse.json(
-    layers.map(layer => ({
-      ...layer,
-      createdAt: new Date(layer.createdAt).getTime(),
-      updatedAt: new Date(layer.updatedAt).getTime(),
-    }))
-  )
+  return NextResponse.json(layers.map(mapLayer))
 }
 
 export async function POST(req: NextRequest) {
@@ -48,8 +70,8 @@ export async function POST(req: NextRequest) {
 
   if (branchId) {
     const role = await getHubRole(session.user.id, branchId)
-    if (!roleAtLeast(role, 'editor')) {
-      return NextResponse.json({ error: 'Read-only: you are a viewer on this hub' }, { status: 403 })
+    if (!canModerateKnowledge(role)) {
+      return NextResponse.json({ error: 'Read-only: you cannot edit knowledge on this hub' }, { status: 403 })
     }
   }
 
@@ -77,12 +99,9 @@ export async function POST(req: NextRequest) {
       enabled: enabled ?? true,
       source: layerSource,
     },
+    include: { user: layerUserSelect },
   })
-  return NextResponse.json({
-    ...layer,
-    createdAt: new Date(layer.createdAt).getTime(),
-    updatedAt: new Date(layer.updatedAt).getTime(),
-  })
+  return NextResponse.json(mapLayer(layer))
 }
 
 export async function PATCH(req: NextRequest) {
@@ -96,7 +115,7 @@ export async function PATCH(req: NextRequest) {
   const access = await canAccessKnowledgeLayer(session.user.id, existing)
   if (!access.ok) return NextResponse.json({ error: 'Not found' }, { status: 404 })
   if (access.readOnly) {
-    return NextResponse.json({ error: 'Read-only: you are a viewer on this hub' }, { status: 403 })
+    return NextResponse.json({ error: 'Read-only: you cannot edit knowledge on this hub' }, { status: 403 })
   }
 
   const nextType = type !== undefined ? type : existing.type
@@ -129,14 +148,12 @@ export async function PATCH(req: NextRequest) {
         : {}),
       ...(enabled !== undefined ? { enabled } : {}),
       ...(source !== undefined ? { source } : {}),
+      userId: session.user.id,
       updatedAt: new Date(),
     },
+    include: { user: layerUserSelect },
   })
-  return NextResponse.json({
-    ...layer,
-    createdAt: new Date(layer.createdAt).getTime(),
-    updatedAt: new Date(layer.updatedAt).getTime(),
-  })
+  return NextResponse.json(mapLayer(layer))
 }
 
 export async function DELETE(req: NextRequest) {
@@ -150,7 +167,7 @@ export async function DELETE(req: NextRequest) {
   const access = await canAccessKnowledgeLayer(session.user.id, existing)
   if (!access.ok) return NextResponse.json({ error: 'Not found' }, { status: 404 })
   if (access.readOnly) {
-    return NextResponse.json({ error: 'Read-only: you are a viewer on this hub' }, { status: 403 })
+    return NextResponse.json({ error: 'Read-only: you cannot edit knowledge on this hub' }, { status: 403 })
   }
 
   await prisma.knowledgeLayer.delete({ where: { id } })

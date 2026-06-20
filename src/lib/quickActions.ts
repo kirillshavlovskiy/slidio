@@ -196,14 +196,17 @@ export const QUICK_ACTIONS: QuickAction[] = [
       const scopeTag = formatSlideScopeTag(ctx, targetIds)
       const sel = selectedElements(ctx)
       const layoutRules =
-        `Fix ALL layout problems: overlapping elements (especially icon↔text), uneven gaps between siblings, ` +
-        `misalignment, inconsistent margins, and anything overflowing the slide bounds. ` +
+        `Fix ALL layout problems: overlapping elements (especially text↔text and icon↔text), text clipped inside boxes ` +
+        `(fontSize larger than the box height), uneven gaps between siblings, misalignment, inconsistent margins, ` +
+        `and anything overflowing the slide bounds. ` +
+        `When text blocks overlap: separate their boxes (move/resize x, y, w, h) so they no longer intersect. ` +
+        `When text overflows or clips inside a box: reduce style.fontSize and/or increase h, lineHeight, or vertical padding. ` +
         `Snap to a clean grid, balance outer margins, and equalize spacing where elements are grouped. ` +
         `When multiple slides are in scope: read them all first, then align title/header icons to the SAME x and y ` +
         `across those slides (shared icon column) and keep icon↔text gaps consistent. ` +
-        `Keep ALL content and styling — only adjust position, size, and alignment (x, y, w, h). ` +
-        `Do NOT change fontSize or copy to “fill” cells unless geometry alone cannot fix overflow. ` +
-        `Render each affected slide to verify nothing overlaps and the layout looks even.`
+        `Keep ALL copy and colors — adjust position, size, alignment, and fontSize only when needed to fix overlap or clipping. ` +
+        `Do NOT bump fontSize to fill empty cells (text-underfill) unless geometry alone cannot fix overflow. ` +
+        `Render each affected slide to verify nothing overlaps, text is not clipped, and the layout looks even.`
       if (targetIds.length === 1 && sel.length >= 2) {
         const tags = sel.map(elementTag).join('; ')
         return (

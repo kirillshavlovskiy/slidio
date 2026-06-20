@@ -29,10 +29,7 @@ function coerceEffort(e: unknown, fallback: Effort): Effort {
 }
 
 /**
- * Reasoning config per effort. IMPORTANT: the cheap model (Haiku 4.5) does NOT
- * support "adaptive" thinking — only "disabled"/"enabled" — so low/medium (which
- * run on Haiku via modelFor) must use a deterministic budget. Adaptive thinking +
- * the output_config effort knob are reserved for high/xhigh/max (Sonnet).
+ * Reasoning config per effort — always uses the single agent model (Sonnet or gpt-4.1-mini).
  */
 function reasoningFor(effort: Effort): {
   thinking: Anthropic.MessageCreateParams['thinking']
@@ -447,12 +444,7 @@ export async function POST(req: NextRequest) {
   const lastUserInstruction =
     [...(messages as ConversationMessage[])].reverse().find(m => m.role === 'user')?.content ?? ''
 
-  // Haiku (the cheap single-shot model) is unreliable at chart editing. When a chart
-  // is in scope, use the SMART model (Sonnet) — but with BOUNDED thinking, not the
-  // adaptive/high thinking that effort=high would trigger: adaptive reasoning eats the
-  // entire output budget and truncates the chart-patch JSON mid-string (the "no
-  // progress / nothing applied" failure). We pair this with an expanded output budget
-  // (below) so the full chart spec fits.
+  // Charts need bounded thinking + expanded output budget so chart-patch JSON is not truncated.
   const scopeHasChart = scopeSlideList.some(
     s => Array.isArray(s.elements) && s.elements.some(e => e?.type === 'chart')
   )
