@@ -112,7 +112,7 @@ import {
 } from '@/lib/commentPins'
 import { formatValidationForAgent, formatValidationForUser } from '@/lib/agent/review'
 import type { SemanticEditPlan, ValidationResult } from '@/lib/agent/types'
-import { summarizeDeckChanges } from '@/lib/versionDiff'
+import { summarizeDeckChanges, buildVersionHistoryContext } from '@/lib/versionDiff'
 import { fontsUsedOnSlides } from '@/lib/fonts'
 import {
   applyChangesToSlides,
@@ -131,6 +131,10 @@ import {
 } from '@/lib/preview'
 import { consumeAgentSdkStream } from '@/lib/agent/claudeSdk/consumeStream'
 import type { DeckAgentStreamEvent } from '@/lib/agent/claudeSdk/types'
+import { consumePlannerStream } from '@/lib/agent/planner/consumeStream'
+import type { PlannerStreamEvent } from '@/lib/agent/planner/types'
+import type { DeckPlan } from '@/lib/agent/planner/types'
+import { buildContentAgentInstruction, buildLayoutAgentInstruction } from '@/lib/agent/planner/plannerPrompt'
 import {
   changesAddSlides,
   compressAgentIntro,
@@ -466,6 +470,13 @@ export default function Home() {
   const agentStopRef = useRef(false)
   const agentProviderRef = useRef<string | null>(null)
   const isAgentRunningRef = useRef(false)
+  // ── Multi-agent planner ──────────────────────────────────────────────────────
+  const plannerSessionIdRef = useRef<string | null>(null)
+  const plannerKnowledgeContextRef = useRef<string>('')
+  const plannerOriginalInstructionRef = useRef<string>('')
+  // SDK executor session resume — store the last session ID so "Continue" can
+  // resume exactly where the SDK agent left off instead of starting fresh.
+  const sdkSessionIdRef = useRef<string | null>(null)
   const agentAbortRef = useRef<AbortController | null>(null)
   // In-flight single-shot (/api/edit) request, so the composer Stop button can
   // abort a one-shot generation the same way it stops an agent run.
@@ -532,6 +543,19 @@ export default function Home() {
       cancelled = true
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Fetch agent provider once on mount so the depth gate (which runs before the
+  // lazy per-call fetch) already knows whether SDK mode is active.
+  useEffect(() => {
+    fetch('/api/edit/agent/config')
+      .then(r => r.json())
+      .then((cfg: { provider?: string }) => {
+        agentProviderRef.current = cfg.provider ?? 'anthropic'
+      })
+      .catch(() => {
+        agentProviderRef.current = 'anthropic'
+      })
   }, [])
 
   // ── Version Control ────────────────────────────────────────────────────────────
@@ -3057,7 +3081,15 @@ export default function Home() {
             return text
           })()
 
-      if (!isAsk && isNewDeckBuildRequest(text) && !parsePresentationScope(text)) {
+      // Depth gate: only for non-SDK providers. SDK mode uses the planner's ask_user.
+      // Also skip when provider is not yet known (null) — planner will handle scope.
+      if (
+        !isAsk &&
+        agentProviderRef.current !== null &&
+        agentProviderRef.current !== 'claude-agent-sdk' &&
+        isNewDeckBuildRequest(text) &&
+        !parsePresentationScope(text)
+      ) {
         setPendingAgentInstruction(agentInstruction)
         setDisplay(prev => [
           ...prev,
@@ -3260,6 +3292,8 @@ export default function Home() {
         answerOnly?: boolean
         /** User-visible message text (without agent directives). */
         displayText?: string
+        /** Phase 2+: instruction already has plan + knowledge embedded; skip planner routing and knowledge pipeline. */
+        skipPlanner?: boolean
       }
     ) => {
       // Re-entrancy guard: only block on the agent's OWN in-flight flag. Do NOT
@@ -3281,8 +3315,15 @@ export default function Home() {
 
       // Central gate: every agent entry (router, self-escalation, quick actions) must
       // pick presentation depth before building a new deck from source material.
+      // Depth gate: only prompt for scope in non-SDK mode. In SDK mode the planner
+      // agent asks structured questions (including scope) via its own ask_user tool.
+      // Guard: skip when provider is not yet known (null) — the SDK branch below
+      // will fetch it and the planner will handle scope via ask_user.
       if (
         !isContinuation &&
+        !opts?.skipPlanner &&
+        agentProviderRef.current !== null &&
+        agentProviderRef.current !== 'claude-agent-sdk' &&
         isNewDeckBuildRequest(agentInstruction) &&
         !parsePresentationScope(agentInstruction)
       ) {
@@ -3599,7 +3640,7 @@ export default function Home() {
           ? incompleteAgentContextRef.current.originalInstruction
           : agentInstruction
       const skipKnowledgePipeline =
-        isGeometryEditRequest(planInstruction) || answerOnly
+        isGeometryEditRequest(planInstruction) || answerOnly || !!opts?.skipPlanner
       const layerCtx = buildKnowledgeContext(knowledgeLayers, decisions, activeSlideId, {
         instruction: planInstruction,
         slideText: activeSlideText(slidesRef.current, activeSlideId),
@@ -3641,9 +3682,18 @@ export default function Home() {
         activeSlideId,
         { instruction: planInstruction }
       )
+      // Version history: only for targeted edits and continuations — skip for fresh
+      // deck builds (history irrelevant), geometry passes, and Phase 2/3 (skipPlanner).
+      const versionHistoryCtx =
+        !skipKnowledgePipeline && !deckBuildWithScope
+          ? buildVersionHistoryContext(versionsRef.current, currentBranchIdRef.current)
+          : ''
       const knowledgeContext = skipKnowledgePipeline
         ? commentsCtx
-        : mergeKnowledgeContexts(mergeKnowledgeContexts(layerCtx, graphCtx), commentsCtx)
+        : mergeKnowledgeContexts(
+            mergeKnowledgeContexts(mergeKnowledgeContexts(layerCtx, graphCtx), commentsCtx),
+            versionHistoryCtx
+          )
       const templateKnowledge = fastLayoutRun ? '' : mergeTemplatesKnowledge(templates)
       const mediaCtx = fastLayoutRun ? '' : buildMediaContext(mediaManifest(collectAllAssets()))
 
@@ -3992,6 +4042,102 @@ export default function Home() {
 
           if (agentProviderRef.current === 'claude-agent-sdk') {
             useLegacyAgentLoop = false
+
+            // ── Phase 1: Planner ──────────────────────────────────────────────
+            if (isNewDeckBuildRequest(agentInstruction) && !isContinuation && !opts?.skipPlanner) {
+              addStep({ kind: 'plan', label: 'Deck Planner — analysing request and context' })
+              plannerKnowledgeContextRef.current = knowledgeContext
+              plannerOriginalInstructionRef.current = agentInstruction
+              // Always start fresh — sessions don't survive across HTTP requests (persistSession: false).
+              plannerSessionIdRef.current = null
+
+              if (!agentStopRef.current) {
+                const ac = new AbortController()
+                agentAbortRef.current = ac
+                const plannerState: {
+                  askUser: { intro?: string; questions: ClarificationQuestion[] } | null
+                } = { askUser: null }
+
+                try {
+                  const res = await fetch('/api/edit/agent/planner', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                      userInstruction: agentInstruction,
+                      knowledgeContext,
+                      currentDeckSlideCount: slidesRef.current.length,
+                      currentDeckTitles: slidesRef.current.map(s =>
+                        (s.elements.find(e => e.type === 'text' && e.content)?.content ?? '').slice(0, 60)
+                      ),
+                      effort: agentEffort,
+                    }),
+                    signal: ac.signal,
+                  })
+
+                  await consumePlannerStream(res, (event: PlannerStreamEvent) => {
+                    if (event.type === 'step') {
+                      const processSection =
+                        event.kind === 'thinking' || event.kind === 'note'
+                          ? ('reasoning' as const)
+                          : event.kind === 'reading'
+                            ? ('activity' as const)
+                            : undefined
+                      addStep({
+                        kind: event.kind === 'reading' ? 'read' : event.kind,
+                        label: event.label,
+                        processSection,
+                      })
+                      return
+                    }
+                    if (event.type === 'ask_user') {
+                      plannerState.askUser = { intro: event.intro, questions: event.questions }
+                      return
+                    }
+                    if (event.type === 'plan_ready') {
+                      setDisplay(prev => [...prev, { role: 'assistant', deckPlan: event.plan }])
+                      return
+                    }
+                    if (event.type === 'session_init') {
+                      plannerSessionIdRef.current = event.sessionId
+                      return
+                    }
+                    if (event.type === 'error') {
+                      addStep({ kind: 'error', label: event.message })
+                      return
+                    }
+                  })
+                } catch (err) {
+                  const aborted =
+                    agentStopRef.current ||
+                    (err instanceof DOMException && err.name === 'AbortError') ||
+                    (err as { name?: string })?.name === 'AbortError'
+                  if (aborted) {
+                    addStep({ kind: 'note', label: 'Stopped by user.' })
+                  } else {
+                    const msg = err instanceof Error ? err.message : 'Planner error'
+                    addStep({ kind: 'error', label: msg })
+                  }
+                }
+
+                if (plannerState.askUser) {
+                  const payload = plannerState.askUser
+                  setDisplay(prev => [
+                    ...prev,
+                    {
+                      role: 'assistant',
+                      response: {
+                        type: 'clarification',
+                        question: payload.intro ?? 'A few questions before I start planning:',
+                        questions: payload.questions,
+                      },
+                    },
+                  ])
+                  setPendingAgentInstruction(agentInstruction)
+                }
+              }
+
+            // ── Phase 2+: SDK executor (direct edit or approved plan) ─────────
+            } else {
             addStep({ kind: 'plan', label: 'Claude Agent SDK — running autonomous edit loop' })
 
             if (agentStopRef.current) {
@@ -4014,13 +4160,22 @@ export default function Home() {
                     deckBuild: deckBuildWithScope,
                     geometryOnly: geometryOnlyRun || fastLayoutRun,
                     layoutAudit: layoutAuditRun,
+                    resume: isContinuation ? (sdkSessionIdRef.current ?? undefined) : undefined,
                   }),
                   signal: ac.signal,
                 })
 
                 await consumeAgentSdkStream(res, (event: DeckAgentStreamEvent) => {
                   if (event.type === 'step') {
-                    addStep({ kind: event.kind, label: event.label })
+                    // Group thinking/note into the collapsible AgentProcessPanel;
+                    // read/render go into its activity section; apply/done/plan stay standalone.
+                    const processSection =
+                      event.kind === 'thinking' || event.kind === 'note'
+                        ? ('reasoning' as const)
+                        : event.kind === 'read' || event.kind === 'render'
+                          ? ('activity' as const)
+                          : undefined
+                    addStep({ kind: event.kind, label: event.label, processSection })
                     return
                   }
                   if (event.type === 'error') {
@@ -4031,7 +4186,12 @@ export default function Home() {
                     sdkState.askUser = { intro: event.intro, questions: event.questions }
                     return
                   }
+                  if (event.type === 'phase_start') {
+                    addStep({ kind: 'plan', label: event.label })
+                    return
+                  }
                   if (event.type === 'result') {
+                    if (event.sessionId) sdkSessionIdRef.current = event.sessionId
                     slidesRef.current = event.slides
                     setSlides(event.slides)
                     runSummary = event.summary
@@ -4106,6 +4266,7 @@ export default function Home() {
                   `[asked the user]${payload.intro ? ` ${payload.intro}` : ''}${asked ? ` — ${asked}` : ''}`.trim()
               }
             }
+            } // end SDK executor else-branch
           }
         }
 
@@ -5192,6 +5353,63 @@ export default function Home() {
     runAgentRef.current = runAgent
   }, [runAgent])
 
+  // ── Multi-agent plan callbacks ─────────────────────────────────────────────
+  // Called when the user clicks "Approve & build" on a DeckPlanBubble.
+  const handleApprovePlan = useCallback(
+    async (plan: DeckPlan) => {
+      plannerSessionIdRef.current = null
+      sdkSessionIdRef.current = null // fresh executor session for this build
+      setDisplay(prev => [
+        ...prev,
+        {
+          role: 'assistant' as const,
+          agentStep: {
+            kind: 'plan' as const,
+            label: `Phase 2 — Building "${plan.title}" · ${plan.slides.length} slides · ${plan.scope}`,
+          },
+        },
+      ])
+      const instruction = buildContentAgentInstruction(plan, plannerKnowledgeContextRef.current)
+      await runAgent(instruction, { skipPlanner: true })
+      // Offer Phase 3 layout pass once content is built.
+      const builtCount = slidesRef.current.length
+      if (builtCount > 0) {
+        setDisplay(prev => [
+          ...prev,
+          { role: 'assistant' as const, layoutOffer: { slideCount: builtCount } },
+        ])
+      }
+    },
+    [runAgent]
+  )
+
+  // Called when the user accepts the Phase 3 layout-pass offer.
+  const handleRunLayoutPass = useCallback(() => {
+    const slideIds = slidesRef.current.map(s => s.id)
+    if (!slideIds.length) return
+    setDisplay(prev => [
+      ...prev,
+      {
+        role: 'assistant' as const,
+        agentStep: {
+          kind: 'plan' as const,
+          label: `Phase 3 — Layout refinement · ${slideIds.length} slides`,
+        },
+      },
+    ])
+    void runAgent(buildLayoutAgentInstruction(slideIds), { skipPlanner: true })
+  }, [runAgent])
+
+  // Called when the user sends revision feedback on a DeckPlanBubble.
+  const handleRevisePlan = useCallback(
+    (_plan: DeckPlan, feedback: string) => {
+      plannerSessionIdRef.current = null // start a fresh planner session for the revision
+      const base = plannerOriginalInstructionRef.current
+      void runAgent(base ? `${base} — revise: ${feedback}` : feedback, {})
+    },
+    [runAgent]
+  )
+
   // Cancel an in-flight agent run: set the loop's stop flag AND abort the current
   // network request so it stops promptly (between or during a turn).
   const stopAgent = useCallback(() => {
@@ -5451,6 +5669,35 @@ export default function Home() {
   // it with the answers; otherwise (single-shot clarification) send them normally.
   const handleSubmitAnswers = useCallback(
     (text: string) => {
+      // ── Planner resume: planner paused on ask_user ─────────────────────────
+      // SDK sessions don't survive across HTTP requests (persistSession: false),
+      // so we rerun the planner from scratch with the original request + answers
+      // embedded — the model sees the answers and skips ask_user, goes to submit_plan.
+      if (pendingAgentInstruction && plannerSessionIdRef.current) {
+        const orig = pendingAgentInstruction
+        setPendingAgentInstruction(null)
+        plannerSessionIdRef.current = null  // fresh run, no stale session
+
+        const checkpoint = JSON.parse(JSON.stringify(slides)) as SlideData[]
+        const histLen = conversationHistory.length
+        setDisplay(prev => [
+          ...prev,
+          { role: 'user', text, checkpoint, historyLength: histLen },
+        ])
+        setConversationHistory(prev => [
+          ...prev,
+          { role: 'user', content: text, historyLength: prev.length },
+        ])
+
+        const enriched =
+          `${orig}\n\n[User answered the clarification questions:]\n${text}\n\n` +
+          `The user has already answered scope/audience/tone above. Do NOT call ask_user again — proceed directly to submit_plan.`
+
+        runAgentRef.current?.(enriched, { skipUserEcho: true, effort: 'medium' })
+        return
+      }
+
+      // ── Depth / scope answer or executor ask_user resume ───────────────────
       if (pendingAgentInstruction) {
         const orig = pendingAgentInstruction
         setPendingAgentInstruction(null)
@@ -7285,6 +7532,9 @@ Return ONE complete "patch" (changes relative to the ORIGINAL slide data provide
             onApproveProposal={applyChanges}
             onDeclineProposal={discardChanges}
             onOpenProposal={() => setIsPreviewOpen(true)}
+            onApprovePlan={handleApprovePlan}
+            onRevisePlan={handleRevisePlan}
+            onRunLayoutPass={handleRunLayoutPass}
             onCollapse={() => setRightCollapsed(true)}
             peeking={rightCollapsed && rightPeek}
             onPin={() => {

@@ -24,6 +24,8 @@ import {
   PanelRightClose,
   Pin,
   Eye,
+  Layers,
+  MessageSquare,
 } from 'lucide-react'
 import {
   Change,
@@ -32,6 +34,7 @@ import {
   ClarificationQuestion,
   SlideData,
 } from '@/lib/types'
+import type { DeckPlan } from '@/lib/agent/planner/types'
 import { applyChangesToSlides, getDeletedSlideIds } from '@/lib/preview'
 import {
   buildStepLimitError,
@@ -66,6 +69,12 @@ export interface DisplayMessage {
   }
   /** Clean prose answer for Q&A (no agent step tags). */
   assistantAnswer?: string
+  /** Phase 1 planner output — renders DeckPlanBubble with Approve / Revise. */
+  deckPlan?: DeckPlan
+  /** Phase 2 completion offer — renders PhaseCompleteBubble with layout-pass CTA. */
+  layoutOffer?: { slideCount: number }
+  /** Which multi-agent pipeline phase this bubble belongs to. */
+  pipelinePhase?: 'plan' | 'content' | 'layout'
   // Cursor-style checkpoint: deck snapshot taken right before this user message
   // was sent, so we can revert everything this message (and later) changed.
   checkpoint?: SlideData[]
@@ -104,6 +113,13 @@ interface Props {
   onApproveProposal?: () => void
   onDeclineProposal?: () => void
   onOpenProposal?: () => void          // open the full preview overlay
+  // ── Multi-agent pipeline ──
+  // Called when the user approves a Phase 1 plan; triggers content build.
+  onApprovePlan?: (plan: DeckPlan) => void
+  // Called when the user wants to revise the plan before building.
+  onRevisePlan?: (plan: DeckPlan, feedback: string) => void
+  // Called when the user accepts the Phase 3 layout-pass offer.
+  onRunLayoutPass?: () => void
   // Collapse/hide the chat sidebar (toggle lives in the header).
   onCollapse?: () => void
   // True while the collapsed panel is being hover-previewed (peeking). In this
@@ -163,6 +179,9 @@ export default function ChatPanel({
   onApproveProposal,
   onDeclineProposal,
   onOpenProposal,
+  onApprovePlan,
+  onRevisePlan,
+  onRunLayoutPass,
   onCollapse,
   peeking,
   onPin,
@@ -334,6 +353,21 @@ export default function ChatPanel({
                     onResend={
                       msg.text?.trim() && onResend && canEdit ? () => onResend(i) : undefined
                     }
+                  />
+                ) : msg.deckPlan ? (
+                  <DeckPlanBubble
+                    plan={msg.deckPlan}
+                    onApprove={onApprovePlan ? () => onApprovePlan(msg.deckPlan!) : undefined}
+                    onRevise={
+                      onRevisePlan
+                        ? (feedback: string) => onRevisePlan(msg.deckPlan!, feedback)
+                        : undefined
+                    }
+                  />
+                ) : msg.layoutOffer ? (
+                  <PhaseCompleteBubble
+                    slideCount={msg.layoutOffer.slideCount}
+                    onRunLayoutPass={onRunLayoutPass}
                   />
                 ) : msg.assistantAnswer ? (
                   <AssistantAnswerBubble text={msg.assistantAnswer} />
@@ -1148,6 +1182,226 @@ function ClarificationForm({
             ? `Send answers (${answeredCount}/${questions.length})`
             : 'Send answers'}
       </button>
+    </div>
+  )
+}
+
+// ── Phase 1 Planner output ─────────────────────────────────────────────────────
+// Shows the structured deck plan produced by the Planner agent before any slides
+// are built. The user can approve it (triggers Phase 2 content build) or give
+// revision feedback (replanner session).
+
+const LAYOUT_ICON: Record<string, string> = {
+  cover: '🎯',
+  'section-header': '📌',
+  bullets: '📋',
+  'two-column': '⬜⬜',
+  chart: '📊',
+  'image-text': '🖼',
+  quote: '💬',
+  timeline: '📅',
+  grid: '⊞',
+  closing: '✔',
+}
+
+function PhaseCompleteBubble({
+  slideCount,
+  onRunLayoutPass,
+}: {
+  slideCount: number
+  onRunLayoutPass?: () => void
+}) {
+  const [triggered, setTriggered] = useState(false)
+
+  const handle = () => {
+    if (triggered) return
+    setTriggered(true)
+    onRunLayoutPass?.()
+  }
+
+  return (
+    <div className="flex justify-start">
+      <div className="max-w-[96%] w-full bg-[#0d1b2a] border border-[#2dd4bf]/30 rounded-lg overflow-hidden">
+        <div className="flex items-center gap-2 px-3 py-2 border-b border-[#2dd4bf]/15 bg-[#0a1f2e]">
+          <Check className="w-3.5 h-3.5 text-[#2dd4bf] flex-shrink-0" />
+          <span className="text-[10px] font-bold tracking-wider text-[#2dd4bf]">PHASE 2 COMPLETE</span>
+          <span className="text-[10px] text-[#64748b] ml-auto">{slideCount} slides built</span>
+        </div>
+        <div className="px-3 py-2.5 flex items-center justify-between gap-3">
+          <p className="text-xs text-[#94a3b8] leading-snug">
+            Content is done. A layout pass fixes spacing, overlaps, and visual balance across all slides.
+          </p>
+          <button
+            onClick={handle}
+            disabled={triggered}
+            className={`flex-shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-semibold transition-all ${
+              triggered
+                ? 'bg-[#1e3a5f] text-[#64748b] cursor-default'
+                : 'bg-[#2dd4bf]/15 text-[#2dd4bf] border border-[#2dd4bf]/40 hover:bg-[#2dd4bf]/25'
+            }`}
+          >
+            <Sparkles className="w-3 h-3" />
+            {triggered ? 'Running…' : 'Refine layout'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function DeckPlanBubble({
+  plan,
+  onApprove,
+  onRevise,
+}: {
+  plan: DeckPlan
+  onApprove?: () => void
+  onRevise?: (feedback: string) => void
+}) {
+  const [reviseMode, setReviseMode] = useState(false)
+  const [feedback, setFeedback] = useState('')
+  const [approved, setApproved] = useState(false)
+
+  const handleApprove = () => {
+    setApproved(true)
+    onApprove?.()
+  }
+
+  const handleRevise = () => {
+    if (!feedback.trim()) return
+    onRevise?.(feedback.trim())
+    setReviseMode(false)
+    setFeedback('')
+  }
+
+  return (
+    <div className="flex justify-start">
+      <div className="max-w-[96%] w-full bg-[#0d1b2a] border border-[#818cf8]/40 rounded-lg overflow-hidden">
+        {/* Header */}
+        <div className="flex items-center gap-2 px-3 py-2 border-b border-[#818cf8]/20 bg-[#13243a]">
+          <Layers className="w-3.5 h-3.5 text-[#818cf8] flex-shrink-0" />
+          <span className="text-[10px] font-bold tracking-wider text-[#818cf8]">DECK PLAN</span>
+          <span className="text-[10px] text-[#64748b] ml-auto">
+            {plan.slides.length} slides · {plan.scope} · {plan.tone}
+          </span>
+        </div>
+
+        <div className="px-3 py-2.5 space-y-2">
+          {/* Title + one-liner */}
+          <div>
+            <p className="text-sm font-semibold text-white leading-snug">{plan.title}</p>
+            <p className="text-xs text-[#94a3b8] mt-0.5 leading-snug">{plan.oneLiner}</p>
+          </div>
+
+          {/* Audience + tone */}
+          <div className="flex flex-wrap gap-1.5">
+            {[
+              { label: plan.audience, color: 'text-[#2dd4bf] border-[#2dd4bf]/30 bg-[#2dd4bf]/10' },
+              { label: plan.tone, color: 'text-[#a78bfa] border-[#a78bfa]/30 bg-[#a78bfa]/10' },
+            ].map(({ label, color }) => (
+              <span
+                key={label}
+                className={`text-[10px] font-medium px-1.5 py-0.5 rounded border ${color}`}
+              >
+                {label}
+              </span>
+            ))}
+          </div>
+
+          {/* Slide outline */}
+          <div className="space-y-0.5">
+            {plan.slides.map(slide => (
+              <div
+                key={slide.index}
+                className="flex items-start gap-2 px-2 py-1.5 rounded bg-[#112236] text-xs"
+              >
+                <span className="text-[#64748b] w-5 flex-shrink-0 font-mono text-[10px] mt-px">
+                  {slide.index}
+                </span>
+                <span className="flex-shrink-0 mt-px text-[11px]">
+                  {LAYOUT_ICON[slide.layout] ?? '·'}
+                </span>
+                <div className="min-w-0">
+                  <p className="text-white font-medium leading-snug truncate">{slide.title}</p>
+                  <p className="text-[#64748b] text-[10px] leading-snug mt-0.5 line-clamp-2">
+                    {slide.contentBrief}
+                  </p>
+                </div>
+                <span className="ml-auto text-[9px] text-[#475569] flex-shrink-0 mt-px bg-[#1e3a5f] px-1 py-0.5 rounded">
+                  {slide.layout}
+                </span>
+              </div>
+            ))}
+          </div>
+
+          {/* Knowledge gaps warning */}
+          {plan.knowledgeGaps && plan.knowledgeGaps.length > 0 && (
+            <div className="rounded border border-amber-500/30 bg-amber-500/5 px-2.5 py-1.5">
+              <p className="text-[10px] font-bold text-amber-400 mb-1">DATA GAPS — provide before building</p>
+              <ul className="space-y-0.5">
+                {plan.knowledgeGaps.map((gap, i) => (
+                  <li key={i} className="text-[10px] text-amber-200/80">· {gap}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {/* Actions */}
+          {!approved ? (
+            reviseMode ? (
+              <div className="space-y-2">
+                <textarea
+                  value={feedback}
+                  onChange={e => setFeedback(e.target.value)}
+                  placeholder="Describe what to change in the plan…"
+                  rows={2}
+                  className="w-full rounded border border-[#1e3a5f] bg-[#112236] px-2.5 py-1.5 text-xs text-white
+                             placeholder:text-[#475569] focus:border-[#818cf8] focus:outline-none resize-none"
+                />
+                <div className="flex gap-2">
+                  <button
+                    onClick={handleRevise}
+                    disabled={!feedback.trim()}
+                    className="flex-1 py-1.5 text-xs font-semibold rounded bg-[#818cf8] text-[#0d1b2a]
+                               hover:bg-[#a5b4fc] disabled:opacity-40 transition-colors"
+                  >
+                    Send revision
+                  </button>
+                  <button
+                    onClick={() => { setReviseMode(false); setFeedback('') }}
+                    className="px-3 py-1.5 text-xs rounded border border-[#1e3a5f] text-[#94a3b8]
+                               hover:border-[#475569] transition-colors"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setReviseMode(true)}
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded border border-[#1e3a5f]
+                             text-[#94a3b8] hover:border-[#818cf8] hover:text-[#818cf8] transition-colors"
+                >
+                  <MessageSquare className="w-3 h-3" /> Revise plan
+                </button>
+                <button
+                  onClick={handleApprove}
+                  className="flex-1 flex items-center justify-center gap-1.5 py-1.5 text-xs font-semibold
+                             rounded bg-[#818cf8] text-[#0d1b2a] hover:bg-[#a5b4fc] transition-colors"
+                >
+                  <Check className="w-3.5 h-3.5" /> Approve & build
+                </button>
+              </div>
+            )
+          ) : (
+            <div className="flex items-center gap-1.5 text-xs text-[#4ade80]">
+              <Check className="w-3.5 h-3.5" />
+              <span>Plan approved — building deck…</span>
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   )
 }

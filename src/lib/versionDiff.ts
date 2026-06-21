@@ -1,4 +1,4 @@
-import type { SlideData, SlideElement } from './types'
+import type { SlideData, SlideElement, SlideVersion } from './types'
 
 /**
  * Git-commit-style diff between two deck snapshots. Used to give every saved
@@ -178,4 +178,51 @@ export function summarizeDeckChanges(before: SlideData[], after: SlideData[]): D
     slides,
     totals: { slides: slides.length, added, updated, removed },
   }
+}
+
+/**
+ * Formats recent version history on the current branch as an agent context block.
+ * Helps the agent understand prior edits and avoid re-doing reverted work.
+ * Returns empty string when there's nothing meaningful to show.
+ */
+export function buildVersionHistoryContext(
+  versions: SlideVersion[],
+  branchId: string,
+  opts?: { limit?: number }
+): string {
+  const MAIN = 'main'
+  const onBranch = versions
+    .filter(v => (v.branchId ?? MAIN) === branchId)
+    .sort((a, b) => b.timestamp - a.timestamp)
+    .slice(0, opts?.limit ?? 8)
+
+  if (onBranch.length === 0) return ''
+
+  const now = Date.now()
+  const ago = (ts: number): string => {
+    const s = Math.floor((now - ts) / 1000)
+    if (s < 60) return `${s}s ago`
+    const m = Math.floor(s / 60)
+    if (m < 60) return `${m}m ago`
+    const h = Math.floor(m / 60)
+    if (h < 24) return `${h}h ago`
+    return `${Math.floor(h / 24)}d ago`
+  }
+
+  const lines = onBranch.map(v => {
+    const time = ago(v.timestamp)
+    const named = v.label ? ` [${v.label}]` : ''
+    const slideNote =
+      v.changedSlideIds.length > 0
+        ? ` · ${v.changedSlideIds.length} slide${v.changedSlideIds.length !== 1 ? 's' : ''} changed`
+        : ''
+    return `• ${time}${named} — ${v.changeLog}${slideNote}`
+  })
+
+  return (
+    `\n=== DECK CHANGE HISTORY (most recent ${onBranch.length}) ===\n` +
+    `Prior edits on this branch — use to avoid re-doing reverted work and to understand what the agent built before.\n\n` +
+    lines.join('\n') +
+    `\n=== END CHANGE HISTORY ===`
+  )
 }
