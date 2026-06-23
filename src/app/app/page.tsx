@@ -15,7 +15,7 @@ import AnnotationLayer, { Stroke } from '@/components/AnnotationLayer'
 import { useFitScale } from '@/hooks/useFitScale'
 import { useCanvasWheelZoom } from '@/hooks/useCanvasWheelZoom'
 import { SLIDE_HEIGHT, SLIDE_WIDTH } from '@/lib/slideDimensions'
-import ChatPanel, { DisplayMessage } from '@/components/ChatPanel'
+import ChatPanel, { DisplayMessage, PhaseTokenInfo } from '@/components/ChatPanel'
 import {
   conversationToDisplay,
   DEFAULT_WELCOME,
@@ -134,7 +134,7 @@ import type { DeckAgentStreamEvent } from '@/lib/agent/claudeSdk/types'
 import { consumePlannerStream } from '@/lib/agent/planner/consumeStream'
 import type { PlannerStreamEvent } from '@/lib/agent/planner/types'
 import type { DeckPlan } from '@/lib/agent/planner/types'
-import { buildContentAgentInstruction, buildLayoutAgentInstruction } from '@/lib/agent/planner/plannerPrompt'
+import { buildContentAgentSystemContext, buildContentAgentUserPrompt, buildLayoutAgentInstruction } from '@/lib/agent/planner/plannerPrompt'
 import {
   changesAddSlides,
   compressAgentIntro,
@@ -149,7 +149,6 @@ import {
   isDeckWideDesignSystemRequest,
   isNewDeckBuildRequest,
   parsePresentationScope,
-  PRESENTATION_DEPTH_QUESTION,
   slimSlideJson,
   wouldExceedScopeSlideLimit,
 } from '@/lib/presentationScope'
@@ -332,6 +331,95 @@ function bumpEffort(e: Effort): Effort {
   return order[Math.min(order.length - 1, order.indexOf(e) + 1)]
 }
 
+/**
+ * Estimate token budget and cost for a pipeline phase before it runs.
+ * Used to show a prediction card that gets updated with actuals when done.
+ *
+ * Sonnet pricing: input $3/M, output $15/M, cache-write $3.75/M, cache-read $0.30/M.
+ * Phase 2 with systemContext caching: static context cached after first turn (90% discount).
+ */
+function estimatePhaseTokens(
+  phase: 'plan' | 'content' | 'layout',
+  slideCount: number,
+  effort: string
+): Pick<PhaseTokenInfo, 'predMin' | 'predMax' | 'predCostMin' | 'predCostMax' | 'predTurnsMin' | 'predTurnsMax'> {
+  const isHigh = effort === 'high' || effort === 'xhigh' || effort === 'max'
+
+  if (phase === 'plan') {
+    // Planner: 3-6 SDK turns (read_context + ask_user + submit_plan).
+    // Observed: planner system prompt ~5k, knowledge ~5-10k, plan JSON ~3k.
+    const base = isHigh ? 1.4 : 1
+    return {
+      predMin: Math.round(20_000 * base),
+      predMax: Math.round(55_000 * base),
+      predCostMin: +(0.05 * base).toFixed(2),
+      predCostMax: +(0.15 * base).toFixed(2),
+      predTurnsMin: 3,
+      predTurnsMax: 6,
+    }
+  }
+
+  if (phase === 'layout') {
+    // Layout pass: ~10-20 SDK turns (get_slides, apply geometry, render, finish).
+    const base = isHigh ? 1.5 : 1
+    return {
+      predMin: Math.round(300_000 * base),
+      predMax: Math.round(600_000 * base),
+      predCostMin: +(0.08 * base).toFixed(2),
+      predCostMax: +(0.20 * base).toFixed(2),
+      predTurnsMin: 8,
+      predTurnsMax: 20,
+    }
+  }
+
+  // Phase 2 (content build) — calibrated from actual 13-slide Sonnet session log.
+  // Phase 2 always runs on Sonnet (deck builds need the heavy model regardless of effort choice).
+  //
+  // Cost structure after large-batch optimisation (≤10 slides → 1 call; 11-15 → 2 calls):
+  //   • Cold start (turns 1-2): 37K system context written twice → $0.278 fixed
+  //   • Per apply_changes batch: triggers a 2-turn cache re-write at the new (larger) prefix size
+  //   • First batch expansion: ~28K new slide JSON appended → $0.21 one-off
+  //   • Second batch (if 11-15 slides): ~20K more → $0.15
+  //   • Stable turns after each expansion: cache_read ~52K × $0.30/M ≈ $0.016/turn
+  //
+  // Sonnet pricing: cache_write $3.75/M, cache_read $0.30/M, output $15/M.
+
+  // Cold start: 37,104 tok system context written twice before cache settles.
+  const systemContextTokens = 37_000
+  const coldStartCost = (systemContextTokens * 2 * 3.75) / 1_000_000  // $0.278
+
+  // New prompt rule: ≤10 slides → 1 batch; 11-15 → 2 batches; 16+ → 3 batches.
+  const batchCount = slideCount <= 10 ? 1 : slideCount <= 15 ? 2 : 3
+  // First batch: largest expansion (system context + first set of slides ~28K new tokens).
+  const firstBatchExpansion = (28_000 * 2 * 3.75) / 1_000_000   // $0.210
+  // Later batches: each appends ~15-20K incremental slide JSON.
+  const laterBatchExpansion = Math.max(0, batchCount - 1) * (17_000 * 2 * 3.75) / 1_000_000
+  const batchExpansionCost = firstBatchExpansion + laterBatchExpansion
+
+  // SDK turns: deck builds need ~1 turn/slide on Sonnet with large batches (fewer roundtrips).
+  const turnsPerSlide = 1.0
+  const turnsMin = Math.max(6, Math.round(slideCount * turnsPerSlide * 0.75))
+  const turnsMax = Math.max(12, Math.round(slideCount * turnsPerSlide * 1.30))
+
+  // Per-turn cost on Sonnet during stable cache_read phase (after expansion settles):
+  //   cache_read ~52K avg × $0.30/M = $0.016, delta write ~2K × $3.75/M = $0.008 → ~$0.024/turn
+  const perTurnCost = 0.024
+
+  // Tokens: dominated by cache reads of the growing cached section.
+  const tokensPerTurn = 52_000
+  const totalMin = Math.round(systemContextTokens * 2 + turnsMin * tokensPerTurn)
+  const totalMax = Math.round(systemContextTokens * 2 + turnsMax * tokensPerTurn * 1.1)
+
+  return {
+    predMin: totalMin,
+    predMax: totalMax,
+    predCostMin: +(coldStartCost + batchExpansionCost + turnsMin * perTurnCost).toFixed(2),
+    predCostMax: +(coldStartCost + batchExpansionCost + turnsMax * perTurnCost * 1.2).toFixed(2),
+    predTurnsMin: turnsMin,
+    predTurnsMax: turnsMax,
+  }
+}
+
 /** A background deck import (PPTX/PDF) shown as a pending card in the portfolio. */
 type ImportJob = { id: string; name: string; status: 'loading' | 'error'; error?: string }
 
@@ -397,6 +485,14 @@ export default function Home() {
           answerOnly?: boolean
           /** User-visible message text (without agent directives). */
           displayText?: string
+          /** Phase 2+: instruction already has plan + knowledge embedded; skip planner routing and knowledge pipeline. */
+          skipPlanner?: boolean
+          /** Phase 2 approved-plan build: start executor with empty slides so old content is replaced, not extended. */
+          clearExisting?: boolean
+          /** Phase 2: plan + knowledge context to place in the system prompt (cached) instead of the user message. */
+          systemContext?: string
+          /** Quick actions that don't need design-system/knowledge docs: skip the expensive knowledge pipeline. */
+          skipKnowledge?: boolean
         }
       ) => void)
     | null
@@ -468,15 +564,25 @@ export default function Home() {
   // Cancellation: a flag the agent loop checks each step, plus the in-flight
   // request's AbortController so a Stop also kills the current network call.
   const agentStopRef = useRef(false)
-  const agentProviderRef = useRef<string | null>(null)
   const isAgentRunningRef = useRef(false)
   // ── Multi-agent planner ──────────────────────────────────────────────────────
   const plannerSessionIdRef = useRef<string | null>(null)
   const plannerKnowledgeContextRef = useRef<string>('')
+  // Cache the last-built knowledge context (design system + docs) so quick actions
+  // can inject the same string cheaply (cache_read ≈ $0.002) instead of re-fetching
+  // from DB (cache_write ≈ $0.086) or skipping entirely.
+  const knowledgeCacheRef = useRef<{ context: string; at: number } | null>(null)
   const plannerOriginalInstructionRef = useRef<string>('')
+  // Approved plan stored so Phase 2 "continue" can rebuild systemContext for cache-efficient resumption.
+  const plannerPlanRef = useRef<DeckPlan | null>(null)
   // SDK executor session resume — store the last session ID so "Continue" can
   // resume exactly where the SDK agent left off instead of starting fresh.
   const sdkSessionIdRef = useRef<string | null>(null)
+  // Tracks the display[] index of the most recent phaseTokenInfo bubble so we
+  // can update it in-place when the phase result (with actual token counts) arrives.
+  const phaseTokenBubbleIndexRef = useRef<number | null>(null)
+  // Latest phase run stats captured from the result event.
+  const lastPhaseStatsRef = useRef<{ tokens?: number; costUsd?: number; numTurns?: number } | null>(null)
   const agentAbortRef = useRef<AbortController | null>(null)
   // In-flight single-shot (/api/edit) request, so the composer Stop button can
   // abort a one-shot generation the same way it stops an agent run.
@@ -543,19 +649,6 @@ export default function Home() {
       cancelled = true
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
-
-  // Fetch agent provider once on mount so the depth gate (which runs before the
-  // lazy per-call fetch) already knows whether SDK mode is active.
-  useEffect(() => {
-    fetch('/api/edit/agent/config')
-      .then(r => r.json())
-      .then((cfg: { provider?: string }) => {
-        agentProviderRef.current = cfg.provider ?? 'anthropic'
-      })
-      .catch(() => {
-        agentProviderRef.current = 'anthropic'
-      })
   }, [])
 
   // ── Version Control ────────────────────────────────────────────────────────────
@@ -1057,18 +1150,20 @@ export default function Home() {
   // Seed a fresh branch with the default knowledge layers (returns DB-backed layers).
   const seedBranchKnowledge = useCallback(async (branchId: string): Promise<KnowledgeLayer[]> => {
     const defaults = defaultKnowledgeLayers()
-    for (const layer of defaults) {
-      try {
-        const res = await fetch('/api/knowledge', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ...layer, branchId }),
-        })
-        if (res.ok) layer.id = (await res.json()).id
-      } catch {
-        /* best effort */
-      }
-    }
+    await Promise.all(
+      defaults.map(async layer => {
+        try {
+          const res = await fetch('/api/knowledge', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ...layer, branchId }),
+          })
+          if (res.ok) layer.id = (await res.json()).id
+        } catch {
+          /* best effort */
+        }
+      })
+    )
     return defaults
   }, [])
 
@@ -1195,6 +1290,13 @@ export default function Home() {
   const openPresentation = useCallback(
     async (id: string) => {
       try {
+        // Abort any in-flight agent from the previous deck before loading a new one.
+        agentAbortRef.current?.abort()
+        agentAbortRef.current = null
+        singleShotAbortRef.current?.abort()
+        agentStopRef.current = false
+        agentPauseStateRef.current = null
+
         const detailRes = await fetch(`/api/presentations/${id}`)
         if (!detailRes.ok) return
         const detail = await detailRes.json()
@@ -1450,7 +1552,8 @@ export default function Home() {
         })
         if (!createRes.ok) throw new Error('Failed to save the presentation')
         const { id } = await createRes.json()
-        await loadPortfolio()
+        // Portfolio refresh is fire-and-forget — no need to block opening the deck.
+        void loadPortfolio()
         // Background imports pass open:false so they don't yank the user out of
         // whatever they're currently viewing.
         if (opts.open !== false) await openPresentation(id)
@@ -1557,6 +1660,13 @@ export default function Home() {
 
   // Return to the start screen (refreshing the portfolio list).
   const goHome = useCallback(() => {
+    // Kill any running agent so its callbacks can't fire after we leave.
+    agentAbortRef.current?.abort()
+    agentAbortRef.current = null
+    singleShotAbortRef.current?.abort()
+    agentStopRef.current = false
+    agentPauseStateRef.current = null
+
     setShowStartScreen(true)
     setPresentationId(null)
     setCurrentRole(null)
@@ -2793,6 +2903,7 @@ export default function Home() {
         scopedSlideIds: scopedSlideIds.length ? scopedSlideIds : undefined,
         uiScopeAuthoritative: scopedSlideIds.length > 0,
         deckWide: action.deckWide,
+        skipKnowledge: action.skipKnowledge,
       })
     },
     [
@@ -2959,13 +3070,27 @@ export default function Home() {
             ...prev,
             { role: 'user', text, checkpoint: agentCheckpoint, historyLength: agentHistoryLength, ...messageActorFields() },
           ])
+          // For Phase 2 deck builds, restore systemContext so the plan+knowledge
+          // is back in the system prompt (cache-efficient) rather than re-prompting.
+          const isDeckBuildResume =
+            resolved.deckWide || isDeckBuildResumeTask(resolved.originalInstruction)
+          const resumeSystemContext =
+            isDeckBuildResume
+              ? resolved.systemContext ??
+                (plannerPlanRef.current && plannerKnowledgeContextRef.current
+                  ? buildContentAgentSystemContext(
+                      plannerPlanRef.current,
+                      plannerKnowledgeContextRef.current
+                    )
+                  : undefined)
+              : undefined
           runAgentRef.current?.(resumeInstruction, {
-            effort:
-              resolved.deckWide || isDeckBuildResumeTask(resolved.originalInstruction)
-                ? 'high'
-                : 'medium',
+            effort: isDeckBuildResume ? 'high' : 'medium',
             continuation: true,
             skipUserEcho: true,
+            ...(resumeSystemContext
+              ? { skipPlanner: true, systemContext: resumeSystemContext }
+              : {}),
           })
           return
         }
@@ -3075,43 +3200,14 @@ export default function Home() {
           ? formatTitleAlignmentDirective(text)
           : (() => {
             const ds = designSystemRef.current
-            if (ds?.files.length && isDeckWideDesignSystemRequest(text)) {
+            // Skip design-system reformat for deck rebuild requests — those go
+            // through the planner (Phase 1) and must not be converted to a
+            // design-system alignment instruction before isNewDeckBuildRequest runs.
+            if (ds?.files.length && isDeckWideDesignSystemRequest(text) && !isNewDeckBuildRequest(text)) {
               return buildDesignSystemAlignmentFromUserNote(ds, slides.length, text)
             }
             return text
           })()
-
-      // Depth gate: only for non-SDK providers. SDK mode uses the planner's ask_user.
-      // Also skip when provider is not yet known (null) — planner will handle scope.
-      if (
-        !isAsk &&
-        agentProviderRef.current !== null &&
-        agentProviderRef.current !== 'claude-agent-sdk' &&
-        isNewDeckBuildRequest(text) &&
-        !parsePresentationScope(text)
-      ) {
-        setPendingAgentInstruction(agentInstruction)
-        setDisplay(prev => [
-          ...prev,
-          {
-            role: 'user',
-            text,
-            checkpoint: agentCheckpoint,
-            historyLength: agentHistoryLength,
-            ...messageActorFields(),
-          },
-          {
-            role: 'assistant',
-            response: {
-              type: 'clarification',
-              question:
-                'Before building from your documents, choose how comprehensive the presentation should be:',
-              questions: [PRESENTATION_DEPTH_QUESTION],
-            },
-          },
-        ])
-        return
-      }
 
       runAgentRef.current?.(agentInstruction, {
         effort: isAsk
@@ -3294,6 +3390,12 @@ export default function Home() {
         displayText?: string
         /** Phase 2+: instruction already has plan + knowledge embedded; skip planner routing and knowledge pipeline. */
         skipPlanner?: boolean
+        /** Phase 2 approved-plan build: start executor with empty slides so old content is replaced, not extended. */
+        clearExisting?: boolean
+        /** Phase 2: plan + knowledge context to place in the system prompt (cached) instead of the user message. */
+        systemContext?: string
+        /** Quick actions that don't need design-system/knowledge docs: skip the expensive knowledge pipeline. */
+        skipKnowledge?: boolean
       }
     ) => {
       // Re-entrancy guard: only block on the agent's OWN in-flight flag. Do NOT
@@ -3309,39 +3411,11 @@ export default function Home() {
       if (!isContinuation && !opts?.resumeFromPause) {
         agentPauseStateRef.current = null
       }
-      const agentInstruction = isContinuation
+      // Phase 2/3 (skipPlanner) carry their own complete instructions — don't
+      // append a layout-audit directive, which would confuse the content-build agent.
+      const agentInstruction = isContinuation || opts?.skipPlanner
         ? instruction.trim()
         : withLayoutAuditDirective(instruction.trim())
-
-      // Central gate: every agent entry (router, self-escalation, quick actions) must
-      // pick presentation depth before building a new deck from source material.
-      // Depth gate: only prompt for scope in non-SDK mode. In SDK mode the planner
-      // agent asks structured questions (including scope) via its own ask_user tool.
-      // Guard: skip when provider is not yet known (null) — the SDK branch below
-      // will fetch it and the planner will handle scope via ask_user.
-      if (
-        !isContinuation &&
-        !opts?.skipPlanner &&
-        agentProviderRef.current !== null &&
-        agentProviderRef.current !== 'claude-agent-sdk' &&
-        isNewDeckBuildRequest(agentInstruction) &&
-        !parsePresentationScope(agentInstruction)
-      ) {
-        setPendingAgentInstruction(agentInstruction)
-        setDisplay(prev => [
-          ...prev,
-          {
-            role: 'assistant',
-            response: {
-              type: 'clarification',
-              question:
-                'Before building from your documents, choose how comprehensive the presentation should be:',
-              questions: [PRESENTATION_DEPTH_QUESTION],
-            },
-          },
-        ])
-        return
-      }
 
       const priorCtxForScope = incompleteAgentContextRef.current
       const scopeSource =
@@ -3362,12 +3436,12 @@ export default function Home() {
         (restoringPause && !!agentPauseStateRef.current?.deckBuildWithScope)
 
       let layoutAuditRun =
-        isLayoutAuditChangeRequest(agentInstruction) ||
+        (!opts?.skipPlanner && isLayoutAuditChangeRequest(agentInstruction)) ||
         (isContinuation && incompleteAgentContextRef.current?.wasLayoutAudit === true)
       const deckWideLayoutAudit =
         isDeckWideLayoutAudit(agentInstruction) ||
         (isContinuation && incompleteAgentContextRef.current?.deckWide === true)
-      let geometryOnlyRun = isGeometryEditRequest(agentInstruction)
+      let geometryOnlyRun = !opts?.skipPlanner && isGeometryEditRequest(agentInstruction)
       if (restoringPause && agentPauseStateRef.current) {
         const ps = agentPauseStateRef.current
         deckBuildWithScope = ps.deckBuildWithScope
@@ -3433,10 +3507,15 @@ export default function Home() {
 
         beforeRun = JSON.parse(JSON.stringify(slidesRef.current)) as SlideData[]
         closeManualSession(beforeRun)
-        setAmendmentCheckpoint(beforeRun)
-        amendmentCheckpointRef.current = beforeRun
-        setAmendmentSource('agent')
-        amendmentSourceRef.current = 'agent'
+        // For clearExisting (Phase 2 approved-plan builds): don't freeze the canvas
+        // at the empty pre-build state — we want slides to appear live as apply_changes
+        // fires. The result event handler sets the checkpoint after the build finishes.
+        if (!opts?.clearExisting) {
+          setAmendmentCheckpoint(beforeRun)
+          amendmentCheckpointRef.current = beforeRun
+          setAmendmentSource('agent')
+          amendmentSourceRef.current = 'agent'
+        }
         pendingChangesRef.current = []
         agentProgressRef.current = {
           applyBatches: 0,
@@ -3450,6 +3529,8 @@ export default function Home() {
           lastAction: '',
           wasLayoutAudit: layoutAuditRun || geometryOnlyRun,
           deckWide: deckWideLayoutAudit || opts?.deckWide === true || deckBuildWithScope,
+          // Carry Phase 2 systemContext so "continue" can restore cached plan+knowledge.
+          systemContext: opts?.systemContext,
         }
       }
 
@@ -3640,20 +3721,34 @@ export default function Home() {
           ? incompleteAgentContextRef.current.originalInstruction
           : agentInstruction
       const skipKnowledgePipeline =
-        isGeometryEditRequest(planInstruction) || answerOnly || !!opts?.skipPlanner
+        isGeometryEditRequest(planInstruction) || answerOnly || !!opts?.skipPlanner || !!opts?.skipKnowledge
+      // Check warm cache BEFORE expensive DB fetches. If we have knowledge built within the
+      // last 4 min (Anthropic cache TTL is 5 min) and this is NOT a fresh deck build, reuse
+      // it via cache_read instead of paying for another cache_write round-trip.
+      const KNOWLEDGE_WARM_MS = 4 * 60 * 1000
+      const warmCached = knowledgeCacheRef.current
+      const useKnowledgeFromCache =
+        !skipKnowledgePipeline &&
+        !deckBuildWithScope &&
+        warmCached !== null &&
+        Date.now() - warmCached.at < KNOWLEDGE_WARM_MS
+      const skipFetch = skipKnowledgePipeline || useKnowledgeFromCache
       const layerCtx = buildKnowledgeContext(knowledgeLayers, decisions, activeSlideId, {
         instruction: planInstruction,
         slideText: activeSlideText(slidesRef.current, activeSlideId),
-        documentCharCap: skipKnowledgePipeline ? 0 : 200000,
-        documentTotalCap: skipKnowledgePipeline ? 0 : 240000,
+        documentCharCap: skipFetch ? 0 : 200000,
+        documentTotalCap: skipFetch ? 0 : 240000,
       })
-      const graphCtx = skipKnowledgePipeline
+      const graphCtx = skipFetch
         ? ''
         : await fetchGraphKnowledgeContext({
             branchId: agentBranchId,
             presentationId,
             instruction: planInstruction,
             charBudget: 16000,
+            // Include verbatim chunk excerpts during planning so the model
+            // has raw source text, not just extracted graph summaries.
+            chunkBudget: deckBuildWithScope ? 8000 : 0,
           })
       const planTargetSlideIds = deckBuildWithScope
         ? deckSlides.map(s => s.id)
@@ -3666,7 +3761,7 @@ export default function Home() {
               : activeSlideId
                 ? [activeSlideId]
                 : []
-      const agentPlan = skipKnowledgePipeline
+      const agentPlan = skipFetch
         ? null
         : await fetchAgentPlan({
             branchId: agentBranchId,
@@ -3685,15 +3780,27 @@ export default function Home() {
       // Version history: only for targeted edits and continuations — skip for fresh
       // deck builds (history irrelevant), geometry passes, and Phase 2/3 (skipPlanner).
       const versionHistoryCtx =
-        !skipKnowledgePipeline && !deckBuildWithScope
+        !skipFetch && !deckBuildWithScope
           ? buildVersionHistoryContext(versionsRef.current, currentBranchIdRef.current)
           : ''
-      const knowledgeContext = skipKnowledgePipeline
-        ? commentsCtx
+      const freshKnowledge = skipFetch
+        ? null
         : mergeKnowledgeContexts(
             mergeKnowledgeContexts(mergeKnowledgeContexts(layerCtx, graphCtx), commentsCtx),
             versionHistoryCtx
           )
+      // Save to ref whenever we build fresh knowledge so all follow-ups (chat + quick actions)
+      // can reuse it via Anthropic cache_read instead of paying for another cache_write.
+      if (freshKnowledge) {
+        knowledgeCacheRef.current = { context: freshKnowledge, at: Date.now() }
+      }
+      // Reuse cached knowledge for quick actions (skipKnowledge) AND chat follow-ups
+      // (useKnowledgeFromCache) — both get cache_read pricing instead of cache_write.
+      const reuseWarmKnowledge =
+        skipFetch && warmCached && Date.now() - warmCached.at < KNOWLEDGE_WARM_MS
+          ? warmCached.context
+          : null
+      const knowledgeContext = freshKnowledge ?? reuseWarmKnowledge ?? commentsCtx
       const templateKnowledge = fastLayoutRun ? '' : mergeTemplatesKnowledge(templates)
       const mediaCtx = fastLayoutRun ? '' : buildMediaContext(mediaManifest(collectAllAssets()))
 
@@ -3819,14 +3926,13 @@ export default function Home() {
                 ? ' Apply the loaded design system (bg, fonts, semantic colors) on every new slide.'
                 : ''
             }`
-          : `\nIf the instruction covers MULTIPLE slides (e.g. "all slides", "slides 2–5", the selection, ` +
-            `the whole deck), read them all with get_slides (omit slideIds for the whole deck), then apply ONE ` +
-            `combined apply_changes covering every target slide, render 1–2 to verify, then finish. ` +
-            `For a single slide use get_slide → apply_changes → verify → finish.`) +
+          : `\nFor a SINGLE slide: get_slide → apply_changes (ALL changes in ONE call) → render once → finish. ` +
+            `For MULTIPLE slides: get_slides with explicit slideIds (NEVER omit slideIds mid-session — whole-deck dump costs $0.10+ extra) → ONE apply_changes covering ALL target slides → render 1–2 → finish. ` +
+            `TURN BUDGET: single slide = 4–6 turns; multi-slide = 6–10 turns. Do not loop slide-by-slide.`) +
         (layoutAuditRun
           ? `\n\nLAYOUT AUDIT: Scope is pre-computed above — execute ONLY on listed slides. ` +
-            `get_slides with scoped slideIds (NOT the full deck). Batch apply_changes 2–4 scoped slides per call. ` +
-            `Geometry patches only (x, y, w, h, index). Align header/title icons to the SAME x/y across all scoped slides.`
+            `get_slides with explicit scoped slideIds (NOT the full deck). ONE apply_changes with ALL geometry patches. ` +
+            `Align header/title icons to the SAME x/y across all scoped slides.`
           : '') +
         (isTitleAlignmentFixRequest(agentInstruction)
           ? `\n\nTITLE ALIGNMENT: patch ONLY header-main (or the slide title element) — y≈0.45in to match other content slides. No icons/bullets/underlines.\n`
@@ -3993,6 +4099,7 @@ export default function Home() {
           lastAction: p.lastAction,
           wasLayoutAudit: layoutAuditRun || geometryOnlyRun,
           deckWide: deckBuildWithScope,
+          systemContext: opts?.systemContext,
         }
         agentPauseStateRef.current = {
           version: AGENT_PAUSE_STATE_VERSION,
@@ -4019,6 +4126,8 @@ export default function Home() {
             targetSlideIds: deckBuildWithScope
               ? slidesRef.current.map(s => s.id)
               : incomplete.targetSlideIds,
+            // Preserve systemContext across pause so "continue" can restore it.
+            systemContext: incomplete.systemContext ?? opts?.systemContext,
           },
           segmentIndex: (agentPauseStateRef.current?.segmentIndex ?? -1) + 1,
           pausedAt: Date.now(),
@@ -4027,22 +4136,7 @@ export default function Home() {
       }
 
       try {
-        let useLegacyAgentLoop = true
-
         if (!restoringPause) {
-          if (!agentProviderRef.current) {
-            try {
-              const cfgRes = await fetch('/api/edit/agent/config')
-              const cfg = (await cfgRes.json()) as { provider?: string }
-              agentProviderRef.current = cfg.provider ?? 'anthropic'
-            } catch {
-              agentProviderRef.current = 'anthropic'
-            }
-          }
-
-          if (agentProviderRef.current === 'claude-agent-sdk') {
-            useLegacyAgentLoop = false
-
             // ── Phase 1: Planner ──────────────────────────────────────────────
             if (isNewDeckBuildRequest(agentInstruction) && !isContinuation && !opts?.skipPlanner) {
               addStep({ kind: 'plan', label: 'Deck Planner — analysing request and context' })
@@ -4056,7 +4150,8 @@ export default function Home() {
                 agentAbortRef.current = ac
                 const plannerState: {
                   askUser: { intro?: string; questions: ClarificationQuestion[] } | null
-                } = { askUser: null }
+                  planReady: DeckPlan | null
+                } = { askUser: null, planReady: null }
 
                 try {
                   const res = await fetch('/api/edit/agent/planner', {
@@ -4077,7 +4172,7 @@ export default function Home() {
                   await consumePlannerStream(res, (event: PlannerStreamEvent) => {
                     if (event.type === 'step') {
                       const processSection =
-                        event.kind === 'thinking' || event.kind === 'note'
+                        event.kind === 'thinking'
                           ? ('reasoning' as const)
                           : event.kind === 'reading'
                             ? ('activity' as const)
@@ -4091,10 +4186,16 @@ export default function Home() {
                     }
                     if (event.type === 'ask_user') {
                       plannerState.askUser = { intro: event.intro, questions: event.questions }
+                      isAgentRunningRef.current = false
+                      setIsAgentRunning(false)
                       return
                     }
                     if (event.type === 'plan_ready') {
+                      plannerState.planReady = event.plan
                       setDisplay(prev => [...prev, { role: 'assistant', deckPlan: event.plan }])
+                      // Planner is done — pause until the user approves or revises the plan.
+                      isAgentRunningRef.current = false
+                      setIsAgentRunning(false)
                       return
                     }
                     if (event.type === 'session_init') {
@@ -4107,15 +4208,19 @@ export default function Home() {
                     }
                   })
                 } catch (err) {
-                  const aborted =
-                    agentStopRef.current ||
-                    (err instanceof DOMException && err.name === 'AbortError') ||
-                    (err as { name?: string })?.name === 'AbortError'
-                  if (aborted) {
-                    addStep({ kind: 'note', label: 'Stopped by user.' })
+                  if (plannerState.planReady) {
+                    // Expected — planner stops after submit_plan; not an error.
                   } else {
-                    const msg = err instanceof Error ? err.message : 'Planner error'
-                    addStep({ kind: 'error', label: msg })
+                    const aborted =
+                      agentStopRef.current ||
+                      (err instanceof DOMException && err.name === 'AbortError') ||
+                      (err as { name?: string })?.name === 'AbortError'
+                    if (aborted) {
+                      addStep({ kind: 'note', label: 'Stopped by user.' })
+                    } else {
+                      const msg = err instanceof Error ? err.message : 'Planner error'
+                      addStep({ kind: 'error', label: msg })
+                    }
                   }
                 }
 
@@ -4138,7 +4243,12 @@ export default function Home() {
 
             // ── Phase 2+: SDK executor (direct edit or approved plan) ─────────
             } else {
-            addStep({ kind: 'plan', label: 'Claude Agent SDK — running autonomous edit loop' })
+            addStep({
+              kind: 'plan',
+              label: opts?.skipPlanner
+                ? 'Claude Agent SDK — building slides (apply_changes steps will appear below)'
+                : 'Claude Agent SDK — running autonomous edit loop',
+            })
 
             if (agentStopRef.current) {
               addStep({ kind: 'note', label: 'Stopped by user. Changes so far are kept.' })
@@ -4149,33 +4259,77 @@ export default function Home() {
                 askUser: { intro?: string; questions: ClarificationQuestion[] } | null
               } = { askUser: null }
 
+              // Phase 2/3 instructions already contain the full plan + knowledge context.
+              // Wrapping them in the generic `intro` builder doubles the prompt size,
+              // adds conflicting directives, and buries the real instruction. Use
+              // agentInstruction directly and append only the minimal deck overview.
+              // For clearExisting (Phase 2 approved-plan builds) we don't include the
+              // old slide list — the agent starts with an empty deck and builds fresh.
+              const sdkPrompt = opts?.skipPlanner
+                ? opts.clearExisting
+                  ? agentInstruction
+                  : `${agentInstruction}\n\nCurrent deck (NUMBER. id — 1-based position):\n${slideIndexForIntro}`
+                : intro
+
               try {
                 const res = await fetch('/api/edit/agent/sdk', {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },
                   body: JSON.stringify({
-                    prompt: intro,
-                    slides: beforeRun,
+                    prompt: sdkPrompt,
+                    // clearExisting: give the agent a blank canvas so it builds the plan
+                    // slides without inheriting old content. deckBuild flag is omitted so
+                    // the system prompt does NOT add "Do NOT delete existing slides".
+                    slides: opts?.clearExisting ? [] : beforeRun,
                     effort: agentEffort,
-                    deckBuild: deckBuildWithScope,
+                    // clearExisting: omit deckBuild so the system prompt never injects
+                    // "Do NOT delete existing slides" — Phase 2 instruction owns batching.
+                    deckBuild: opts?.clearExisting ? false : deckBuildWithScope,
                     geometryOnly: geometryOnlyRun || fastLayoutRun,
                     layoutAudit: layoutAuditRun,
-                    resume: isContinuation ? (sdkSessionIdRef.current ?? undefined) : undefined,
+                    // For deck builds, do NOT resume the previous session: the SDK injects
+                    // the full prior conversation history as part of the prompt, adding 28K+
+                    // tokens and triggering a $0.22 double-write cold start on every continuation.
+                    // The agent has everything it needs from systemContext + current slides.
+                    resume: (isContinuation && !deckBuildWithScope)
+                      ? (sdkSessionIdRef.current ?? undefined)
+                      : undefined,
+                    // Phase 2: plan+knowledge go in system prompt (cached) not user message
+                    systemContext: opts?.systemContext,
                   }),
                   signal: ac.signal,
                 })
 
                 await consumeAgentSdkStream(res, (event: DeckAgentStreamEvent) => {
                   if (event.type === 'step') {
-                    // Group thinking/note into the collapsible AgentProcessPanel;
-                    // read/render go into its activity section; apply/done/plan stay standalone.
+                    // thinking = inner monologue → collapse into AgentProcessPanel
+                    // note = short progress narration → show as visible standalone bubble
+                    // read/render → activity section of AgentProcessPanel
+                    // apply/done/plan → standalone (no processSection)
                     const processSection =
-                      event.kind === 'thinking' || event.kind === 'note'
+                      event.kind === 'thinking'
                         ? ('reasoning' as const)
                         : event.kind === 'read' || event.kind === 'render'
                           ? ('activity' as const)
                           : undefined
                     addStep({ kind: event.kind, label: event.label, processSection })
+                    return
+                  }
+                  if (event.type === 'slides_update') {
+                    slidesRef.current = event.slides
+                    setSlides(event.slides)
+                    // clearExisting builds replace all slides with new IDs.
+                    // If the canvas's active slide no longer exists, snap to
+                    // the first new slide so the canvas isn't blank.
+                    if (
+                      event.slides.length > 0 &&
+                      !event.slides.some(s => s.id === activeSlideId)
+                    ) {
+                      const firstId = event.slides[0].id
+                      setActiveSlideId(firstId)
+                      setSelectedSlideIds([firstId])
+                      setSelectionAnchorId(firstId)
+                    }
                     return
                   }
                   if (event.type === 'error') {
@@ -4190,10 +4344,48 @@ export default function Home() {
                     addStep({ kind: 'plan', label: event.label })
                     return
                   }
+                  if (event.type === 'turn_stats') {
+                    // Update the phase token bubble in real-time with running totals.
+                    const bidx = phaseTokenBubbleIndexRef.current
+                    if (bidx !== null) {
+                      setDisplay(prev =>
+                        prev.map((m, i) =>
+                          i === bidx && m.phaseTokenInfo
+                            ? {
+                                ...m,
+                                phaseTokenInfo: {
+                                  ...m.phaseTokenInfo,
+                                  actualTokens: event.totalTokens,
+                                  actualCost: event.costUsd,
+                                  actualTurns: event.turn,
+                                },
+                              }
+                            : m
+                        )
+                      )
+                    }
+                    return
+                  }
                   if (event.type === 'result') {
                     if (event.sessionId) sdkSessionIdRef.current = event.sessionId
+                    // Capture phase run stats so handleApprovePlan / handleRunLayoutPass
+                    // can update the phaseTokenInfo bubble with actuals.
+                    lastPhaseStatsRef.current = {
+                      tokens: event.totalTokens,
+                      costUsd: event.costUsd,
+                      numTurns: event.numTurns,
+                    }
                     slidesRef.current = event.slides
                     setSlides(event.slides)
+                    if (
+                      event.slides.length > 0 &&
+                      !event.slides.some(s => s.id === activeSlideId)
+                    ) {
+                      const firstId = event.slides[0].id
+                      setActiveSlideId(firstId)
+                      setSelectedSlideIds([firstId])
+                      setSelectionAnchorId(firstId)
+                    }
                     runSummary = event.summary
                     runFinishedCleanly = event.success
                     if (event.changes.length > 0) {
@@ -4225,6 +4417,11 @@ export default function Home() {
                 } else {
                   const msg = err instanceof Error ? err.message : 'Agent SDK error'
                   addStep({ kind: 'error', label: msg })
+                  // Credit/quota errors mid-run are treated like a step limit: the agent
+                  // was cut off before calling finish(), so mark as incomplete so "continue"
+                  // will resume instead of starting fresh.
+                  const isCreditError = /credit|balance|quota|402/i.test(msg)
+                  if (isCreditError) hitStepLimit = true
                 }
               }
 
@@ -4267,952 +4464,6 @@ export default function Home() {
               }
             }
             } // end SDK executor else-branch
-          }
-        }
-
-        if (useLegacyAgentLoop) {
-        for (let step = loopStartStep; step < maxAgentSteps; step++) {
-          // Cancellation check at the top of each step (covers a Stop pressed
-          // between turns, before the next request goes out).
-          if (agentStopRef.current) {
-            addStep({ kind: 'note', label: 'Stopped by user. Changes so far are kept.' })
-            break
-          }
-          const ac = new AbortController()
-          agentAbortRef.current = ac
-          const deckBuildExecuteOnly =
-            deckBuildWithScope && slidesRef.current.length < deckSlideCap
-          const useReviewPhase = false
-          const agentPhase = useReviewPhase ? 'review' : 'execute'
-          const res = await fetch('/api/edit/agent', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              messages,
-              effort: agentEffort,
-              phase: agentPhase,
-              layoutAudit: layoutAuditRun,
-              geometryOnly: fastLayoutRun || geometryOnlyRun,
-              deckBuild: deckBuildWithScope,
-            }),
-            signal: ac.signal,
-          })
-          if (!res.ok) {
-            let msg = `Agent request failed (HTTP ${res.status})`
-            let transientKind: 'overloaded' | 'rate_limit' | null = null
-            try {
-              const errData = await res.json()
-              if (errData?.error) msg = errData.error
-              if (errData?.transient === 'overloaded' || errData?.transient === 'rate_limit') {
-                transientKind = errData.transient
-              } else if (/overloaded/i.test(String(errData?.error ?? ''))) {
-                transientKind = 'overloaded'
-              }
-            } catch {
-              /* non-JSON error body — keep the generic message */
-            }
-            if (!transientKind && /overloaded/i.test(msg)) transientKind = 'overloaded'
-            if (!transientKind && res.status === 429) transientKind = 'rate_limit'
-            if (!transientKind && (res.status === 503 || res.status === 529)) {
-              transientKind = 'overloaded'
-            }
-
-            const p = agentProgressRef.current
-            const modified = Array.from(p.changedSlideIds)
-            const hasChanges =
-              modified.length > 0 || (pendingChangesRef.current?.length ?? 0) > 0
-
-            if (transientKind) {
-              const limitReached =
-                transientKind === 'overloaded'
-                  ? buildOverloadedError({
-                      modifiedSlideIds: modified,
-                      applyBatches: p.applyBatches || undefined,
-                      lastAction: p.lastAction || undefined,
-                      hasChanges,
-                    })
-                  : buildRateLimitError({
-                      modifiedSlideIds: modified,
-                      applyBatches: p.applyBatches || undefined,
-                      lastAction: p.lastAction || undefined,
-                      hasChanges,
-                    })
-              msg = formatAgentLimitError(limitReached)
-              captureAgentPause(
-                transientKind,
-                transientKind === 'overloaded'
-                  ? 'Anthropic API overloaded'
-                  : 'Anthropic rate limit',
-                step
-              )
-              setAgentRunIncomplete(true)
-              if (hasChanges && pendingChangesRef.current?.length) {
-                setPendingSummary(prev => prev || runSummary || 'Agent edits (incomplete)')
-              }
-              addStep({ kind: 'error', label: msg, limitReached })
-              break
-            }
-
-            if (res.status === 504) {
-              const limitReached = buildTimeoutError({
-                modifiedSlideIds: modified,
-                applyBatches: p.applyBatches || undefined,
-                lastAction: p.lastAction || undefined,
-                hasChanges,
-              })
-              msg = formatAgentLimitError(limitReached)
-              setAgentRunIncomplete(true)
-              if (!hasChanges) {
-                setAmendmentCheckpoint(null)
-                setAmendmentSource(null)
-                setPendingChanges(null)
-                pendingChangesRef.current = null
-                setSlides(JSON.parse(JSON.stringify(beforeRun)) as SlideData[])
-                slidesRef.current = JSON.parse(JSON.stringify(beforeRun)) as SlideData[]
-              } else if (pendingChangesRef.current?.length) {
-                setPendingSummary(prev => prev || runSummary || 'Agent edits (incomplete)')
-              }
-              if (hasChanges) {
-                captureAgentPause(
-                  'timeout',
-                  'server step timed out (504)',
-                  step
-                )
-              }
-              addStep({ kind: 'error', label: msg, limitReached })
-              break
-            }
-            addStep({ kind: 'error', label: msg })
-            break
-          }
-          const data = await res.json()
-          const content = (data.content ?? []) as AgentBlock[]
-          const stopReason = data.stop_reason as string | undefined
-          messages.push({ role: 'assistant', content })
-
-          const toolResults: AgentToolResult[] = []
-          let finished = false
-          // Set when the agent calls ask_user: we render structured questions and
-          // pause the run until the user answers (which resumes a fresh agent turn).
-          let askPayload: { intro?: string; questions: ClarificationQuestion[] } | null = null
-
-          for (const block of content) {
-            if (block.type === 'thinking') {
-              if (block.thinking?.trim()) addStep({ kind: 'thinking', label: block.thinking.trim() })
-              continue
-            }
-            if (block.type === 'redacted_thinking') {
-              addStep({ kind: 'thinking', label: '(extended reasoning — hidden by provider)' })
-              continue
-            }
-            if (block.type === 'text') {
-              if (block.text?.trim()) addStep({ kind: 'note', label: block.text.trim() })
-              continue
-            }
-            if (block.type !== 'tool_use') continue
-
-            const { id, name, input } = block
-            if (name === 'finish') {
-              // Knowledge validation gate: block finish when unverified claims remain
-              // on investor-facing edits until the agent revises or softens copy.
-              const needsKnowledgeFix =
-                !fastLayoutRun &&
-                lastValidation &&
-                (lastValidation.validation_result === 'human_review' ||
-                  (lastValidation.validation_result === 'needs_fix' &&
-                    lastValidation.issues.some(i => i.severity === 'high')))
-              if (
-                needsKnowledgeFix &&
-                knowledgeReviewNudges < MAX_KNOWLEDGE_REVIEW_NUDGES
-              ) {
-                knowledgeReviewNudges++
-                addStep({
-                  kind: 'review',
-                  label: formatValidationForUser(lastValidation!),
-                })
-                toolResults.push({
-                  type: 'tool_result',
-                  tool_use_id: id,
-                  content:
-                    `Do NOT finish yet — knowledge validation flagged issues:\n${formatValidationForAgent(lastValidation!)}`,
-                })
-              } else if (
-                appliedAny &&
-                !verifiedSinceApply &&
-                verifyNudges < MAX_VERIFY_NUDGES &&
-                !(fastLayoutRun)
-              ) {
-                verifyNudges++
-                addStep({
-                  kind: 'note',
-                  label: 'Applied edits but no verification render yet — asking the agent to render before finishing.',
-                })
-                toolResults.push({
-                  type: 'tool_result',
-                  tool_use_id: id,
-                  content:
-                    'Do NOT finish yet: you applied changes but have not rendered any edited slide to confirm the result. Call render_slide on one changed slide, verify it looks right, then finish.',
-                })
-              } else if (designSystemAlign && appliedAny) {
-                finished = true
-                runFinishedCleanly = true
-                if (input?.summary) runSummary = input.summary
-                addStep({ kind: 'done', label: input?.summary || 'Done.' })
-              } else if (agentPhase === 'review' || layoutFixTask) {
-                const modifiedIds = agentProgressRef.current.changedSlideIds
-                const finishCheckIds = new Set(modifiedIds)
-                if (layoutFixTask) {
-                  for (const id of workScope.targetSlideIds) finishCheckIds.add(id)
-                  for (const id of workScope.remainingSlideIds) finishCheckIds.add(id)
-                  for (const id of workScope.alreadyDoneSlideIds) finishCheckIds.add(id)
-                } else if (layoutAuditRun) {
-                  for (const id of workScope.targetSlideIds) finishCheckIds.add(id)
-                  for (const id of workScope.remainingSlideIds) finishCheckIds.add(id)
-                } else {
-                  if (activeSlideId) finishCheckIds.add(activeSlideId)
-                  for (const id of selectedSlideIds) finishCheckIds.add(id)
-                }
-                const slidesToFinishCheck = slidesRef.current.filter(s => finishCheckIds.has(s.id))
-                const geometryRemaining = slidesToFinishCheck.flatMap(s => findLayoutFixIssues(s))
-                if (geometryRemaining.length > 0 && layoutFixTask) {
-                  if (layoutFinishNudges < MAX_LAYOUT_FINISH_NUDGES) {
-                    layoutFinishNudges++
-                    addStep({
-                      kind: 'review',
-                      label: `${geometryRemaining.length} layout issue(s) still on slide — overlaps, clipping, or misalignment.`,
-                    })
-                    toolResults.push({
-                      type: 'tool_result',
-                      tool_use_id: id,
-                      content:
-                        `Do NOT finish yet — layout check failed:\n${formatOverlapCheck(
-                          geometryRemaining
-                        )}\n\n` +
-                        `Call apply_changes ONCE with patches for EVERY issue above — do not fix one pair per turn.`,
-                    })
-                  } else {
-                    addStep({
-                      kind: 'review',
-                      label: `Layout polish limit — ${geometryRemaining.length} issue(s) remain; pipeline paused.`,
-                    })
-                    toolResults.push({
-                      type: 'tool_result',
-                      tool_use_id: id,
-                      content:
-                        `Layout finish limit reached — ${geometryRemaining.length} issue(s) still open:\n${formatOverlapCheck(
-                          geometryRemaining
-                        )}\n\n` +
-                        `Say "continue" to resume fixes, or Accept/Decline changes on the canvas.`,
-                    })
-                    stopFlag =
-                      'Paused: layout polish limit reached — say "continue" to resume.'
-                  }
-                } else if (!geometryOnlyRun && spacingFinishNudges < MAX_SPACING_FINISH_NUDGES) {
-                  const spacingRemaining = slidesToFinishCheck.flatMap(s => findSpacingIssues(s))
-                  if (spacingRemaining.length > 0) {
-                    spacingFinishNudges++
-                    addStep({
-                      kind: 'review',
-                      label: `Spacing/fill issues on ${spacingRemaining.length} check(s) — rebalancing margins and gaps.`,
-                    })
-                    toolResults.push({
-                      type: 'tool_result',
-                      tool_use_id: id,
-                      content:
-                        `Do NOT finish yet — review phase spacing check failed:\n${formatSpacingCheck(
-                          spacingRemaining
-                        )}\n\n` +
-                        `Call apply_changes to fix: equal top/bottom and left/right margins; even vertical gaps ` +
-                        `between stacked elements; stretch or redistribute horizontal columns to fill width evenly; ` +
-                        `for tables bump style.fontSize on cell text flagged as text-underfill so copy fills each cell.`,
-                    })
-                  } else {
-                    finished = true
-                    runFinishedCleanly = true
-                    if (input?.summary) runSummary = input.summary
-                    addStep({ kind: 'done', label: input?.summary || 'Done.' })
-                  }
-                } else if (geometryOnlyRun) {
-                  finished = true
-                  runFinishedCleanly = true
-                  if (input?.summary) runSummary = input.summary
-                  addStep({ kind: 'done', label: input?.summary || 'Done.' })
-                } else if (spacingFinishNudges >= MAX_SPACING_FINISH_NUDGES) {
-                  const spacingRemaining = slidesToFinishCheck.flatMap(s => findSpacingIssues(s))
-                  if (spacingRemaining.length > 0) {
-                    addStep({
-                      kind: 'review',
-                      label: `Spacing/balance limit — ${spacingRemaining.length} issue(s) remain; pipeline paused.`,
-                    })
-                    toolResults.push({
-                      type: 'tool_result',
-                      tool_use_id: id,
-                      content:
-                        `Do NOT finish yet — spacing/balance review limit reached for this segment:\n${formatSpacingCheck(
-                          spacingRemaining
-                        )}\n\n` +
-                        `Say "continue" to resume margin/gap fixes, or Accept/Decline changes on the canvas.`,
-                    })
-                    stopFlag =
-                      'Paused: spacing/balance review limit reached — say "continue" to resume.'
-                  } else {
-                    finished = true
-                    runFinishedCleanly = true
-                    if (input?.summary) runSummary = input.summary
-                    addStep({ kind: 'done', label: input?.summary || 'Done.' })
-                  }
-                } else {
-                  finished = true
-                  runFinishedCleanly = true
-                  if (input?.summary) runSummary = input.summary
-                  addStep({ kind: 'done', label: input?.summary || 'Done.' })
-                }
-              } else if (!appliedAny && layoutAuditRun) {
-                addStep({
-                  kind: 'note',
-                  label: 'Layout audit requires apply_changes — asking the agent to patch slides, not just report.',
-                })
-                toolResults.push({
-                  type: 'tool_result',
-                  tool_use_id: id,
-                  content:
-                    'Do NOT finish yet: this is a layout audit/fix task but you applied ZERO changes. ' +
-                    'Call get_slides, then apply_changes with geometry patches (x, y, w, h, spacing) for every issue. ' +
-                    'A text-only deck inventory is not acceptable — fixes must appear on the slides. ' +
-                    'Scope slide caps do NOT block geometry edits on existing slides.',
-                })
-              } else if (layoutFixTask) {
-                const finishCheckIds = new Set([
-                  ...workScope.targetSlideIds,
-                  ...workScope.remainingSlideIds,
-                  ...workScope.alreadyDoneSlideIds,
-                  ...Array.from(agentProgressRef.current.changedSlideIds),
-                ])
-                const slidesToFinishCheck = slidesRef.current.filter(s => finishCheckIds.has(s.id))
-                const geometryRemaining = slidesToFinishCheck.flatMap(s => findLayoutFixIssues(s))
-                if (geometryRemaining.length > 0) {
-                  addStep({
-                    kind: 'review',
-                    label: `${geometryRemaining.length} layout issue(s) still on slide — overlaps, clipping, or overflow.`,
-                  })
-                  toolResults.push({
-                    type: 'tool_result',
-                    tool_use_id: id,
-                    content:
-                      `Do NOT finish yet — layout check failed:\n${formatOverlapCheck(
-                        geometryRemaining
-                      )}\n\n` +
-                      `Call apply_changes to fix every issue before finishing. ` +
-                      `Render alone is not sufficient when programmatic checks still fail.`,
-                  })
-                } else {
-                  finished = true
-                  runFinishedCleanly = true
-                  if (input?.summary) runSummary = input.summary
-                  addStep({ kind: 'done', label: input?.summary || 'Done.' })
-                }
-              } else {
-                finished = true
-                runFinishedCleanly = true
-                if (input?.summary) runSummary = input.summary
-                addStep({ kind: 'done', label: input?.summary || 'Done.' })
-              }
-            } else if (name === 'ask_user') {
-              const questions = Array.isArray(input?.questions) ? input!.questions! : []
-              const asksSlideIds = questions.some(q =>
-                /\b(which\s+slide|what\s+slide|slide\s+id|last\s*\/\s*closing|confirm\s+both|which\s+is\s+the\s+last)\b/i.test(
-                  q.question ?? ''
-                )
-              )
-              const depthOnly =
-                questions.length > 0 &&
-                questions.every((q: ClarificationQuestion) => q.id === 'presentation_depth')
-              if (asksSlideIds || designSystemAlign) {
-                toolResults.push({
-                  type: 'tool_result',
-                  tool_use_id: id,
-                  content:
-                    'Do NOT call ask_user to identify slides. The deck overview lists every position → id ' +
-                    `(slide 1 = first, slide ${slidesRef.current.length} = last). ` +
-                    'Call get_slides (omit slideIds) then apply_changes immediately.',
-                  is_error: true,
-                })
-              } else if (scopeConfirmed && depthOnly && deckBuild) {
-                toolResults.push({
-                  type: 'tool_result',
-                  tool_use_id: id,
-                  content:
-                    'Presentation depth is already confirmed in the DECK BUILD block. ' +
-                    'Proceed with get_slides and apply_changes — do NOT call ask_user for depth.',
-                  is_error: true,
-                })
-              } else if (isContinuation || agentInstruction.includes('[CONTINUE —')) {
-                toolResults.push({
-                  type: 'tool_result',
-                  tool_use_id: id,
-                  content:
-                    'Do NOT call ask_user on a CONTINUE request. The original task and remaining slides are in the intro. ' +
-                    'Proceed with get_slides and apply_changes for the outstanding work immediately.',
-                  is_error: true,
-                })
-              } else {
-              // Pause the loop and surface structured questions to the user. We end
-              // this run (changes so far are kept) and resume once they answer.
-              const questions = Array.isArray(input?.questions) ? input!.questions! : []
-              if (questions.length > 0) {
-                askPayload = { intro: input?.intro, questions }
-                addStep({ kind: 'done', label: 'Paused — waiting for your answers.' })
-              } else {
-                // Malformed call with no questions: nudge it to either act or ask properly.
-                toolResults.push({
-                  type: 'tool_result',
-                  tool_use_id: id,
-                  content:
-                    'ask_user needs a non-empty questions[] array. Either ask with real questions, or just build the deck from the context.',
-                  is_error: true,
-                })
-              }
-              }
-            } else if (name === 'get_slide') {
-              const slide = slidesRef.current.find(s => s.id === input?.slideId)
-              agentProgressRef.current.lastAction = `Inspected ${input?.slideId}`
-              addStep({ kind: 'read', label: `Inspected ${input?.slideId}` })
-              toolResults.push({
-                type: 'tool_result',
-                tool_use_id: id,
-                content: slide
-                  ? slimSlideJson([{ id: slide.id, bg: slide.bg, elements: slide.elements }])
-                  : `Slide ${input?.slideId} not found. Available: ${slidesRef.current
-                      .map(s => s.id)
-                      .join(', ')}`,
-                ...(slide ? {} : { is_error: true }),
-              })
-            } else if (name === 'get_slides') {
-              const requested = Array.isArray(input?.slideIds) ? (input!.slideIds as string[]) : null
-              const scopedIds =
-                workScope.remainingSlideIds.length > 0
-                  ? workScope.remainingSlideIds
-                  : workScope.targetSlideIds
-              const scopeLocked =
-                scopedIds.length > 0 &&
-                scopedIds.length < slidesRef.current.length &&
-                !workScope.allowFullDeckRead
-              const uiScopeLocked = !!opts?.scopedSlideIds?.length
-              if (
-                requested &&
-                scopeLocked &&
-                (layoutAuditRun || (isContinuation && !deckBuildWithScope) || uiScopeLocked)
-              ) {
-                const allowed = new Set(scopedIds)
-                const outside = requested.filter(id => !allowed.has(id))
-                if (outside.length) {
-                  toolResults.push({
-                    type: 'tool_result',
-                    tool_use_id: id,
-                    content:
-                      `Slides outside work scope: ${outside.join(', ')}. ` +
-                      `Call get_slides with slideIds: [${scopedIds.map(sid => `"${sid}"`).join(', ')}] only.`,
-                    is_error: true,
-                  })
-                  continue
-                }
-              }
-              if (
-                !requested &&
-                scopedIds.length > 0 &&
-                scopedIds.length < slidesRef.current.length &&
-                !workScope.allowFullDeckRead &&
-                (layoutAuditRun || (isContinuation && !deckBuildWithScope) || uiScopeLocked)
-              ) {
-                toolResults.push({
-                  type: 'tool_result',
-                  tool_use_id: id,
-                  content:
-                    `Do NOT read the full deck — work scope is limited to ${scopedIds.length} slide(s). ` +
-                    `Call get_slides again with slideIds: [${scopedIds.map(sid => `"${sid}"`).join(', ')}].`,
-                  is_error: true,
-                })
-                continue
-              }
-              const picked = requested
-                ? slidesRef.current.filter(s => requested.includes(s.id))
-                : slidesRef.current
-              addStep({
-                kind: 'read',
-                label: requested
-                  ? `Inspected ${picked.length} slide(s): ${picked.map(s => s.id).join(', ')}`
-                  : `Inspected all ${picked.length} slides`,
-              })
-              agentProgressRef.current.lastAction = requested
-                ? `Inspected ${picked.length} slide(s)`
-                : `Inspected all ${picked.length} slides`
-              toolResults.push({
-                type: 'tool_result',
-                tool_use_id: id,
-                content: slimSlideJson(
-                  picked.map(s => ({ id: s.id, bg: s.bg, elements: s.elements }))
-                ),
-              })
-            } else if (name === 'render_slide') {
-              const slide = slidesRef.current.find(s => s.id === input?.slideId)
-              const png = slide ? await renderSlideToPng(slide) : null
-              // A render after an edit counts as verification (satisfies the gate).
-              if (appliedAny) verifiedSinceApply = true
-              agentProgressRef.current.lastAction = `Rendered ${input?.slideId}`
-              addStep({ kind: 'render', label: `Rendered ${input?.slideId}`, image: png ?? undefined })
-              if (png) {
-                toolResults.push({
-                  type: 'tool_result',
-                  tool_use_id: id,
-                  content: [
-                    {
-                      type: 'image',
-                      source: { type: 'base64', media_type: 'image/png', data: png.split(',')[1] },
-                    },
-                    { type: 'text', text: `Current rendering of ${input?.slideId}.` },
-                  ],
-                })
-              } else {
-                toolResults.push({
-                  type: 'tool_result',
-                  tool_use_id: id,
-                  content: `Could not render ${input?.slideId}.`,
-                  is_error: true,
-                })
-              }
-            } else if (name === 'apply_changes') {
-              // A max_tokens cutoff truncates the tool-call JSON, so `changes`
-              // arrives empty/partial and nothing can be applied. Detect that and
-              // tell the model to resend in smaller batches instead of looping.
-              const rawChanges = input?.changes
-              if (!Array.isArray(rawChanges) || rawChanges.length === 0) {
-                const cutOff = stopReason === 'max_tokens'
-                addStep({
-                  kind: 'note',
-                  label: cutOff
-                    ? 'apply_changes was cut off (too large) — asking the agent to send smaller batches.'
-                    : 'apply_changes had no changes — asking the agent to provide them.',
-                })
-                toolResults.push({
-                  type: 'tool_result',
-                  tool_use_id: id,
-                  content: cutOff
-                    ? 'Your apply_changes was too large and got cut off before completing, so NOTHING was applied. Resend it in SMALLER batches: add at most 1–2 slides (with their elements) per apply_changes call, then continue in the next turn.'
-                    : 'apply_changes contained no changes. Provide a non-empty changes[] array.',
-                  is_error: true,
-                })
-                continue
-              }
-              const changes = resolveAssetRefs(
-                rawChanges as Change[],
-                collectAllAssets()
-              )
-
-              const scopeSlideIds =
-                workScope.remainingSlideIds.length > 0
-                  ? workScope.remainingSlideIds
-                  : workScope.targetSlideIds
-              const scopeLocked =
-                scopeSlideIds.length > 0 && scopeSlideIds.length < slidesRef.current.length
-              const uiScopeLocked = !!opts?.scopedSlideIds?.length
-              if (
-                scopeLocked &&
-                (layoutAuditRun || (isContinuation && !deckBuildWithScope) || uiScopeLocked) &&
-                !(deckBuild && scopeConfirmed && changesAddSlides(changes))
-              ) {
-                const allowed = new Set(scopeSlideIds)
-                const touched = [
-                  ...new Set(changes.map(c => c.slideId).filter((id): id is string => !!id)),
-                ]
-                const outside = touched.filter(id => !allowed.has(id))
-                if (outside.length) {
-                  addStep({
-                    kind: 'note',
-                    label: `Blocked — patch targeted slide(s) outside scope: ${outside.join(', ')}`,
-                  })
-                  toolResults.push({
-                    type: 'tool_result',
-                    tool_use_id: id,
-                    content:
-                      `These slide(s) are OUTSIDE the locked work scope: ${outside.join(', ')}. ` +
-                      `apply_changes ONLY for: ${scopeSlideIds.join(', ')}. Nothing was applied.`,
-                    is_error: true,
-                  })
-                  continue
-                }
-              }
-
-              if (deckBuild && !scopeConfirmed) {
-                addStep({
-                  kind: 'note',
-                  label: 'Blocked — choose Light / Medium / In-depth first.',
-                })
-                toolResults.push({
-                  type: 'tool_result',
-                  tool_use_id: id,
-                  content:
-                    'You must call ask_user FIRST with question id "presentation_depth" (Light ≤5 / Medium ≤10 / In-depth ≤15 slides) before any apply_changes on a new deck build. Nothing was applied.',
-                  is_error: true,
-                })
-                continue
-              }
-
-              if (wouldExceedScopeSlideLimit(slidesRef.current, changes, presentationScope)) {
-                const slideLimit = effectiveSlideLimit(presentationScope)
-                const projected = applyChangesToSlides(slidesRef.current, changes).length
-                addStep({
-                  kind: 'note',
-                  label: `Blocked — would exceed the ${slideLimit}-slide limit (${projected} total).`,
-                })
-                toolResults.push({
-                  type: 'tool_result',
-                  tool_use_id: id,
-                  content:
-                    `This patch would ADD slides and bring the deck to ${projected}, exceeding the limit of ${slideLimit}` +
-                    (presentationScope ? ` (${presentationScope} scope)` : '') +
-                    `. Nothing was applied. Scope caps apply only when creating NEW slides — geometry/content edits on existing slides are always allowed. ` +
-                    `Add at most ${Math.max(0, slideLimit - slidesRef.current.length)} more slide(s), or finish.`,
-                  is_error: true,
-                })
-                continue
-              }
-
-              // Cost ceiling + oscillation guard: count edits and detect an
-              // identical patch being re-applied (a sign the agent is looping).
-              applyCount++
-              const signature = JSON.stringify(changes)
-              const repeats = applySignatures.filter(s => s === signature).length
-              applySignatures.push(signature)
-              appliedAny = true
-              verifiedSinceApply = false
-              if (repeats >= 1) {
-                stopFlag =
-                  'Paused: identical edit loop detected. Changes kept — say "continue" to resume the pipeline.'
-              } else if (applyCount > MAX_APPLIES) {
-                stopFlag = `Paused: reached the ${MAX_APPLIES}-edit limit for this segment. Changes kept — say "continue" to resume.`
-              }
-              const report = analyzeChanges(slidesRef.current, changes)
-              const before = slidesRef.current
-              const next = applyChangesToSlides(before, changes)
-              const sum = input?.summary || `${report.willApply} change(s)`
-              slidesRef.current = next
-              pendingChangesRef.current = [...(pendingChangesRef.current ?? []), ...changes]
-              const netPending = buildNetChangesFromSnapshots(beforeRun, next)
-              if (netPending.length) {
-                setSlides(next)
-                setPendingChanges(netPending)
-                pendingChangesRef.current = netPending
-                setAmendmentCheckpoint(beforeRun)
-                amendmentCheckpointRef.current = beforeRun
-                setAmendmentSource('agent')
-                amendmentSourceRef.current = 'agent'
-                setHighlightDiffOnCanvas(true)
-              }
-              for (const c of changes) agentProgressRef.current.changedSlideIds.add(c.slideId)
-              agentProgressRef.current.applyBatches++
-              agentProgressRef.current.lastAction = `Applied ${report.willApply} change(s): ${sum}`
-              if (incompleteAgentContextRef.current) {
-                const merged = new Set([
-                  ...incompleteAgentContextRef.current.modifiedSlideIds,
-                  ...Array.from(agentProgressRef.current.changedSlideIds),
-                ])
-                incompleteAgentContextRef.current = {
-                  ...incompleteAgentContextRef.current,
-                  modifiedSlideIds: Array.from(merged),
-                  targetSlideIds:
-                    incompleteAgentContextRef.current.targetSlideIds.length > 0
-                      ? incompleteAgentContextRef.current.targetSlideIds
-                      : workScope.targetSlideIds,
-                  lastAction: agentProgressRef.current.lastAction,
-                }
-              }
-              // Programmatic geometry check (mirrors a designer measuring for
-              // overflow): surface only the issues THIS edit introduced so the
-              // model can self-correct without re-rendering every slide.
-              const { newIssues, spacingIssues, overlapIssues } = reviewLayoutChange(before, next)
-              const geomNewIssues = designSystemAlign
-                ? filterOverlapOnlyLayoutIssues(newIssues)
-                : geometryOnlyRun || layoutFixTask
-                  ? filterLayoutFixIssues(newIssues)
-                  : newIssues
-              const touchedIds = new Set(changes.map(c => c.slideId).filter(Boolean))
-              const spacingOnTouched = spacingIssues.filter(
-                i => i.slideId && touchedIds.has(i.slideId)
-              )
-              const overlapOnTouched = overlapIssues.filter(
-                i => i.slideId && touchedIds.has(i.slideId)
-              )
-              const layoutOnTouched =
-                geometryOnlyRun || layoutFixTask
-                  ? [...touchedIds].flatMap(sid => {
-                      const s = next.find(sl => sl.id === sid)
-                      return s ? findLayoutFixIssues(s) : []
-                    })
-                  : overlapOnTouched
-              runSummary = sum
-              totalSkipped += report.skipped
-              addStep({
-                kind: 'apply',
-                label: `Applied ${report.willApply}/${report.total}: ${sum}${
-                  geomNewIssues.length ? ` · ${geomNewIssues.length} layout issue(s)` : ''
-                }`,
-              })
-
-              let knowledgeReviewBlock = ''
-              const skipKnowledgeOnApply =
-                fastLayoutRun || (changes.length > 0 && changesAreGeometryOnly(changes))
-              if ((semanticEditPlan || approvalRequired) && !skipKnowledgeOnApply) {
-                const validation = await reviewAgentChanges({
-                  instruction: agentInstruction,
-                  semanticEditPlan,
-                  changes,
-                  slidesAfter: next,
-                  approvalRequired,
-                })
-                if (validation) {
-                  lastValidation = validation
-                  if (validation.issues.length) {
-                    addStep({
-                      kind: 'review',
-                      label: formatValidationForUser(validation),
-                    })
-                  }
-                  if (validation.validation_result !== 'pass') {
-                    knowledgeReviewBlock = `\n\nKNOWLEDGE VALIDATION:\n${formatValidationForAgent(validation)}`
-                  } else {
-                    knowledgeReviewBlock = '\n\nKNOWLEDGE VALIDATION: PASS — no blocking issues.'
-                  }
-                }
-              }
-
-              toolResults.push({
-                type: 'tool_result',
-                tool_use_id: id,
-                content: `Applied ${report.willApply} of ${report.total} change(s)${
-                  report.skipped
-                    ? ` (${report.skipped} skipped — verify those element ids actually exist on the slide)`
-                    : ''
-                }.${
-                  geomNewIssues.length
-                    ? `\n\nLAYOUT CHECK — this edit introduced ${geomNewIssues.length} geometry issue(s) (slide is 10×7.5in); fix them before finishing:\n${formatLayoutIssues(
-                        geomNewIssues
-                      )}`
-                    : '\n\nLAYOUT CHECK — no new overflow/overlap detected.'
-                }${
-                  geometryOnlyRun || layoutFixTask
-                    ? layoutOnTouched.length
-                      ? `\n\n${formatOverlapCheck(layoutOnTouched)}\n\n` +
-                        `Fix ALL issues above in your NEXT apply_changes (one batch) — do not micro-patch one pair per turn.`
-                      : '\n\nLAYOUT CHECK — no overlaps, misalignment, or clipped text detected.'
-                    : designSystemAlign
-                      ? overlapOnTouched.length
-                        ? `\n\n${formatOverlapCheck(overlapOnTouched)}`
-                        : '\n\nSTYLING PASS — ignore margin-imbalance on accent bars; overlaps only.'
-                    : agentPhase === 'review' || layoutAuditRun
-                      ? `\n\n${formatOverlapCheck(overlapOnTouched)}\n\n${formatSpacingCheck(spacingOnTouched)}`
-                      : geomNewIssues.some(i => i.kind === 'overlap')
-                        ? `\n\n${formatOverlapCheck(geomNewIssues.filter(i => i.kind === 'overlap'))}`
-                        : ''
-                }${knowledgeReviewBlock}${
-                  designSystemAlign
-                    ? ' Finish when bg/fonts/colors match on all target slides — do not chase margins.'
-                    : geometryOnlyRun || layoutFixTask
-                      ? layoutOnTouched.length
-                        ? ' Re-render once, then finish when LAYOUT CHECK is clean.'
-                        : ' Finish after one render — LAYOUT CHECK is clean.'
-                      : ' Re-render the slide to verify the result visually.'
-                }`,
-              })
-            } else {
-              toolResults.push({
-                type: 'tool_result',
-                tool_use_id: id,
-                content: `Unknown tool: ${name}`,
-                is_error: true,
-              })
-            }
-          }
-
-          if (finished) break
-
-          // Agent asked the user structured questions → render them and pause the
-          // run. The user's answers resume a fresh agent turn (handleSubmitAnswers).
-          if (askPayload) {
-            const payload = askPayload
-            setDisplay(prev => [
-              ...prev,
-              {
-                role: 'assistant',
-                response: {
-                  type: 'clarification',
-                  question: payload.intro ?? '',
-                  questions: payload.questions,
-                },
-              },
-            ])
-            setPendingAgentInstruction(agentInstruction)
-            const modifiedNow = diffSlideIds(beforeRun, slidesRef.current)
-            if (incompleteAgentContextRef.current) {
-              incompleteAgentContextRef.current = {
-                ...incompleteAgentContextRef.current,
-                modifiedSlideIds: modifiedNow,
-                targetSlideIds: slidesRef.current.map(s => s.id),
-                deckWide: isNewDeckBuildRequest(agentInstruction),
-                lastAction: 'Paused for user input',
-              }
-            } else if (modifiedNow.length > 0) {
-              incompleteAgentContextRef.current = {
-                originalInstruction: agentInstruction,
-                modifiedSlideIds: modifiedNow,
-                targetSlideIds: slidesRef.current.map(s => s.id),
-                lastAction: 'Paused for user input',
-                wasLayoutAudit: false,
-                deckWide: isNewDeckBuildRequest(agentInstruction),
-              }
-            }
-            // Record what was asked so the resumed run has continuity.
-            const asked = payload.questions.map(q => q.question).filter(Boolean).join(' | ')
-            runSummary =
-              `[asked the user]${payload.intro ? ` ${payload.intro}` : ''}${asked ? ` — ${asked}` : ''}`.trim()
-            break
-          }
-
-          // No actionable tool call this turn — the model either ran out of token
-          // budget mid-thought (stop_reason "max_tokens") or narrated without
-          // acting. Instead of hanging silently, tell the user and nudge it to act.
-          if (toolResults.length === 0) {
-            if (nudges < MAX_NUDGES) {
-              nudges++
-              const why =
-                stopReason === 'max_tokens'
-                  ? 'hit its token budget before acting'
-                  : 'replied without calling a tool'
-              addStep({ kind: 'note', label: `Agent ${why} — nudging it to continue…` })
-              // Drop this turn's thinking blocks (only required alongside a
-              // tool_use, which this turn lacks) so an incomplete/unsigned
-              // thinking block from a max_tokens cutoff can't break the next call.
-              const textOnly = content
-                .filter((b): b is Extract<AgentBlock, { type: 'text' }> => b.type === 'text' && !!b.text?.trim())
-                .map(b => ({ type: 'text' as const, text: b.text as string }))
-              messages[messages.length - 1] = {
-                role: 'assistant',
-                content: textOnly.length ? textOnly : [{ type: 'text', text: '(continuing)' }],
-              }
-              messages.push({
-                role: 'user',
-                content:
-                  'You did not call a tool. Do NOT explain or plan in prose — call the next tool NOW ' +
-                  '(get_slides, apply_changes, render_slide, or finish) and keep any text to one short sentence.',
-              })
-              continue
-            }
-            captureAgentPause(
-              'no_tool_call',
-              'agent stopped without calling a tool',
-              step
-            )
-            const modified = Array.from(agentProgressRef.current.changedSlideIds)
-            const limitReached = buildNoToolCallPauseError({
-              modifiedSlideIds: modified,
-              lastAction: agentProgressRef.current.lastAction || undefined,
-              hasChanges: modified.length > 0,
-            })
-            addStep({
-              kind: 'error',
-              label: formatAgentLimitError(limitReached),
-              limitReached,
-            })
-            setAgentRunIncomplete(true)
-            break
-          }
-
-          messages.push({ role: 'user', content: toolResults })
-
-          if (!introCompressed && step === loopStartStep) {
-            introCompressed = true
-            const parsedScope = parsePresentationScope(agentInstruction)
-            if (parsedScope) presentationScope = parsedScope
-            const first = messages[0]
-            if (first?.role === 'user' && typeof first.content === 'string') {
-              messages[0] = {
-                role: 'user',
-                content: compressAgentIntro(first.content, agentInstruction, {
-                  scopeNote: presentationScope
-                    ? formatPresentationScopeNote(presentationScope)
-                    : undefined,
-                }),
-              }
-            }
-          }
-
-          if (stopFlag) {
-            const modified = Array.from(agentProgressRef.current.changedSlideIds)
-            const oscillation = stopFlag.includes('identical edit')
-            const spacingLimit =
-              stopFlag.includes('spacing/balance') || stopFlag.includes('layout polish')
-            captureAgentPause(
-              spacingLimit ? 'spacing_limit' : oscillation ? 'oscillation' : 'apply_limit',
-              stopFlag.replace(/^Paused:\s*/i, ''),
-              step
-            )
-            const limitReached = spacingLimit
-              ? buildSpacingLimitError({
-                  modifiedSlideIds: modified,
-                  applyBatches: agentProgressRef.current.applyBatches || undefined,
-                  lastAction: agentProgressRef.current.lastAction || undefined,
-                  hasChanges: modified.length > 0 || (pendingChangesRef.current?.length ?? 0) > 0,
-                })
-              : buildApplyLimitError({
-                  applyLimit: MAX_APPLIES,
-                  modifiedSlideIds: modified,
-                  applyBatches: agentProgressRef.current.applyBatches || undefined,
-                  lastAction: agentProgressRef.current.lastAction || undefined,
-                  hasChanges: modified.length > 0 || (pendingChangesRef.current?.length ?? 0) > 0,
-                  oscillation,
-                })
-            addStep({
-              kind: 'error',
-              label: formatAgentLimitError(limitReached),
-              limitReached,
-            })
-            setAgentRunIncomplete(true)
-            break
-          }
-
-          if (step === maxAgentSteps - 1) {
-            hitStepLimit = true
-            setAgentRunIncomplete(true)
-            const p = agentProgressRef.current
-            const modified = Array.from(p.changedSlideIds)
-            captureAgentPause(
-              'step_limit',
-              `reached the ${maxAgentSteps}-step limit`,
-              step
-            )
-            if (incompleteAgentContextRef.current) {
-              const merged = new Set([
-                ...incompleteAgentContextRef.current.modifiedSlideIds,
-                ...modified,
-              ])
-              incompleteAgentContextRef.current = {
-                ...incompleteAgentContextRef.current,
-                modifiedSlideIds: Array.from(merged),
-                lastAction: p.lastAction,
-              }
-            }
-            const limitReached = buildStepLimitError({
-              stepLimit: maxAgentSteps,
-              modifiedSlideIds: modified,
-              lastAction: p.lastAction || undefined,
-              hasChanges: modified.length > 0,
-            })
-            addStep({
-              kind: 'error',
-              label: formatAgentLimitError(limitReached),
-              limitReached,
-            })
-          }
-        }
         }
       } catch (err) {
         // A user-triggered abort surfaces here as an AbortError — that's expected,
@@ -5298,6 +4549,17 @@ export default function Home() {
         // Reconcile React state with the ref source-of-truth in case any path
         // updated one without the other during the loop.
         setSlides(slidesRef.current)
+        // If clearExisting replaced all slides with new IDs, the closure's
+        // activeSlideId is stale — snap to the first available slide.
+        if (
+          slidesRef.current.length > 0 &&
+          !slidesRef.current.some(s => s.id === activeSlideId)
+        ) {
+          const firstId = slidesRef.current[0].id
+          setActiveSlideId(firstId)
+          setSelectedSlideIds([firstId])
+          setSelectionAnchorId(firstId)
+        }
         // Record the agent's outcome in history so future turns have continuity
         // (the transcript builder surfaces this to the next agent run). When the run
         // was cut off at the step limit, flag it as INCOMPLETE so a later "continue"
@@ -5320,9 +4582,18 @@ export default function Home() {
           ])
         }
         if (runFinishedCleanly && !hitStepLimit) {
-          incompleteAgentContextRef.current = null
-          agentPauseStateRef.current = null
-          setAgentRunIncomplete(false)
+          // Only clear the incomplete context when the operation that just finished
+          // IS the original task (or there was no pending deck build). An unrelated
+          // edit (theme change, layout fix) must not erase a mid-build checkpoint.
+          const pendingCtx = incompleteAgentContextRef.current
+          const isOriginalTask =
+            !pendingCtx?.deckWide ||
+            agentInstruction === pendingCtx?.originalInstruction
+          if (isOriginalTask) {
+            incompleteAgentContextRef.current = null
+            agentPauseStateRef.current = null
+            setAgentRunIncomplete(false)
+          }
         }
       }
     },
@@ -5359,18 +4630,73 @@ export default function Home() {
     async (plan: DeckPlan) => {
       plannerSessionIdRef.current = null
       sdkSessionIdRef.current = null // fresh executor session for this build
-      setDisplay(prev => [
-        ...prev,
-        {
-          role: 'assistant' as const,
-          agentStep: {
-            kind: 'plan' as const,
-            label: `Phase 2 — Building "${plan.title}" · ${plan.slides.length} slides · ${plan.scope}`,
+      lastPhaseStatsRef.current = null
+
+      // Deck builds always run on Sonnet regardless of the plan's requested effort.
+      // Use 'high' here so the cost estimate uses Sonnet-calibrated pricing.
+      const effort = 'high'
+      const est = estimatePhaseTokens('content', plan.slides.length, effort)
+      const tokenInfo: PhaseTokenInfo = {
+        phase: 'content',
+        slideCount: plan.slides.length,
+        effort,
+        cachingEnabled: true,
+        ...est,
+        status: 'running',
+      }
+
+      setDisplay(prev => {
+        phaseTokenBubbleIndexRef.current = prev.length + 1 // +1 for the plan step bubble
+        return [
+          ...prev,
+          {
+            role: 'assistant' as const,
+            agentStep: {
+              kind: 'plan' as const,
+              label: `Phase 2 — Building "${plan.title}" · ${plan.slides.length} slides · ${plan.scope}`,
+            },
           },
-        },
-      ])
-      const instruction = buildContentAgentInstruction(plan, plannerKnowledgeContextRef.current)
-      await runAgent(instruction, { skipPlanner: true })
+          { role: 'assistant' as const, phaseTokenInfo: tokenInfo },
+        ]
+      })
+
+      // Plan+knowledge goes in system prompt (cached) so it isn't resent every turn.
+      // User prompt is a lightweight "execute" trigger only.
+      const systemContext = buildContentAgentSystemContext(plan, plannerKnowledgeContextRef.current)
+      // Store plan so "continue" after a credit error can rebuild systemContext.
+      plannerPlanRef.current = plan
+      const instruction = buildContentAgentUserPrompt()
+      await runAgent(instruction, {
+        skipPlanner: true,
+        effort,
+        clearExisting: true,
+        skipUserEcho: true,
+        systemContext,
+      })
+
+      // Update the prediction bubble with actual token counts.
+      const stats = lastPhaseStatsRef.current as { tokens?: number; costUsd?: number; numTurns?: number } | null
+      const bubbleIdx = phaseTokenBubbleIndexRef.current
+      if (bubbleIdx !== null) {
+        setDisplay(prev =>
+          prev.map((m, i) =>
+            i === bubbleIdx && m.phaseTokenInfo
+              ? {
+                  ...m,
+                  phaseTokenInfo: {
+                    ...m.phaseTokenInfo,
+                    actualTokens: stats?.tokens,
+                    actualCost: stats?.costUsd,
+                    actualTurns: stats?.numTurns,
+                    status: 'done',
+                  },
+                }
+              : m
+          )
+        )
+        phaseTokenBubbleIndexRef.current = null
+      }
+
       // Offer Phase 3 layout pass once content is built.
       const builtCount = slidesRef.current.length
       if (builtCount > 0) {
@@ -5387,17 +4713,60 @@ export default function Home() {
   const handleRunLayoutPass = useCallback(() => {
     const slideIds = slidesRef.current.map(s => s.id)
     if (!slideIds.length) return
-    setDisplay(prev => [
-      ...prev,
-      {
-        role: 'assistant' as const,
-        agentStep: {
-          kind: 'plan' as const,
-          label: `Phase 3 — Layout refinement · ${slideIds.length} slides`,
+    lastPhaseStatsRef.current = null
+
+    const effort = 'medium'
+    const est = estimatePhaseTokens('layout', slideIds.length, effort)
+    const tokenInfo: PhaseTokenInfo = {
+      phase: 'layout',
+      slideCount: slideIds.length,
+      effort,
+      cachingEnabled: true,
+      ...est,
+      status: 'running',
+    }
+
+    setDisplay(prev => {
+      phaseTokenBubbleIndexRef.current = prev.length + 1 // +1 for the plan step bubble
+      return [
+        ...prev,
+        {
+          role: 'assistant' as const,
+          agentStep: {
+            kind: 'plan' as const,
+            label: `Phase 3 — Layout refinement · ${slideIds.length} slides`,
+          },
         },
-      },
-    ])
-    void runAgent(buildLayoutAgentInstruction(slideIds), { skipPlanner: true })
+        { role: 'assistant' as const, phaseTokenInfo: tokenInfo },
+      ]
+    })
+
+    void runAgent(buildLayoutAgentInstruction(slideIds), {
+      skipPlanner: true,
+      skipUserEcho: true,
+    }).then(() => {
+      const bubbleIdx = phaseTokenBubbleIndexRef.current
+      if (bubbleIdx !== null) {
+        const phaseStats = lastPhaseStatsRef.current as { tokens?: number; costUsd?: number; numTurns?: number } | null
+        setDisplay(prev =>
+          prev.map((m, i) =>
+            i === bubbleIdx && m.phaseTokenInfo
+              ? {
+                  ...m,
+                  phaseTokenInfo: {
+                    ...m.phaseTokenInfo,
+                    actualTokens: phaseStats?.tokens,
+                    actualCost: phaseStats?.costUsd,
+                    actualTurns: phaseStats?.numTurns,
+                    status: 'done',
+                  },
+                }
+              : m
+          )
+        )
+        phaseTokenBubbleIndexRef.current = null
+      }
+    })
   }, [runAgent])
 
   // Called when the user sends revision feedback on a DeckPlanBubble.
@@ -5697,7 +5066,7 @@ export default function Home() {
         return
       }
 
-      // ── Depth / scope answer or executor ask_user resume ───────────────────
+      // ── Executor ask_user resume (SDK executor paused with slides already built) ──
       if (pendingAgentInstruction) {
         const orig = pendingAgentInstruction
         setPendingAgentInstruction(null)
@@ -5712,12 +5081,11 @@ export default function Home() {
           { role: 'user', content: text, historyLength: prev.length },
         ])
         const scope = parsePresentationScope(text)
-        const scopeHint = scope ? `\n${formatPresentationScopeNote(scope)}\n` : ''
         const completedSlideIds = amendmentCheckpoint
           ? diffSlideIds(amendmentCheckpoint, slides)
           : []
 
-        // Agent already built slide(s) then paused for depth — continue without rolling back.
+        // SDK executor built slide(s) then paused for user input — continue without rolling back.
         if (completedSlideIds.length > 0 && scope) {
           incompleteAgentContextRef.current = {
             originalInstruction: orig,
@@ -5747,6 +5115,7 @@ export default function Home() {
           return
         }
 
+        // Generic executor ask_user answer — resume with enriched instruction.
         const slideNums = parseSlideNumbersFromText(text, slides.length)
         const slideIds = slideNums.map(n => slides[n - 1]?.id).filter((id): id is string => !!id)
         const slideHint =
@@ -5754,8 +5123,7 @@ export default function Home() {
             ? `\n${buildSlideTargetFixInstruction(slideNums, slideIds, orig)}\n`
             : ''
         runAgentRef.current?.(
-          `${orig}\n\n[User chose presentation depth:]\n${text}${scopeHint}${slideHint}\n\n` +
-            `Build the full presentation now. Do NOT call ask_user for depth again.`,
+          `${orig}\n\n[User answered:]\n${text}${slideHint}\n\nContinue from where you left off.`,
           { skipUserEcho: true, effort: 'high' }
         )
         return

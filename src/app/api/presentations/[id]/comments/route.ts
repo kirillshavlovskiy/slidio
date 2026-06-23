@@ -9,7 +9,7 @@ type Ctx = { params: { id: string } }
 
 function isCommentsSchemaError(err: unknown): boolean {
   const msg = String((err as { message?: string })?.message || err)
-  return /no such table: DeckComment|no such column: pinX|no such column: pinY/i.test(msg)
+  return /no such table: DeckComment|no such column:.*pinX|no such column:.*pinY/i.test(msg)
 }
 
 function parsePin(v: unknown): number | null {

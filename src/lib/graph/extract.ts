@@ -1,5 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk'
 import { agentModel } from '@/lib/agent/models'
+import { logLlmCall } from '@/lib/llmLog'
 import type { ExtractedItem } from './validate'
 
 const client = new Anthropic()
@@ -81,11 +82,20 @@ function parseBatchItems(raw: string, expectedCount: number): ExtractedItem[][] 
 async function createWithRetry(params: Anthropic.MessageCreateParamsNonStreaming): Promise<Anthropic.Message> {
   for (let attempt = 0; ; attempt++) {
     try {
-      return await withTimeout(
+      const resp = await withTimeout(
         client.messages.create(params),
         API_TIMEOUT_MS,
         'AI extraction'
       )
+      logLlmCall({
+        caller: 'graph-extract',
+        model: params.model as string,
+        inputTokens: resp.usage.input_tokens,
+        outputTokens: resp.usage.output_tokens,
+        cacheReadTokens: (resp.usage as { cache_read_input_tokens?: number }).cache_read_input_tokens,
+        cacheWriteTokens: (resp.usage as { cache_creation_input_tokens?: number }).cache_creation_input_tokens,
+      })
+      return resp
     } catch (err) {
       const status = (err as { status?: number })?.status
       if (status === 429 && attempt < MAX_429_RETRIES) {
@@ -119,7 +129,7 @@ async function callExtract(user: string, batchCount: number): Promise<ExtractedI
     model: MODEL,
     max_tokens: MAX_OUTPUT_TOKENS,
     thinking: { type: 'disabled' },
-    system: SYSTEM,
+    system: [{ type: 'text', text: SYSTEM, cache_control: { type: 'ephemeral' } }],
     messages: [{ role: 'user', content: user }],
   })
 

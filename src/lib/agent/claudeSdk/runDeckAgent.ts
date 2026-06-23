@@ -5,6 +5,7 @@ import {
   coerceAgentEffort,
   type Effort,
 } from '@/lib/agent/models'
+import { logSdkTurn } from '@/lib/llmLog'
 import { buildAgentSystemPrompt } from '@/lib/agent/prompts'
 import type { SlideData } from '@/lib/types'
 import { AskUserPause, DeckAgentSession } from '@/lib/agent/claudeSdk/deckSession'
@@ -80,10 +81,14 @@ export async function runDeckAgentSession(params: {
   layoutAudit?: boolean
   maxTurns?: number
   resume?: string
+  /** Static context (plan + knowledge) to append to the system prompt so it is
+   *  cached across all turns of the multi-turn session instead of resent in the
+   *  user message on every turn. Use for Phase 2 deck builds. */
+  systemContext?: string
   onEvent: (event: DeckAgentStreamEvent) => void
   abortSignal?: AbortSignal
 }): Promise<DeckAgentSessionResult> {
-  const session = new DeckAgentSession(params.slides)
+  const session = new DeckAgentSession(params.slides, { deckBuild: params.deckBuild })
   const deckServer = createDeckMcpServer(session, params.onEvent)
   const abortController = new AbortController()
   if (params.abortSignal) {
@@ -96,19 +101,23 @@ export async function runDeckAgentSession(params: {
       deckBuild: params.deckBuild,
       geometryOnly: params.geometryOnly,
       layoutAudit: params.layoutAudit,
-    }) + SDK_MODE_NOTE
+    }) +
+    SDK_MODE_NOTE +
+    (params.systemContext ? `\n\n${params.systemContext}` : '')
 
   let sessionId: string | undefined
   let costUsd: number | undefined
   let numTurns: number | undefined
   let totalTokens = 0
+  let runningCostUsd = 0
+  let turnCount = 0
   let askUser: DeckAgentSessionResult['askUser']
 
   try {
     const q = query({
       prompt: params.prompt,
       options: {
-        model: agentModel(),
+        model: agentModel(params.effort),
         maxTurns: params.maxTurns ?? 30,
         effort: effortToSdk(params.effort),
         systemPrompt,
@@ -140,6 +149,9 @@ export async function runDeckAgentSession(params: {
       }
 
       if (message.type === 'assistant') {
+        turnCount++
+        logSdkTurn(`sdk-agent turn#${turnCount}`, message)
+
         const thinking = extractThinking(message)
         if (thinking) {
           params.onEvent({ type: 'step', kind: 'thinking', label: thinking })
@@ -149,14 +161,26 @@ export async function runDeckAgentSession(params: {
         if (text) {
           params.onEvent({ type: 'step', kind: 'note', label: text })
         }
+
+        // Emit running cost estimate after each turn.
+        const msgUsage = (message as { message?: { usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } } }).message?.usage
+        if (msgUsage) {
+          const tIn = msgUsage.input_tokens ?? 0
+          const tOut = msgUsage.output_tokens ?? 0
+          const tCacheHit = (msgUsage as { cache_read_input_tokens?: number }).cache_read_input_tokens ?? 0
+          const tCacheWrite = (msgUsage as { cache_creation_input_tokens?: number }).cache_creation_input_tokens ?? 0
+          totalTokens += tIn + tOut + tCacheHit + tCacheWrite
+          runningCostUsd += (tIn * 3 + tOut * 15 + tCacheHit * 0.30 + tCacheWrite * 3.75) / 1_000_000
+        }
+        params.onEvent({ type: 'turn_stats', turn: turnCount, totalTokens, costUsd: runningCostUsd })
       }
 
       if (message.type === 'result') {
         sessionId = message.session_id
-        costUsd = message.total_cost_usd
-        numTurns = message.num_turns
+        costUsd = message.total_cost_usd ?? runningCostUsd
+        numTurns = message.num_turns ?? turnCount
         totalTokens =
-          (message.usage?.input_tokens ?? 0) + (message.usage?.output_tokens ?? 0)
+          (message.usage?.input_tokens ?? 0) + (message.usage?.output_tokens ?? 0) || totalTokens
         if (message.subtype === 'success') {
           if (!session.summary && message.result) session.summary = message.result
         } else {
@@ -201,6 +225,7 @@ export async function runDeckAgentSession(params: {
     sessionId,
     costUsd,
     numTurns,
+    totalTokens,
   })
 
   return result

@@ -156,12 +156,17 @@ export function parsePresentationScope(text: string): PresentationScopeId | null
     return 'medium'
   }
 
-  // Strip theme phrases so "light theme" / "dark theme" are not confused with Light depth.
+  // Strip design-system / theme phrases so "light design system" / "light theme" are not
+  // confused with the Light depth scope.
   const withoutTheme = t
-    .replace(/\blight\s+theme\b/g, '')
-    .replace(/\bdark\s+theme\b/g, '')
-    .replace(/\blight\s+mode\b/g, '')
-    .replace(/\bdark\s+mode\b/g, '')
+    .replace(/\blight\s+design\s+system\b/gi, '')
+    .replace(/\bdark\s+design\s+system\b/gi, '')
+    .replace(/\blight\s+theme\b/gi, '')
+    .replace(/\bdark\s+theme\b/gi, '')
+    .replace(/\blight\s+mode\b/gi, '')
+    .replace(/\bdark\s+mode\b/gi, '')
+    .replace(/\bdefault\s+design\s+system\b/gi, '')
+    .replace(/\bdesign\s+system\b/gi, '')
   if (
     /\b(light|brief|short|quick|overview|minimal)\b/.test(withoutTheme) &&
     /\b(presentation|deck|scope|depth|detail)\b/.test(withoutTheme)
@@ -269,7 +274,12 @@ export function buildDeckBuildContinuationInstruction(
     formatDeckBuildExecuteBlock(scope, currentSlideCount, existingSlideIds, designAlignment) +
     `\n\nPRIORITY: ADD ${remaining > 0 ? remaining : 'any remaining'} NEW section slide(s) (apply_changes op:"add"). ` +
     `LEAVE all ${existingSlideIds.length} existing slide(s) unchanged — do NOT re-edit or re-polish them. ` +
-    `Batch 2–3 new slides per apply_changes, render 1–2 when near the cap, then finish.`
+    `Batch 2–3 new slides per apply_changes, render 1–2 when near the cap, then finish.\n\n` +
+    `⚠️ COST RULE — do NOT call get_slides() without slideIds. Reading all slides at once dumps ` +
+    `${existingSlideIds.length * 2_800} + tokens into context and writes them to cache ` +
+    `(~$0.10 penalty). You do not need to read the existing ${existingSlideIds.length} slides — ` +
+    `they are COMPLETE. Start directly with apply_changes op:"add" for the new slides. ` +
+    `If you must inspect an existing slide for style reference, call get_slide for ONE slide only.`
   )
 }
 

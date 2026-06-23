@@ -42,6 +42,7 @@ export async function POST(req: NextRequest) {
     geometryOnly?: boolean
     layoutAudit?: boolean
     resume?: string
+    systemContext?: string
   }
 
   try {
@@ -53,7 +54,7 @@ export async function POST(req: NextRequest) {
   if (!body.prompt?.trim()) {
     return new Response(JSON.stringify({ error: 'prompt required' }), { status: 400 })
   }
-  if (!Array.isArray(body.slides) || body.slides.length === 0) {
+  if (!Array.isArray(body.slides)) {
     return new Response(JSON.stringify({ error: 'slides required' }), { status: 400 })
   }
 
@@ -80,6 +81,7 @@ export async function POST(req: NextRequest) {
             geometryOnly: body.geometryOnly === true,
             layoutAudit: body.layoutAudit === true,
             resume: body.resume,
+            systemContext: body.systemContext,
             onEvent: push,
             abortSignal,
           })

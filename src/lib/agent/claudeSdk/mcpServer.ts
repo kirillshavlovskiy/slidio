@@ -71,6 +71,7 @@ export function createDeckMcpServer(
             kind: 'apply',
             label: summary || `Applied ${changes.length} change batch`,
           })
+          onEvent({ type: 'slides_update', slides: session.slides })
           return { content: [{ type: 'text', text: result }] }
         }
       ),

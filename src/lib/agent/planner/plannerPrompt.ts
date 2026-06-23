@@ -9,12 +9,21 @@ export const PLANNER_SYSTEM_PROMPT = `You are a presentation architect. Your onl
 
 ## Your three-step process
 1. Call read_context to understand what knowledge and slides already exist.
-2. Call ask_user to clarify scope, audience, and tone — do this BEFORE planning if any are unknown.
+2. Call ask_user — ALWAYS required before planning. See rules below.
 3. Call submit_plan with a complete DeckPlan once you have enough to plan confidently.
 
-## ask_user rules (call this BEFORE submit_plan)
-Ask 1–4 focused questions. Always ask if any of these are unknown:
-- presentation_depth: Light (≤5 slides) / Medium (≤10) / In-depth (≤15)
+## ask_user rules (MANDATORY — call this BEFORE submit_plan, every time)
+**presentation_depth is ALWAYS required** — never infer it from the user's wording. Even if the request mentions "light", "brief", "detailed", or a number, you must ask explicitly so the user consciously chooses the scope.
+
+Ask 1–4 focused questions. Always include:
+- presentation_depth: Light (≤5 slides) / Medium (≤10) / In-depth (≤15)  ← ALWAYS ask this
+- design_system: ALWAYS ask when read_context says "no custom design system uploaded". Offer exactly these three options:
+    • id "general-light" — "General White (Light)" — White slides · navy text · blue accent (clean corporate)
+    • id "general-dark"  — "General Dark"          — Navy slides · white text · gold accent (bold, premium)
+    • id "warm-beige"    — "Warm Beige"            — Cream slides · espresso text · caramel accent (editorial, approachable)
+  Skip this question when read_context says a custom design system IS loaded.
+
+Also ask if unknown (skip if already clear from context):
 - audience: who will see this — executives, investors, engineers, customers?
 - tone: executive / technical / investor / educational / persuasive
 - goal: what decision or action should this deck drive?
@@ -28,6 +37,7 @@ Do NOT ask about content details you can derive from the knowledge context. Do N
 - knowledgeGaps: list data the planner couldn't find that the user should provide before building.
 - Slide count must respect the chosen scope: ${scopeCaps}.
 - The narrative arc must be coherent: cover → problem/context → solution/approach → evidence → call to action / closing.
+- typography: set ONE title/header style for the entire deck. If a DESIGN SYSTEM is in context, derive it from its headline tokens (fontFace, headlineSize, textPrimary color). Otherwise default to: fontFace "Calibri", fontSize 28, color "FFFFFF", bold true, align "left". Every slide in the deck will use this spec for its title/header element.
 
 ## Slide layout vocabulary
 cover, section-header, bullets, two-column, chart, image-text, quote, timeline, grid, closing
@@ -70,11 +80,17 @@ export function buildPlannerUserPrompt(opts: {
   return (
     `User request: "${opts.userInstruction}"\n\n` +
     `${deckSummary}\n\n` +
-    `Start by calling read_context, then ask_user for scope/audience/tone if needed, then submit_plan.`
+    `Start by calling read_context, then ask_user (presentation_depth is ALWAYS required — never skip it), then submit_plan.`
   )
 }
 
 export function formatPlanForContext(plan: import('./types').DeckPlan): string {
+  const t = plan.typography
+  const typographyLine = t
+    ? `TITLE TYPOGRAPHY (apply to EVERY slide header/title element — no exceptions):\n` +
+      `  fontFace: "${t.fontFace}" · fontSize: ${t.fontSize}pt · color: #${t.color} · bold: ${t.bold} · align: ${t.align}`
+    : `TITLE TYPOGRAPHY: fontFace "Calibri" · fontSize 28pt · color #FFFFFF · bold true · align left — apply to EVERY slide title/header.`
+
   const lines = [
     `APPROVED DECK PLAN`,
     `Title: ${plan.title}`,
@@ -82,6 +98,8 @@ export function formatPlanForContext(plan: import('./types').DeckPlan): string {
     `Scope: ${plan.scope} (${plan.slides.length} slides)`,
     `Audience: ${plan.audience}`,
     `Tone: ${plan.tone}`,
+    '',
+    typographyLine,
     '',
     'SLIDES:',
     ...plan.slides.map(
@@ -97,23 +115,53 @@ export function formatPlanForContext(plan: import('./types').DeckPlan): string {
   return lines.join('\n')
 }
 
-export function buildContentAgentInstruction(
+/**
+ * System-prompt block for Phase 2: plan + knowledge context (large, static).
+ * This belongs in the system prompt so it is cached across multi-turn SDK turns
+ * rather than resent in every user message.
+ */
+export function buildContentAgentSystemContext(
   plan: import('./types').DeckPlan,
   knowledgeContext: string
 ): string {
   return (
-    `[PHASE 2 — CONTENT] Build the deck according to the approved plan below. This is a CHANGE request — execute immediately.\n\n` +
-    `Do NOT call ask_user. Do NOT re-plan. Build exactly the slides listed.\n` +
-    `Add 2–3 slides per apply_changes batch. Mark any unverified data with * per the placeholder rule.\n\n` +
+    `[PHASE 2 — CONTENT CONTEXT]\n` +
     formatPlanForContext(plan) +
     (knowledgeContext ? `\n\n${knowledgeContext}` : '')
   )
 }
 
+/**
+ * Lightweight user-turn prompt for Phase 2. The plan + knowledge live in
+ * systemContext (above) so they are only sent once via the system prompt.
+ */
+export function buildContentAgentUserPrompt(): string {
+  return (
+    `[PHASE 2 — CONTENT] Build the deck according to the approved plan in the system context. This is a CHANGE request — execute immediately.\n\n` +
+    `The deck starts EMPTY — you are creating all slides from scratch. Do NOT call ask_user. Do NOT re-plan.\n` +
+    `Build exactly the slides listed. Add 4–5 slides per apply_changes batch.\n` +
+    `Mark any unverified data with * per the placeholder rule.\n\n` +
+    `STRICT PHASE 2 RULES — NO EXCEPTIONS:\n` +
+    `- Do NOT call render_slide. Do NOT call get_slides. Layout is Phase 3's job.\n` +
+    `- Do NOT self-correct layout or geometry. Just add content slides.\n` +
+    `- After each apply_changes, immediately add the next batch. Never pause to review.\n\n` +
+    `TITLE STYLE LOCK: The plan includes a TITLE TYPOGRAPHY spec. Apply those EXACT values (fontFace, fontSize, color, bold, align) to EVERY slide's title/header element — no variation across slides. This is a hard constraint.`
+  )
+}
+
+/** @deprecated Use buildContentAgentSystemContext + buildContentAgentUserPrompt instead. */
+export function buildContentAgentInstruction(
+  plan: import('./types').DeckPlan,
+  knowledgeContext: string
+): string {
+  return buildContentAgentSystemContext(plan, knowledgeContext) + '\n\n' + buildContentAgentUserPrompt()
+}
+
 export function buildLayoutAgentInstruction(slideIds: string[]): string {
   return (
     `[PHASE 3 — LAYOUT] All content slides are built. Your job is visual polish only: fix overlaps, even margins, spacing, and fill. Do NOT rewrite content.\n\n` +
-    `Target slides: ${slideIds.join(', ')}\n` +
-    `Workflow: get_slides → apply_changes (all geometry fixes in one batch) → render 1–2 slides → finish when LAYOUT CHECK is clean.`
+    `Target slides: ${slideIds.join(', ')}\n\n` +
+    `TITLE STYLE AUDIT (run first, before geometry): read all slides with get_slides → find the most common title/header fontSize, fontFace, color, and align across the deck → apply_changes to patch any outlier slide titles to match that modal spec. One batch for all title fixes.\n\n` +
+    `Then geometry pass: apply_changes (all overlap/margin/spacing fixes in one batch) → render 1–2 slides → finish when LAYOUT CHECK is clean.`
   )
 }

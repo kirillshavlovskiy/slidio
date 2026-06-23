@@ -25,6 +25,15 @@ export type PlanSlide = {
 
 export type DeckTone = 'executive' | 'technical' | 'investor' | 'educational' | 'persuasive'
 
+/** Consistent title/header style to apply on every slide in the deck. */
+export type TitleTypography = {
+  fontFace: string          // e.g. "Inter", "Calibri", "Bagoss"
+  fontSize: number          // pt, e.g. 28
+  color: string             // hex no #, e.g. "FFFFFF"
+  bold: boolean
+  align: 'left' | 'center' | 'right'
+}
+
 export type DeckPlan = {
   scope: PresentationScopeId
   audience: string
@@ -33,6 +42,10 @@ export type DeckPlan = {
   oneLiner: string        // the full story in one sentence
   slides: PlanSlide[]
   knowledgeGaps?: string[] // data the planner couldn't find — user should provide before build
+  /** Unified title/header style for every slide — derived from design system or sensible default. */
+  typography?: TitleTypography
+  /** Design system preset chosen by user during planning (only when no custom DS was uploaded). */
+  designSystemPreset?: 'general-light' | 'general-dark' | 'warm-beige'
 }
 
 // Events streamed from the planner agent to the client.

@@ -62,6 +62,13 @@ export function isTitleAlignmentFixRequest(instruction: string): boolean {
 /** Strip agent/router wrappers so the chat shows only what the user typed. */
 export function stripUserFacingInstruction(text: string): string {
   const t = text.trim()
+
+  // Phase 2/3 internal instructions must never be shown as user messages.
+  const phase2 = t.match(/^\[PHASE 2[^\]]*\][^\n]*\n+([\s\S]+?)\n\nThe deck starts EMPTY/i)
+  if (phase2) return 'Building deck from approved plan…'
+  if (/^\[PHASE 2[^\]]*\]/i.test(t)) return 'Building deck from approved plan…'
+  if (/^\[PHASE 3[^\]]*\]/i.test(t)) return 'Refining layout…'
+
   const answerOnly = t.match(/\[ANSWER ONLY[^\]]*\][\s\S]*?User question:\s*([\s\S]+)$/i)
   if (answerOnly) return answerOnly[1].trim()
 
@@ -109,7 +116,7 @@ export function isLayoutGeometryOnlyRequest(instruction: string): boolean {
 }
 
 export const LAYOUT_AUDIT_CHANGE_DIRECTIVE =
-  '\n\n[CHANGE REQUEST — NOT Q&A:] Layout audit/fix task. You MUST call apply_changes with geometry patches (x, y, w, h, z-order, spacing, padLeft, style.fontSize when text clips) on every slide that needs fixes — including separating text↔text and icon/image from overlapping text, and fixing text-overflow where fontSize exceeds the box. Do NOT finish with a text-only deck inventory — the user must see changes on the canvas. Flow: get_slides → apply_changes (batch 2–4 slides per call if needed) → render 1–2 slides to verify → finish with a SHORT summary of fixes applied.'
+  '\n\n[CHANGE REQUEST — NOT Q&A:] Layout audit/fix task. You MUST call apply_changes with geometry patches (x, y, w, h, z-order, spacing, padLeft, style.fontSize when text clips) on every slide that needs fixes — including separating text↔text and icon/image from overlapping text, and fixing text-overflow where fontSize exceeds the box. Do NOT finish with a text-only deck inventory — the user must see changes on the canvas. Flow: get_slides (pass target slideIds) → apply_changes with ALL fixes in ONE call → render 1–2 slides to verify → finish with a SHORT summary of fixes applied.'
 
 export const LAYOUT_CROSS_SLIDE_ICON_RULE =
   ' When fixing multiple slides: read ALL target slides first, then align title/header icons to the SAME x and y across slides (shared icon column). Keep icon↔text gaps consistent; narrow subtitle width or nudge text right so icons never overlap copy. Geometry only — do not bump fontSize to “fill” cells unless the user asked for typography changes.'
@@ -165,6 +172,8 @@ export type IncompleteAgentContext = {
   lastAction: string
   wasLayoutAudit: boolean
   deckWide: boolean
+  /** Phase 2 plan+knowledge system context — stored so "continue" can restore caching. */
+  systemContext?: string
 }
 
 /** Build an explicit resume instruction so "continue" never triggers ask_user. */

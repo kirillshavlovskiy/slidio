@@ -1,6 +1,6 @@
 import { buildDesignSystem, type DSFile, type DesignSystem } from './designSystem'
 
-export type DesignSystemPresetId = 'general-light' | 'general-dark'
+export type DesignSystemPresetId = 'general-light' | 'general-dark' | 'warm-beige'
 
 export type DesignSystemPresetMeta = {
   id: DesignSystemPresetId
@@ -73,6 +73,38 @@ const GENERAL_DARK_RULES = `General Dark — built-in sample design system.
 - Section slides: gold top accent bar + white title; body copy in #CBD5E1.
 - Charts: blue + gold series on dark backgrounds; never use light-grey text on white fills.`
 
+const WARM_BEIGE_CSS = `:root {
+  --bg-default: #FAF7F2;
+  --bg-paper: #F0EAE0;
+  --text-primary: #2C1A0E;
+  --text-secondary: #6B4A2E;
+  --text-tertiary: #9A7A5A;
+  --primary: #B5682A;
+  --secondary: #C97E45;
+  --tertiary: #E0A96D;
+  --accent: #B5682A;
+  --error: #A63232;
+  --success: #4A7A4A;
+  --font-family: Georgia, "Times New Roman", serif;
+  --text-xs: 10pt;
+  --text-sm: 12pt;
+  --text-base: 16pt;
+  --text-lg: 20pt;
+  --text-xl: 28pt;
+  --text-2xl: 36pt;
+  --radius-md: 6px;
+  --space-4: 16px;
+}`
+
+const WARM_BEIGE_RULES = `Warm Beige — built-in sample design system.
+
+- Warm cream slide backgrounds (#FAF7F2) with deep espresso primary text (#2C1A0E) and caramel body text.
+- Accent bars, chips, and dividers use burnt sienna (#B5682A). Avoid cold blues — this palette is warm throughout.
+- Typography: Georgia serif for titles (28pt), Calibri/sans for body (16pt) and labels (12pt).
+- Section slides: thin caramel rule line below the title; off-white card panels for content blocks.
+- Charts: amber and caramel series on cream backgrounds; no cool-grey fills.
+- Cards and callout boxes: use --bg-paper (#F0EAE0) fill with a 1px caramel border.`
+
 export const DESIGN_SYSTEM_PRESETS: DesignSystemPresetMeta[] = [
   {
     id: 'general-light',
@@ -90,11 +122,25 @@ export const DESIGN_SYSTEM_PRESETS: DesignSystemPresetMeta[] = [
     previewText: 'FFFFFF',
     previewAccent: 'F59E0B',
   },
+  {
+    id: 'warm-beige',
+    name: 'Warm Beige',
+    tagline: 'Cream slides · espresso text · caramel accent',
+    previewBg: 'FAF7F2',
+    previewText: '2C1A0E',
+    previewAccent: 'B5682A',
+  },
 ]
 
 function presetFiles(presetId: DesignSystemPresetId): DSFile[] {
-  const css = presetId === 'general-light' ? GENERAL_LIGHT_CSS : GENERAL_DARK_CSS
-  const rules = presetId === 'general-light' ? GENERAL_LIGHT_RULES : GENERAL_DARK_RULES
+  const css =
+    presetId === 'general-light' ? GENERAL_LIGHT_CSS :
+    presetId === 'general-dark'  ? GENERAL_DARK_CSS  :
+    WARM_BEIGE_CSS
+  const rules =
+    presetId === 'general-light' ? GENERAL_LIGHT_RULES :
+    presetId === 'general-dark'  ? GENERAL_DARK_RULES  :
+    WARM_BEIGE_RULES
   return [
     {
       id: `preset-${presetId}-css`,

@@ -1,5 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk'
 import { agentModel } from '@/lib/agent/models'
+import { logLlmCall } from '@/lib/llmLog'
 import type { SlideData } from '@/lib/types'
 import { elementDisplayText, slideTitle } from './project'
 
@@ -157,12 +158,20 @@ Map elements and/or slide theme to catalog entries. JSON only.`
       model: MODEL,
       max_tokens: MAX_OUTPUT_TOKENS,
       thinking: { type: 'disabled' },
-      system: SYSTEM,
+      system: [{ type: 'text', text: SYSTEM, cache_control: { type: 'ephemeral' } }],
       messages: [{ role: 'user', content: user }],
     }),
     API_TIMEOUT_MS,
     'Deck slide mapping'
   )
+  logLlmCall({
+    caller: 'map-deck',
+    model: MODEL,
+    inputTokens: response.usage.input_tokens,
+    outputTokens: response.usage.output_tokens,
+    cacheReadTokens: (response.usage as { cache_read_input_tokens?: number }).cache_read_input_tokens,
+    cacheWriteTokens: (response.usage as { cache_creation_input_tokens?: number }).cache_creation_input_tokens,
+  })
 
   const textBlock = response.content.find(b => b.type === 'text')
   if (!textBlock || textBlock.type !== 'text') {

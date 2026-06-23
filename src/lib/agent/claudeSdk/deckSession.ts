@@ -24,8 +24,13 @@ export class DeckAgentSession {
   pendingChanges: Change[] = []
   summary = ''
   finished = false
+  /** Number of apply_changes calls so far in this session. */
+  applyCount = 0
+  /** When true (deck builds), correction limit is not enforced. */
+  deckBuild = false
 
-  constructor(slides: SlideData[]) {
+  constructor(slides: SlideData[], opts?: { deckBuild?: boolean }) {
+    this.deckBuild = opts?.deckBuild ?? false
     this.beforeRun = JSON.parse(JSON.stringify(slides)) as SlideData[]
     this.slides = JSON.parse(JSON.stringify(slides)) as SlideData[]
   }
@@ -64,6 +69,7 @@ export class DeckAgentSession {
     if (!Array.isArray(rawChanges) || rawChanges.length === 0) {
       return 'apply_changes contained no changes. Provide a non-empty changes[] array.'
     }
+    this.applyCount++
     const report = analyzeChanges(this.slides, rawChanges)
     const before = this.slides
     const next = applyChangesToSlides(before, rawChanges)
@@ -79,18 +85,34 @@ export class DeckAgentSession {
       return s ? findLayoutFixIssues(s) : []
     })
 
+    // Detect newly added slides so agent can verify all expected slides were created.
+    const beforeIds = new Set(before.map(s => s.id))
+    const addedSlideIds = next.map(s => s.id).filter(id => !beforeIds.has(id))
+    const slideCountLine =
+      addedSlideIds.length > 0
+        ? `\nDeck now has ${next.length} slide(s). Newly added: [${addedSlideIds.join(', ')}]. If you planned more slides than this, your apply_changes was truncated — call apply_changes again for the remaining slides.`
+        : `\nDeck now has ${next.length} slide(s).`
+
+    // Enforce correction limit for non-deck-build sessions to prevent costly patch loops.
+    const correctionWarning = !this.deckBuild && this.applyCount === 2
+      ? '\n\n⚠️ CORRECTION LIMIT: this was your 2nd apply_changes. Do NOT call apply_changes again — call finish now. Remaining layout flags are minor false positives.'
+      : !this.deckBuild && this.applyCount > 2
+      ? '\n\n🛑 HARD STOP: you have already made 2 correction passes. Call finish immediately — further apply_changes calls are blocked from counting toward your summary.'
+      : ''
+
     return (
       `Applied ${report.willApply} of ${report.total} change(s)${
         report.skipped
           ? ` (${report.skipped} skipped — verify those element ids exist on the slide)`
           : ''
-      }.` +
+      }.${slideCountLine}` +
       (newIssues.length
         ? `\n\nLAYOUT CHECK — this edit introduced ${newIssues.length} geometry issue(s):\n${formatLayoutIssues(newIssues)}`
         : '\n\nLAYOUT CHECK — no new overflow/overlap detected.') +
       (layoutOnTouched.length
         ? `\n\n${formatOverlapCheck(layoutOnTouched)}\n\nFix ALL issues above before finishing.`
-        : '\n\nRe-render or finish when satisfied.')
+        : '\n\nRe-render or finish when satisfied.') +
+      correctionWarning
     )
   }
 

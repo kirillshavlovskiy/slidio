@@ -316,6 +316,8 @@ export async function fetchGraphKnowledgeContext(opts: {
   presentationId?: string | null
   instruction?: string
   charBudget?: number
+  /** Extra budget for verbatim document chunk excerpts (default 0 = disabled). */
+  chunkBudget?: number
 }): Promise<string> {
   if (!opts.branchId) return ''
   try {
@@ -325,6 +327,7 @@ export async function fetchGraphKnowledgeContext(opts: {
     })
     if (opts.presentationId) params.set('presentationId', opts.presentationId)
     if (opts.instruction) params.set('instruction', opts.instruction.slice(0, 2000))
+    if (opts.chunkBudget) params.set('chunkBudget', String(opts.chunkBudget))
     const res = await fetch(`/api/graph/context?${params}`)
     if (!res.ok) return ''
     const data = (await res.json()) as { context?: string }

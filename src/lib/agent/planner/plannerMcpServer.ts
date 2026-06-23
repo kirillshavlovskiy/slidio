@@ -41,6 +41,14 @@ const planSlideSchema = z.object({
   visualHint: z.string().optional(),
 })
 
+const typographySchema = z.object({
+  fontFace: z.string(),
+  fontSize: z.number(),
+  color: z.string(),
+  bold: z.boolean(),
+  align: z.enum(['left', 'center', 'right']),
+})
+
 const deckPlanSchema = z.object({
   scope: z.enum(['light', 'medium', 'indepth']),
   audience: z.string(),
@@ -49,6 +57,7 @@ const deckPlanSchema = z.object({
   oneLiner: z.string(),
   slides: z.array(planSlideSchema).min(1),
   knowledgeGaps: z.array(z.string()).optional(),
+  typography: typographySchema.optional(),
 })
 
 export function createPlannerMcpServer(
@@ -100,6 +109,8 @@ export function createPlannerMcpServer(
           const result = session.submitPlan(validated)
           onEvent({ type: 'plan_ready', plan: validated })
           onEvent({ type: 'step', kind: 'done', label: `Plan ready: "${plan.title}" — ${plan.slides.length} slides` })
+          // Stop the planner loop — building waits for explicit "Approve & build".
+          abortController.abort()
           return { content: [{ type: 'text', text: result }] }
         }
       ),

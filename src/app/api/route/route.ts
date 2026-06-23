@@ -8,7 +8,7 @@ import { agentModel } from '@/lib/agent/models'
 
 const client = new Anthropic()
 
-const ROUTER_MODEL = process.env.ANTHROPIC_ROUTER_MODEL || agentModel()
+const ROUTER_MODEL = process.env.ANTHROPIC_ROUTER_MODEL || agentModel('low')
 
 type Mode = 'ask' | 'agent'
 type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
@@ -138,8 +138,17 @@ Return the routing JSON now.`
     const resp = await client.messages.create({
       model: ROUTER_MODEL,
       max_tokens: 64,
-      system: ROUTER_SYSTEM,
+      system: [{ type: 'text', text: ROUTER_SYSTEM, cache_control: { type: 'ephemeral' } }],
       messages: [{ role: 'user', content: userMsg }],
+    })
+    const { logLlmCall } = await import('@/lib/llmLog')
+    logLlmCall({
+      caller: 'router',
+      model: ROUTER_MODEL,
+      inputTokens: resp.usage.input_tokens,
+      outputTokens: resp.usage.output_tokens,
+      cacheReadTokens: (resp.usage as { cache_read_input_tokens?: number }).cache_read_input_tokens,
+      cacheWriteTokens: (resp.usage as { cache_creation_input_tokens?: number }).cache_creation_input_tokens,
     })
     const textBlock = resp.content.find(b => b.type === 'text')
     const raw = textBlock?.type === 'text' ? textBlock.text : ''

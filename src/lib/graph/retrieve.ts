@@ -33,6 +33,12 @@ export type GraphContextOptions = {
   presentationId?: string | null
   instruction?: string
   charBudget?: number
+  /**
+   * Extra char budget for raw document chunk excerpts.
+   * When > 0, the most instruction-relevant chunks from extracted SourceDocuments
+   * are appended after the graph nodes section. Default: 0 (disabled).
+   */
+  chunkBudget?: number
 }
 
 export type GraphContextResult = {
@@ -46,7 +52,7 @@ export type GraphContextResult = {
 
 function isGraphSchemaError(err: unknown): boolean {
   const msg = String((err as { message?: string })?.message || err)
-  return /no such table: GraphNode|no such table: SourceDocument/i.test(msg)
+  return /no such table: GraphNode|no such table: SourceDocument|no such table: DocumentChunk/i.test(msg)
 }
 
 /** Structured hub knowledge graph context for the AI agent (Phase 3 interim). */
@@ -64,6 +70,7 @@ export async function buildGraphKnowledgeContext(
 
   try {
     const budget = opts.charBudget ?? 8000
+    const chunkBudget = opts.chunkBudget ?? 0
     const query = keywordSet(opts.instruction ?? '')
 
     const [sources, nodes, edges] = await Promise.all([
@@ -156,6 +163,74 @@ export async function buildGraphKnowledgeContext(
           used += line.length + 1
         }
         parts.push('')
+      }
+    }
+
+    // ── Raw document chunk excerpts (graph-following) ────────────────────────
+    // Follow SUPPORTED_BY edges from top-scoring knowledge nodes to the
+    // DocumentChunk GraphNodes that generated them, then fetch the actual chunk
+    // text. This is more targeted than keyword-matching across all chunks because
+    // it retrieves exactly the source passages that produced the relevant facts.
+    if (chunkBudget > 0 && knowledge.length > 0) {
+      // Map from DocumentChunk GraphNode id → highest knowledge-node score that
+      // points to it, so we rank chunks by how relevant their extracted facts are.
+      const chunkNodeScore = new Map<string, number>()
+      for (const { node, score } of scored) {
+        for (const e of edges) {
+          if (e.fromNodeId === node.id && e.type === 'SUPPORTED_BY') {
+            const prev = chunkNodeScore.get(e.toNodeId) ?? 0
+            if (score > prev) chunkNodeScore.set(e.toNodeId, score)
+          }
+        }
+      }
+
+      if (chunkNodeScore.size > 0) {
+        // Resolve DocumentChunk GraphNode id → actual DocumentChunk.id via properties.chunkId
+        const chunkNodeIds = Array.from(chunkNodeScore.keys())
+        const chunkGraphNodes = nodes.filter(n => chunkNodeIds.includes(n.id))
+        const chunkIdToScore = new Map<string, number>()
+        for (const n of chunkGraphNodes) {
+          try {
+            const props = JSON.parse(n.properties || '{}') as { chunkId?: string }
+            if (props.chunkId) {
+              chunkIdToScore.set(props.chunkId, chunkNodeScore.get(n.id) ?? 0)
+            }
+          } catch { /* skip */ }
+        }
+
+        if (chunkIdToScore.size > 0) {
+          const dbChunks = await prisma.documentChunk.findMany({
+            where: { id: { in: Array.from(chunkIdToScore.keys()) } },
+            select: { id: true, sectionTitle: true, text: true, ordinal: true, sourceDocumentId: true },
+          })
+
+          const sourceTitle = new Map(sources.map(s => [s.id, s.title]))
+
+          // Rank by descending knowledge score, then ordinal for stable order within a doc.
+          dbChunks.sort((a, b) =>
+            (chunkIdToScore.get(b.id) ?? 0) - (chunkIdToScore.get(a.id) ?? 0) ||
+            a.ordinal - b.ordinal
+          )
+
+          parts.push('### Relevant source excerpts (verbatim)')
+          parts.push(
+            '_Verbatim passages from uploaded documents that produced the extracted facts above. ' +
+            'Use exact figures and wording when building slides._'
+          )
+          parts.push('')
+
+          let chunkUsed = 0
+          for (const c of dbChunks) {
+            const docTitle = sourceTitle.get(c.sourceDocumentId) ?? 'Document'
+            const section = c.sectionTitle ? ` › ${c.sectionTitle}` : ''
+            const body = truncate(c.text.trim(), 1000)
+            const entry = `**${docTitle}${section}**\n${body}\n`
+            if (chunkUsed + entry.length > chunkBudget) break
+            parts.push(entry)
+            chunkUsed += entry.length
+          }
+          parts.push('')
+        }
       }
     }
 

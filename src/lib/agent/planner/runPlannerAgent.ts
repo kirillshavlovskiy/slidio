@@ -1,5 +1,6 @@
 import { query } from '@anthropic-ai/claude-agent-sdk'
 import { agentModel, coerceAgentEffort, type Effort } from '@/lib/agent/models'
+import { logSdkTurn } from '@/lib/llmLog'
 import { buildPlannerSystemPrompt, buildPlannerUserPrompt } from './plannerPrompt'
 import { PlannerSession } from './plannerSession'
 import { createPlannerMcpServer, PLANNER_MCP_TOOL_NAMES } from './plannerMcpServer'
@@ -29,6 +30,7 @@ export async function runPlannerAgent(params: {
   knowledgeContext: string
   currentDeckSlideCount: number
   currentDeckTitles: string[]
+  hasCustomDesignSystem?: boolean
   effort: Effort
   resume?: string
   onEvent: (event: PlannerStreamEvent) => void
@@ -40,7 +42,7 @@ export async function runPlannerAgent(params: {
       ? `${params.currentDeckSlideCount} slides: ${params.currentDeckTitles.map((t, i) => `${i + 1}. ${t || '(untitled)'}`).join(', ')}`
       : 'Empty deck.'
 
-  const session = new PlannerSession(params.knowledgeContext, currentDeckSummary)
+  const session = new PlannerSession(params.knowledgeContext, currentDeckSummary, params.hasCustomDesignSystem ?? false)
   const abortController = new AbortController()
 
   if (params.abortSignal) {
@@ -96,6 +98,7 @@ export async function runPlannerAgent(params: {
       }
 
       if (message.type === 'assistant') {
+        logSdkTurn('planner', message)
         const thinking = extractBlocks(message, 'thinking')
         if (thinking) params.onEvent({ type: 'step', kind: 'thinking', label: thinking })
 
@@ -104,6 +107,7 @@ export async function runPlannerAgent(params: {
       }
 
       if (message.type === 'result') {
+        logSdkTurn('planner', message)
         sessionId = message.session_id
         if (message.subtype !== 'success' && !abortController.signal.aborted) {
           const errText = ('errors' in message && message.errors?.join('; ')) || message.subtype
@@ -116,6 +120,8 @@ export async function runPlannerAgent(params: {
       if (session.pendingAskUser) {
         // intentional pause — ask_user fired the abort; event already emitted by the tool handler
         askUser = session.pendingAskUser
+      } else if (session.plan) {
+        // intentional pause — submit_plan fired the abort; plan_ready already emitted
       } else {
         // user-initiated cancel
         params.onEvent({ type: 'error', message: 'Planner cancelled.' })

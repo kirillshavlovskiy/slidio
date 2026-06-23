@@ -1,65 +1,63 @@
 /**
- * Single model for the entire app. No cheap/haiku tier — it fails spatial edits.
+ * Model selection for the agentic pipeline.
  *
- * Default: gpt-4.1-mini (OpenAI) when OPENAI_API_KEY is set.
- * Fallback: claude-sonnet-4-6 (Anthropic).
+ * Effort tiers:
+ *   low / medium  → Haiku 4.5  (layout fixes, icon adds, recolors, simple edits)
+ *   high / xhigh  → Sonnet 4.6 (deck builds, complex multi-slide restructures)
+ *   max           → Sonnet 4.6
+ *
+ * Override both via env vars:
+ *   ANTHROPIC_MODEL       → forces ALL tiers to this model
+ *   ANTHROPIC_MODEL_HEAVY → overrides the high/xhigh/max tier only
  */
 
 export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 export type AgentProvider = 'openai' | 'anthropic' | 'claude-agent-sdk'
 export type AgentPhase = 'execute' | 'review'
 
-const HAIKU = /haiku/i
-
-export const OPENAI_AGENT_MODEL =
-  process.env.OPENAI_AGENT_MODEL || 'gpt-4.1-mini'
-
-export const ANTHROPIC_AGENT_MODEL =
-  process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6'
-
-/** Reject Haiku everywhere — no fallback, no second chance. */
-export function assertAllowedModel(model: string, context = 'model'): string {
-  if (HAIKU.test(model)) {
-    throw new Error(
-      `[models] ${context}: claude-haiku is removed from this project. Use gpt-4.1-mini or claude-sonnet-4-6.`
-    )
-  }
-  return model
-}
+const MODEL_LIGHT = 'claude-haiku-4-5-20251001'
+const MODEL_HEAVY = 'claude-sonnet-4-6'
 
 export function getAgentProvider(): AgentProvider {
-  if (process.env.AGENT_PROVIDER === 'claude-agent-sdk') return 'claude-agent-sdk'
-  if (process.env.AGENT_PROVIDER === 'anthropic') return 'anthropic'
-  if (process.env.AGENT_PROVIDER === 'openai' && process.env.OPENAI_API_KEY?.trim()) {
-    return 'openai'
+  return 'claude-agent-sdk'
+}
+
+/** Model for low/medium effort — cheap, fast, good enough for structured JSON edits. */
+export function agentModelLight(): string {
+  return process.env.ANTHROPIC_MODEL || MODEL_LIGHT
+}
+
+/** Model for high/xhigh/max effort — full Sonnet for deck builds and complex edits. */
+export function agentModelHeavy(): string {
+  return process.env.ANTHROPIC_MODEL || process.env.ANTHROPIC_MODEL_HEAVY || MODEL_HEAVY
+}
+
+/** Pick model based on effort level. */
+export function agentModel(effort?: Effort): string {
+  if (process.env.ANTHROPIC_MODEL) return process.env.ANTHROPIC_MODEL
+  switch (effort) {
+    case 'high':
+    case 'xhigh':
+    case 'max':
+      return MODEL_HEAVY
+    default:
+      return MODEL_LIGHT
   }
-  if (process.env.OPENAI_API_KEY?.trim()) return 'openai'
-  return 'anthropic'
 }
 
-/** One model for agent, router, graph extract, single-shot — everything. */
-export function agentModel(): string {
-  const provider = getAgentProvider()
-  const model =
-    provider === 'openai'
-      ? process.env.OPENAI_AGENT_MODEL || OPENAI_AGENT_MODEL
-      : process.env.ANTHROPIC_MODEL || ANTHROPIC_AGENT_MODEL
-  return assertAllowedModel(model, 'agent')
+export const PLANNING_MODEL = agentModelHeavy()
+export const REVIEW_MODEL = agentModelLight()
+
+export function modelForAgentPhase(phase: AgentPhase): string {
+  return phase === 'review' ? agentModelLight() : agentModelHeavy()
 }
 
-export const PLANNING_MODEL = agentModel()
-export const REVIEW_MODEL = agentModel()
-
-export function modelForAgentPhase(_phase: AgentPhase): string {
-  return agentModel()
-}
-
-export function modelForEffort(_effort: Effort): string {
-  return agentModel()
+export function modelForEffort(effort: Effort): string {
+  return agentModel(effort)
 }
 
 export function modelForLayoutReview(): string {
-  return agentModel()
+  return agentModelLight()
 }
 
 export function agentThinkingBudget(effort: Effort): number {
@@ -95,6 +93,6 @@ export function agentMaxTokens(effort: Effort): number {
 }
 
 export function coerceAgentEffort(effort: Effort | undefined): Effort {
-  if (!effort || effort === 'low') return 'medium'
+  if (!effort) return 'medium'
   return effort
 }

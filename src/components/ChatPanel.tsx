@@ -26,6 +26,7 @@ import {
   Eye,
   Layers,
   MessageSquare,
+  TrendingUp,
 } from 'lucide-react'
 import {
   Change,
@@ -46,6 +47,27 @@ import {
 import SlideCanvas from '@/components/SlideCanvas'
 
 export type ChatMode = 'agent'
+
+export interface PhaseTokenInfo {
+  phase: 'plan' | 'content' | 'layout'
+  slideCount: number
+  effort: string
+  cachingEnabled: boolean
+  /** Predicted token range */
+  predMin: number
+  predMax: number
+  /** Predicted cost range (USD) */
+  predCostMin: number
+  predCostMax: number
+  /** Predicted turn range */
+  predTurnsMin: number
+  predTurnsMax: number
+  /** Actual values — populated when the phase result arrives */
+  actualTokens?: number
+  actualCost?: number
+  actualTurns?: number
+  status: 'running' | 'done' | 'error'
+}
 
 export interface DisplayMessage {
   role: 'user' | 'assistant'
@@ -73,6 +95,8 @@ export interface DisplayMessage {
   deckPlan?: DeckPlan
   /** Phase 2 completion offer — renders PhaseCompleteBubble with layout-pass CTA. */
   layoutOffer?: { slideCount: number }
+  /** Token budget prediction + actuals for a pipeline phase. */
+  phaseTokenInfo?: PhaseTokenInfo
   /** Which multi-agent pipeline phase this bubble belongs to. */
   pipelinePhase?: 'plan' | 'content' | 'layout'
   // Cursor-style checkpoint: deck snapshot taken right before this user message
@@ -369,6 +393,8 @@ export default function ChatPanel({
                     slideCount={msg.layoutOffer.slideCount}
                     onRunLayoutPass={onRunLayoutPass}
                   />
+                ) : msg.phaseTokenInfo ? (
+                  <PhaseTokenBudgetBubble info={msg.phaseTokenInfo} />
                 ) : msg.assistantAnswer ? (
                   <AssistantAnswerBubble text={msg.assistantAnswer} />
                 ) : msg.agentStep ? (
@@ -1202,6 +1228,131 @@ const LAYOUT_ICON: Record<string, string> = {
   timeline: '📅',
   grid: '⊞',
   closing: '✔',
+}
+
+function PhaseTokenBudgetBubble({ info }: { info: PhaseTokenInfo }) {
+  const isDone = info.status === 'done'
+  const isError = info.status === 'error'
+
+  const phaseLabels: Record<PhaseTokenInfo['phase'], string> = {
+    plan: 'PHASE 1 — PLANNER',
+    content: 'PHASE 2 — CONTENT BUILD',
+    layout: 'PHASE 3 — LAYOUT PASS',
+  }
+
+  const fmtK = (n: number) => (n >= 1000 ? `${Math.round(n / 1000)}k` : `${n}`)
+  const fmtCost = (n: number) => `$${n.toFixed(2)}`
+
+  const tokenOk =
+    info.actualTokens != null && info.actualTokens <= info.predMax * 1.3
+  const tokenOver = info.actualTokens != null && info.actualTokens > info.predMax * 1.3
+  const tokenDelta =
+    info.actualTokens != null
+      ? tokenOver
+        ? { label: `+${fmtK(info.actualTokens - info.predMax)} over`, color: 'text-amber-400' }
+        : { label: 'in range', color: 'text-[#4ade80]' }
+      : null
+
+  const costDelta =
+    info.actualCost != null
+      ? info.actualCost > info.predCostMax * 1.3
+        ? { label: `+${fmtCost(info.actualCost - info.predCostMax)} over`, color: 'text-amber-400' }
+        : { label: 'in range', color: 'text-[#4ade80]' }
+      : null
+
+  return (
+    <div className="flex justify-start">
+      <div className="max-w-[96%] w-full bg-[#060e1a] border border-[#1e3a5f]/60 rounded-lg overflow-hidden text-xs">
+        {/* Header */}
+        <div className="flex items-center gap-2 px-3 py-1.5 border-b border-[#1e3a5f]/50 bg-[#050c16]">
+          <TrendingUp className="w-3 h-3 text-[#3b82f6] flex-shrink-0" />
+          <span className="text-[10px] font-bold tracking-wider text-[#3b82f6]">
+            {phaseLabels[info.phase]}
+          </span>
+          <span className="text-[10px] text-[#475569] ml-auto">
+            {info.slideCount} slides
+          </span>
+          {!isDone && !isError && (
+            <span className="text-[10px] text-amber-400 animate-pulse ml-1">● RUNNING</span>
+          )}
+          {isDone && (
+            <span className="text-[10px] text-[#4ade80] ml-1">✓ DONE</span>
+          )}
+          {isError && (
+            <span className="text-[10px] text-red-400 ml-1">✗ ERROR</span>
+          )}
+        </div>
+
+        {/* Prediction / Actual table */}
+        <div className="px-3 py-2.5">
+          <div className="grid grid-cols-[auto_1fr_1fr_1fr] gap-x-4 gap-y-1.5 items-baseline">
+            {/* Column headers */}
+            <div className="text-[10px] font-semibold tracking-wider text-[#334155] uppercase col-start-2">
+              Predicted
+            </div>
+            <div className="text-[10px] font-semibold tracking-wider text-[#334155] uppercase">
+              Actual
+            </div>
+            <div className="text-[10px] font-semibold tracking-wider text-[#334155] uppercase">
+              Δ
+            </div>
+
+            {/* Tokens row */}
+            <div className="text-[#475569]">Tokens</div>
+            <div className="text-[#94a3b8] font-mono">
+              {fmtK(info.predMin)}–{fmtK(info.predMax)}
+            </div>
+            <div className={`font-mono font-semibold ${isDone ? 'text-[#e2e8f0]' : 'text-[#334155]'}`}>
+              {info.actualTokens != null ? fmtK(info.actualTokens) : '—'}
+            </div>
+            <div className={`font-mono text-[10px] ${tokenDelta?.color ?? 'text-[#334155]'}`}>
+              {tokenDelta ? tokenDelta.label : '—'}
+            </div>
+
+            {/* Cost row */}
+            <div className="text-[#475569]">API cost</div>
+            <div className="text-[#94a3b8] font-mono">
+              {fmtCost(info.predCostMin)}–{fmtCost(info.predCostMax)}
+            </div>
+            <div className={`font-mono font-semibold ${isDone ? 'text-[#e2e8f0]' : 'text-[#334155]'}`}>
+              {info.actualCost != null ? fmtCost(info.actualCost) : '—'}
+            </div>
+            <div className={`font-mono text-[10px] ${costDelta?.color ?? 'text-[#334155]'}`}>
+              {costDelta ? costDelta.label : '—'}
+            </div>
+
+            {/* Turns row */}
+            <div className="text-[#475569]">Turns</div>
+            <div className="text-[#94a3b8] font-mono">
+              {info.predTurnsMin}–{info.predTurnsMax}
+            </div>
+            <div className={`font-mono font-semibold ${isDone ? 'text-[#e2e8f0]' : 'text-[#334155]'}`}>
+              {info.actualTurns != null ? info.actualTurns : '—'}
+            </div>
+            <div className="text-[#334155]">—</div>
+          </div>
+        </div>
+
+        {/* Footer */}
+        <div className="flex items-center gap-3 px-3 py-1.5 border-t border-[#1e3a5f]/30 text-[10px] text-[#334155]">
+          <span>effort: <span className="text-[#475569]">{info.effort}</span></span>
+          <span className="w-px h-3 bg-[#1e3a5f]" />
+          <span>
+            cache:{' '}
+            <span className={info.cachingEnabled ? 'text-[#4ade80]' : 'text-amber-400'}>
+              {info.cachingEnabled ? 'enabled' : 'disabled'}
+            </span>
+          </span>
+          {info.cachingEnabled && (
+            <>
+              <span className="w-px h-3 bg-[#1e3a5f]" />
+              <span className="text-[#334155]">system prompt cached across turns</span>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  )
 }
 
 function PhaseCompleteBubble({

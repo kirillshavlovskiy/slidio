@@ -45,6 +45,8 @@ export interface QuickAction {
   buildInstruction: (ctx: QuickActionContext) => string
   /** When true, scope is the whole deck (not the current selection). */
   deckWide?: boolean
+  /** When true, skip the expensive knowledge/design-system pipeline — action doesn't need it. */
+  skipKnowledge?: boolean
 }
 
 /** 1-based position label for a slide id, used to ground instructions for the agent. */
@@ -148,6 +150,7 @@ export const QUICK_ACTIONS: QuickAction[] = [
     icon: 'SplitSquareHorizontal',
     description: 'Divide the current slide into two balanced slides.',
     effort: 'high',
+    skipKnowledge: true,
     isAvailable: ctx => ctx.activeSlideIndex >= 0,
     buildInstruction: ctx => {
       const n = ctx.activeSlideIndex + 1
@@ -169,6 +172,7 @@ export const QUICK_ACTIONS: QuickAction[] = [
     icon: 'Combine',
     description: 'Combine the selected slides into one.',
     effort: 'high',
+    skipKnowledge: true,
     isAvailable: ctx => ctx.selectedSlideIds.length >= 2,
     unavailableHint: 'Select 2 or more slides to merge.',
     buildInstruction: ctx => {
@@ -190,6 +194,7 @@ export const QUICK_ACTIONS: QuickAction[] = [
     icon: 'LayoutGrid',
     description: 'Clean up overlaps, spacing, alignment, and margins in one pass.',
     effort: 'low',
+    skipKnowledge: true,
     isAvailable: ctx => ctx.activeSlideIndex >= 0,
     buildInstruction: ctx => {
       const targetIds = resolveQuickActionTargetSlideIds(ctx)
@@ -219,7 +224,11 @@ export const QUICK_ACTIONS: QuickAction[] = [
         targetIds.length === 1
           ? `the active slide ${scopeTag}`
           : `these ${targetIds.length} slides: ${scopeTag}`
-      return `Fix the layout of ${scopeLabel}. ${layoutRules}`
+      const workflowRule =
+        targetIds.length === 1
+          ? ` Workflow: get_slide → apply_changes (ALL fixes in ONE call) → render once → finish. Target 4–6 turns total.`
+          : ` Workflow: get_slides(slideIds:[${targetIds.map(id => `"${id}"`).join(',')}]) → apply_changes (ALL slides, ALL fixes in ONE call) → render 1–2 slides → finish. Do NOT loop slide-by-slide. Target 6–10 turns total.`
+      return `Fix the layout of ${scopeLabel}. ${layoutRules}${workflowRule}`
     },
   },
   {
@@ -228,26 +237,36 @@ export const QUICK_ACTIONS: QuickAction[] = [
     icon: 'Sparkles',
     description: 'Place a fitting icon next to each key point (or selected items).',
     effort: 'medium',
+    skipKnowledge: true,
     isAvailable: ctx => ctx.activeSlideIndex >= 0,
     buildInstruction: ctx => {
-      const n = ctx.activeSlideIndex + 1
+      const targetIds = resolveQuickActionTargetSlideIds(ctx)
+      const scopeTag = formatSlideScopeTag(ctx, targetIds)
       const sel = selectedElements(ctx)
-      // Element-scoped: if elements are selected, only add icons next to THOSE.
+      // Element-scoped: if specific elements are selected, only add icons next to THOSE (single slide).
       if (sel.length > 0) {
         const tags = sel.map(elementTag).join('; ')
         return (
-          `Add a relevant icon element next to ONLY these selected elements on slide ${n} (id: ${ctx.activeSlideId}): ${tags}. ` +
+          `Add a relevant icon element next to ONLY these selected elements on slide ${scopeTag}: ${tags}. ` +
           `For EACH selected element pick an icon (from the allowed icon list) whose meaning matches that item, ` +
           `size it ≈0.4–0.6in, color it to match the slide's accent or text color, and align it neatly to the ` +
           `LEFT of that element without overlapping its text (nudge the text right if needed). ` +
           `Do NOT touch other elements. Render to verify alignment.`
         )
       }
+      const scopeLabel =
+        targetIds.length === 1
+          ? `slide ${scopeTag}`
+          : `these ${targetIds.length} slides: ${scopeTag}`
       return (
-        `Add a relevant icon element next to each key point / bullet / KPI on slide ${n} (id: ${ctx.activeSlideId}). ` +
+        `Add a relevant icon element next to each key point / bullet / KPI on ${scopeLabel}. ` +
         `Pick icons (from the allowed icon list) whose meaning matches each item, size them ≈0.4–0.6in, ` +
         `color them to match the slide's accent or text color, and align them neatly to the LEFT of each item ` +
-        `without overlapping the text (nudge text right if needed). Render to verify alignment.`
+        `without overlapping the text (nudge text right if needed). ` +
+        (targetIds.length > 1
+          ? `Read all target slides first, then process each one. `
+          : ``) +
+        `Render to verify alignment.`
       )
     },
   },
@@ -257,26 +276,31 @@ export const QUICK_ACTIONS: QuickAction[] = [
     icon: 'BarChart3',
     description: 'Turn metrics on this slide (or selected items) into a chart.',
     effort: 'high',
+    skipKnowledge: true,
     isAvailable: ctx => ctx.activeSlideIndex >= 0,
     buildInstruction: ctx => {
-      const n = ctx.activeSlideIndex + 1
+      const targetIds = resolveQuickActionTargetSlideIds(ctx)
+      const scopeTag = formatSlideScopeTag(ctx, targetIds)
       const sel = selectedElements(ctx)
-      // Element-scoped: build the chart from the data in the selected elements.
+      // Element-scoped: build the chart from the data in the selected elements (single slide only).
       if (sel.length > 0) {
         const tags = sel.map(elementTag).join('; ')
         return (
-          `Using the metrics/numbers contained in ONLY these selected elements on slide ${n} (id: ${ctx.activeSlideId}): ${tags}, ` +
+          `Using the metrics/numbers contained in ONLY these selected elements on slide ${scopeTag}: ${tags}, ` +
           `build a single clear chart element (choose the best chart type). Place it where those elements are without ` +
           `overlapping the title, and remove or trim the now-redundant selected text elements you charted. ` +
           `Leave all OTHER elements untouched. If the selected elements contain no quantitative data, make NO changes ` +
           `and finish by saying there was nothing to visualize.`
         )
       }
+      const scopeLabel =
+        targetIds.length === 1
+          ? `slide ${scopeTag}`
+          : `these ${targetIds.length} slides: ${scopeTag}`
       return (
-        `Look at slide ${n} (id: ${ctx.activeSlideId}). If it contains metrics, numbers or comparisons, ` +
+        `Look at ${scopeLabel}. For each slide that contains metrics, numbers or comparisons, ` +
         `turn them into a clear chart element (choose the best chart type) placed so it does NOT overlap the title, ` +
-        `and trim now-redundant text. If there is no quantitative data to chart, make NO changes and finish by ` +
-        `saying there was nothing to visualize.`
+        `and trim now-redundant text. If a slide has no quantitative data to chart, skip it and note that in the summary.`
       )
     },
   },
@@ -286,9 +310,11 @@ export const QUICK_ACTIONS: QuickAction[] = [
     icon: 'Table',
     description: 'Build a clean table from data, or fix up an existing one.',
     effort: 'high',
+    skipKnowledge: true,
     isAvailable: ctx => ctx.activeSlideIndex >= 0,
     buildInstruction: ctx => {
-      const n = ctx.activeSlideIndex + 1
+      const targetIds = resolveQuickActionTargetSlideIds(ctx)
+      const scopeTag = formatSlideScopeTag(ctx, targetIds)
       const sel = selectedElements(ctx)
       const verify =
         `After the change, render the slide and visually CHECK the table: every column edge lines up, every row edge ` +
@@ -298,14 +324,18 @@ export const QUICK_ACTIONS: QuickAction[] = [
       if (sel.length > 0) {
         const tags = sel.map(elementTag).join('; ')
         return (
-          `On slide ${n} (id: ${ctx.activeSlideId}), improve the table using ONLY these selected elements: ${tags}. ` +
+          `On slide ${scopeTag}, improve the table using ONLY these selected elements: ${tags}. ` +
           `If they already form a table, re-snap and restyle it; if they are loose structured data, arrange them into ` +
           `a new table and trim the now-redundant selected text. ${TABLE_SPEC} Do NOT touch other elements. ` +
           `If the selected elements contain no tabular/structured data, make NO changes and say there was nothing to do. ${verify}`
         )
       }
+      const scopeLabel =
+        targetIds.length === 1
+          ? `slide ${scopeTag}`
+          : `these ${targetIds.length} slides: ${scopeTag}`
       return (
-        `Look at slide ${n} (id: ${ctx.activeSlideId}) and improve its table. ` +
+        `Look at ${scopeLabel} and improve ${targetIds.length === 1 ? 'its' : 'each slide\'s'} table. ` +
         `If it already has a table, clean it up and restyle it; if it instead has structured data, comparisons, lists ` +
         `of metrics or key/value pairs, arrange them into a new table and trim now-redundant text. ${TABLE_SPEC} ` +
         `If there is neither a table nor tabular data, make NO changes and say there was nothing to do. ${verify}`

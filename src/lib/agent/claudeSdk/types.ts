@@ -24,9 +24,14 @@ export type DeckAgentStreamEvent =
       sessionId?: string
       costUsd?: number
       numTurns?: number
+      totalTokens?: number
     }
+  /** Emitted after every apply_changes so the client can render slides progressively. */
+  | { type: 'slides_update'; slides: SlideData[] }
   | { type: 'ask_user'; intro?: string; questions: ClarificationQuestion[] }
   | { type: 'error'; message: string }
+  /** Emitted after each SDK turn with running cost totals. */
+  | { type: 'turn_stats'; turn: number; totalTokens: number; costUsd: number }
   // Multi-agent pipeline events
   | { type: 'phase_start'; phase: AgentPipelinePhase; label: string }
   | { type: 'plan_ready'; plan: DeckPlan; sessionId?: string }

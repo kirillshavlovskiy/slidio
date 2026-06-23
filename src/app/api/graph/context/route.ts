@@ -16,6 +16,7 @@ export async function GET(req: NextRequest) {
   const presentationId = req.nextUrl.searchParams.get('presentationId') || undefined
   const instruction = req.nextUrl.searchParams.get('instruction') || undefined
   const charBudget = Number(req.nextUrl.searchParams.get('charBudget') || 8000)
+  const chunkBudget = Number(req.nextUrl.searchParams.get('chunkBudget') || 0)
 
   try {
     const result = await buildGraphKnowledgeContext({
@@ -23,6 +24,7 @@ export async function GET(req: NextRequest) {
       presentationId,
       instruction,
       charBudget: Number.isFinite(charBudget) ? charBudget : 8000,
+      chunkBudget: Number.isFinite(chunkBudget) && chunkBudget > 0 ? chunkBudget : 0,
     })
     return NextResponse.json(result)
   } catch (err) {
